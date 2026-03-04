@@ -35,7 +35,7 @@ def get_problem_spec():
     }
 
 
-def evaluate(x: np.ndarray, w_imp=1*1.0, w_dum=1*0.001) -> dict:
+def evaluate(x: np.ndarray, w_imp=3*1.0, w_dum=3*0.001) -> dict:
     """
     Goldstein–Price function
     Domain: -2 <= x1, x2 <= 2

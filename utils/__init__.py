@@ -8,7 +8,7 @@ from utils.bounds_utils import (
     bounds_to_array,
 )
 from utils.dbscan_utils import auto_dbscan_eps_knee, auto_dbscan_eps_quantile
-from utils.result_loader import ResultLoader, StageResult
+from utils.result_loader import ResultLoader, TaskResult
 from utils.result_saver import ResultSaver
 from utils.feasibility import evaluate_feasibility
 
@@ -24,7 +24,7 @@ __all__ = [
     "auto_dbscan_eps_knee",
     "auto_dbscan_eps_quantile",
     "ResultLoader",
-    "StageResult",
+    "TaskResult",
     "ResultSaver",
     "evaluate_feasibility",
 ]

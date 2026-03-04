@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from typing import List, Dict
+from sklearn.metrics import r2_score
 
 
 class ImportanceAnalyzer:
@@ -19,40 +20,178 @@ class ImportanceAnalyzer:
         self,
         *,
         models: List,
+        fold_predictions: List[dict],
         X_ref: pd.DataFrame,
         problem_name: str,
         random_seed: int | None = None,
+        subset_mask: np.ndarray | None = None,
+        scale_label: str = "global",
     ) -> Dict[str, pd.DataFrame]:
         rows = []
-        X_used = self._subsample(X_ref)
+        model_by_run = {i: m for i, m in enumerate(models)}
+        mask = None
+        if subset_mask is not None:
+            mask = np.asarray(subset_mask, dtype=bool).reshape(-1)
+            if mask.shape[0] != len(X_ref):
+                raise RuntimeError(
+                    f"subset_mask length mismatch: {mask.shape[0]} != {len(X_ref)}"
+                )
+        for fold_item in fold_predictions:
+            run_id = int(fold_item["run_id"])
+            valid_idx = np.asarray(fold_item["valid_idx"], dtype=int)
+            if valid_idx.size == 0:
+                continue
+            if np.max(valid_idx) >= len(X_ref):
+                continue
+            model = model_by_run.get(run_id)
+            if model is None:
+                continue
 
-        for fold, model in enumerate(models):
             rng = np.random.default_rng(
-                None if random_seed is None else random_seed + fold
+                None if random_seed is None else random_seed + run_id
             )
-            X_num = self._prepare_input(model, X_used)
-            base = X_num.to_numpy()
-            columns = list(X_num.columns)
-
-            pred_base = model.model.predict(X_num)
+            X_num = self._prepare_input(model, X_ref)
+            valid_use = valid_idx
+            if mask is not None:
+                valid_use = valid_idx[mask[valid_idx]]
+            if valid_use.size < 2:
+                continue
+            if self.perm_sample_size is not None and valid_use.size > int(self.perm_sample_size):
+                valid_use = np.sort(
+                    rng.choice(valid_use, size=int(self.perm_sample_size), replace=False)
+                )
+            X_valid = X_num.iloc[valid_use]
+            base = X_valid.to_numpy()
+            if base.shape[0] == 0:
+                continue
+            columns = list(X_valid.columns)
+            pred_base = np.asarray(model.predict(base), dtype=float).reshape(-1)
 
             for idx, col in enumerate(columns):
                 X_perm = base.copy()
                 X_perm[:, idx] = rng.permutation(X_perm[:, idx])
-                pred_perm = model.model.predict(X_perm)
+                pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
                 delta = np.mean((pred_base - pred_perm) ** 2)
                 rows.append(
                     {
                         "problem": problem_name,
+                        "scale": str(scale_label),
                         "method": "PERM",
-                        "fold": fold,
+                        "fold": run_id,
                         "feature": col,
                         "delta": float(delta),
                     }
                 )
 
         return {
-            "perm_effect_raw": pd.DataFrame(rows),
+            "perm_effect_raw": pd.DataFrame(
+                rows,
+                columns=["problem", "scale", "method", "fold", "feature", "delta"],
+            ),
+        }
+
+    def run_score_drop(
+        self,
+        *,
+        models: List,
+        fold_predictions: List[dict],
+        X_ref: pd.DataFrame,
+        y_true: np.ndarray,
+        problem_name: str,
+        random_seed: int | None = None,
+        subset_mask: np.ndarray | None = None,
+        scale_label: str = "global",
+    ) -> Dict[str, pd.DataFrame]:
+        rows = []
+
+        model_by_run = {i: m for i, m in enumerate(models)}
+        mask = None
+        if subset_mask is not None:
+            mask = np.asarray(subset_mask, dtype=bool).reshape(-1)
+            if mask.shape[0] != len(X_ref):
+                raise RuntimeError(
+                    f"subset_mask length mismatch: {mask.shape[0]} != {len(X_ref)}"
+                )
+        for fold_item in fold_predictions:
+            run_id = int(fold_item["run_id"])
+            valid_idx = np.asarray(fold_item["valid_idx"], dtype=int)
+            if valid_idx.size == 0:
+                continue
+            if np.max(valid_idx) >= len(X_ref):
+                # split indices are based on full X_ref; skip if subsampled index mismatch
+                continue
+            model = model_by_run.get(run_id)
+            if model is None:
+                continue
+            rng = np.random.default_rng(
+                None if random_seed is None else random_seed + run_id
+            )
+            X_num = self._prepare_input(model, X_ref)
+            valid_use = valid_idx
+            if mask is not None:
+                valid_use = valid_idx[mask[valid_idx]]
+            if valid_use.size < 2:
+                continue
+            X_valid = X_num.iloc[valid_use]
+            y_valid = np.asarray(y_true, dtype=float)[valid_use]
+            if y_valid.size < 2:
+                continue
+
+            base_pred = np.asarray(fold_item.get("y_pred", []), dtype=float).reshape(-1)
+            if base_pred.size != np.asarray(valid_idx, dtype=int).size:
+                base_pred = np.asarray(model.predict(X_num.iloc[valid_idx].to_numpy()), dtype=float).reshape(-1)
+            if mask is not None:
+                base_pred = base_pred[mask[valid_idx]]
+            if base_pred.size != y_valid.size:
+                base_pred = np.asarray(model.predict(X_valid.to_numpy()), dtype=float).reshape(-1)
+            try:
+                r2_base = float(r2_score(y_valid, base_pred))
+            except Exception:
+                continue
+
+            base_arr = X_valid.to_numpy()
+            columns = list(X_valid.columns)
+            for idx, col in enumerate(columns):
+                X_perm = base_arr.copy()
+                X_perm[:, idx] = rng.permutation(X_perm[:, idx])
+                pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
+                try:
+                    r2_perm = float(r2_score(y_valid, pred_perm))
+                except Exception:
+                    continue
+                drop = float(r2_base - r2_perm)
+                drop_pos = float(max(drop, 0.0))
+                rows.append(
+                    {
+                        "problem": problem_name,
+                        "scale": str(scale_label),
+                        "method": "R2_DROP",
+                        "fold": run_id,
+                        "feature": col,
+                        "r2_base": r2_base,
+                        "r2_perm": r2_perm,
+                        "drop": drop,
+                        "drop_pos": drop_pos,
+                        "drop_sq": float(drop_pos ** 2),
+                    }
+                )
+
+        return {
+            "score_drop_raw": pd.DataFrame(
+                rows,
+                columns=[
+                    "problem",
+                    "scale",
+                    "method",
+                    "fold",
+                    "feature",
+                    "r2_base",
+                    "r2_perm",
+                    "drop",
+                    "drop_pos",
+                    "drop_sq",
+                ],
+            ),
         }
 
     # =================================================

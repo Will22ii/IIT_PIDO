@@ -4,7 +4,7 @@ from Explorer.executor.explorer_orchestrator import ExplorerOrchestrator
 
 
 def main():
-    # Development default: use latest metadata when explicit paths are not provided.
+    # Standalone 실행 시에는 metadata/model 경로를 명시하거나 pipeline run_context로 실행해야 한다.
     # Standalone example (custom data/model paths)
     # cfg = ExplorerConfig(
     #     user=ExplorerUserConfig(
@@ -20,10 +20,11 @@ def main():
     #         user=CAEUserConfig(problem_name="goldstein_price", seed=42, objective_sense="min"),
     #         system=CAESystemConfig(use_timestamp=True, allow_latest_fallback=True),
     #     ),
-    #     doe_csv_path="C:\\python\\project\\result\\doe\\doe_result_goldstein_price.csv",
-    #     doe_metadata_path="C:\\python\\project\\result\\doe\\doe_metadata_goldstein_price.json",
-    #     model_pkl_path="C:\\python\\project\\result\\modeler\\modeler_selected_models_goldstein_price.pkl",
-    #     modeler_metadata_path="C:\\python\\project\\result\\modeler\\modeler_metadata_goldstein_price_summary.json",
+    #     cae_metadata_path="result/run_<id>/CAE/metadata.json",
+    #     doe_csv_path="result/run_<id>/DOE/artifacts/public/doe_results.csv",
+    #     doe_metadata_path="result/run_<id>/DOE/metadata.json",
+    #     model_pkl_path="result/run_<id>/Modeler/artifacts/public/modeler_selected_models.pkl",
+    #     modeler_metadata_path="result/run_<id>/Modeler/metadata.json",
     # )
     cfg = ExplorerConfig(
         user=ExplorerUserConfig(
@@ -37,8 +38,9 @@ def main():
         ),
         cae=CAEConfig(
             user=CAEUserConfig(problem_name="goldstein_price", seed=42, objective_sense="min"),
-            system=CAESystemConfig(use_timestamp=True, allow_latest_fallback=True),
+            system=CAESystemConfig(use_timestamp=True, allow_latest_fallback=False),
         ),
+        cae_metadata_path=None,
         doe_csv_path=None,
         doe_metadata_path=None,
         model_pkl_path=None,

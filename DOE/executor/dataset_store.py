@@ -16,7 +16,7 @@ class StoredRow:
     constraints: Optional[Dict]
     feasible_pre: bool
     feasible_post: bool
-    feasible_final: bool
+    feasible: bool
     success: bool
     margin_pre: float
     margin_post: float
@@ -87,7 +87,7 @@ class DatasetStore:
     def feasible(self) -> np.ndarray:
         if self.size == 0:
             return np.empty((0,), dtype=bool)
-        return np.asarray([r.feasible_final for r in self._rows], dtype=bool)
+        return np.asarray([r.feasible for r in self._rows], dtype=bool)
 
     @property
     def success(self) -> np.ndarray:
@@ -115,7 +115,7 @@ class DatasetStore:
         constraints: Optional[Dict],
         feasible_pre: bool,
         feasible_post: bool,
-        feasible_final: bool,
+        feasible: bool,
         success: bool,
         margin_pre: float,
         margin_post: float,
@@ -134,7 +134,7 @@ class DatasetStore:
                 constraints=constraints,
                 feasible_pre=bool(feasible_pre),
                 feasible_post=bool(feasible_post),
-                feasible_final=bool(feasible_final),
+                feasible=bool(feasible),
                 success=bool(success),
                 margin_pre=float(margin_pre),
                 margin_post=float(margin_post),
@@ -159,8 +159,7 @@ class DatasetStore:
         data["objective"] = [r.objective for r in rows]
         data["feasible_pre"] = [r.feasible_pre for r in rows]
         data["feasible_post"] = [r.feasible_post for r in rows]
-        data["feasible_final"] = [r.feasible_final for r in rows]
-        data["feasible"] = [r.feasible_final for r in rows]
+        data["feasible"] = [r.feasible for r in rows]
         data["margin_pre"] = [r.margin_pre for r in rows]
         data["margin_post"] = [r.margin_post for r in rows]
         data["source"] = [r.source for r in rows]

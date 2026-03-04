@@ -8,7 +8,7 @@ import pandas as pd
 def resolve_selected_features(
     *,
     modeler_meta: dict | None,
-    modeler_stage_dir: str | None,
+    modeler_task_dir: str | None,
     modeler_df: pd.DataFrame | None,
     feature_cols: list[str] | None,
     doe_df: pd.DataFrame | None,
@@ -16,10 +16,10 @@ def resolve_selected_features(
     selected_features: list[str] = []
     if modeler_meta and modeler_meta.get("selected_features"):
         selected_features = list(modeler_meta["selected_features"])
-    elif modeler_stage_dir and modeler_meta and modeler_meta.get("artifacts", {}).get("selected_features"):
+    elif modeler_task_dir and modeler_meta and modeler_meta.get("artifacts", {}).get("selected_features"):
         selected_path = modeler_meta["artifacts"]["selected_features"]
         selected_df = pd.read_csv(
-            os.path.join(modeler_stage_dir, selected_path)
+            os.path.join(modeler_task_dir, selected_path)
         )
         if {"feature", "selected"}.issubset(selected_df.columns):
             selected_features = (

@@ -35,7 +35,7 @@ def get_problem_spec():
 
 
 
-def evaluate(x: np.ndarray, w_imp=1*1.0, w_dum=1*0.001) -> dict:
+def evaluate(x: np.ndarray, w_imp=1.0316*1.0, w_dum=1.0316*0.001) -> dict:
     """
     Six-Hump Camel Back function
     Global minima:

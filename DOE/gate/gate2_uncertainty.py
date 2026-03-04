@@ -2,19 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Dict, Sequence
 
 import numpy as np
 from scipy.stats import chi2
-
-
-@dataclass(frozen=True)
-class Gate2Result:
-    passed: bool
-    score: float
-    per_point_std: np.ndarray
-    info: Dict[str, float]
 
 
 class Gate2Uncertainty:

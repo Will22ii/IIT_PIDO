@@ -2,19 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
 
 from Modeler.Models.xgboost import XGBoostModel
-
-
-@dataclass(frozen=True)
-class SurrogateBundle:
-    gate1: List[XGBoostModel]
-    gate2: List[XGBoostModel]
 
 
 class SurrogateFactory:

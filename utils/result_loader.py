@@ -1,20 +1,27 @@
 # utils/result_loader.py
 
-import os
 import json
-from datetime import datetime
+import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 import pandas as pd
 
+TASK_DIR_MAP = {
+    "CAE": "CAE",
+    "DOE": "DOE",
+    "MODELER": "Modeler",
+    "EXPLORER": "Explorer",
+    "OPT": "OPT",
+}
+
 
 @dataclass
-class StageResult:
-    """
-    Container for stage result
-    """
-    stage: str
+class TaskResult:
+    """Container for task result."""
+
+    task: str
     problem_name: str
     csv_path: str
     pkl_path: Optional[str]
@@ -24,109 +31,48 @@ class StageResult:
 
 
 class ResultLoader:
-    """
-    Load stage-based results produced by ResultSaver
-
-    - CSV is mandatory
-    - metadata is optional
-    - latest result is selected by default
-    """
+    """Load v3 task results from run directories only."""
 
     def __init__(self):
         self.project_root = os.path.dirname(
             os.path.dirname(os.path.abspath(__file__))
         )
 
-    def _get_stage_dir(self, stage: str) -> str:
-        return os.path.join(self.project_root, "result", stage.lower())
-
-    def _find_latest_csv(self, stage: str, problem_name: str) -> str:
-        stage_dir = self._get_stage_dir(stage)
-
-        if not os.path.exists(stage_dir):
-            raise FileNotFoundError(f"Stage directory not found: {stage_dir}")
-
-        prefix = f"{stage.lower()}_result_{problem_name}"
-        candidates = [
-            f for f in os.listdir(stage_dir)
-            if f.startswith(prefix) and f.endswith(".csv")
-        ]
-
-        if not candidates:
-            raise FileNotFoundError(
-                f"No CSV found for stage='{stage}', problem='{problem_name}'"
-            )
-
-        candidates.sort(reverse=True)
-        return os.path.join(stage_dir, candidates[0])
+    def _task_dir_name(self, task: str) -> str:
+        task_key = str(task).strip().upper()
+        if task_key in TASK_DIR_MAP:
+            return TASK_DIR_MAP[task_key]
+        raise ValueError(f"Unsupported task: {task}")
 
     def _load_metadata(self, meta_path: str) -> Optional[dict]:
         if not meta_path or not os.path.exists(meta_path):
             return None
-        with open(meta_path, "r") as f:
+        with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def _find_latest_metadata_v1(
-        self,
-        stage: str,
-        problem_name: Optional[str] = None,
-    ) -> Optional[str]:
-        stage_dir = self._get_stage_dir(stage)
-        if not os.path.exists(stage_dir):
-            return None
-
-        meta_files = [
-            f for f in os.listdir(stage_dir)
-            if f.startswith(f"{stage.lower()}_metadata_") and f.endswith(".json")
-        ]
-        if not meta_files:
-            return None
-
-        best_path = None
-        best_time = None
-
-        for name in meta_files:
-            path = os.path.join(stage_dir, name)
-            metadata = self._load_metadata(path)
-            if not metadata:
-                continue
-            if problem_name and metadata.get("problem") != problem_name:
-                continue
-            created_at = metadata.get("created_at")
-            if not created_at:
-                continue
-            try:
-                created_dt = datetime.fromisoformat(created_at)
-            except ValueError:
-                continue
-            if best_time is None or created_dt > best_time:
-                best_time = created_dt
-                best_path = path
-
-        return best_path
-
-    def _find_latest_metadata_v2(
-        self,
-        stage: str,
-        problem_name: Optional[str] = None,
-    ) -> Optional[str]:
+    def _iter_run_dirs(self) -> list[str]:
         result_root = os.path.join(self.project_root, "result")
         if not os.path.exists(result_root):
-            return None
-
+            return []
         run_dirs = [
             d for d in os.listdir(result_root)
             if d.startswith("run_") and os.path.isdir(os.path.join(result_root, d))
         ]
-        if not run_dirs:
-            return None
+        run_dirs.sort(reverse=True)
+        return [os.path.join(result_root, d) for d in run_dirs]
 
+    def _find_latest_metadata_v3(
+        self,
+        task: str,
+        problem_name: Optional[str] = None,
+    ) -> Optional[str]:
+        task_dir_name = self._task_dir_name(task)
         best_path = None
         best_time = None
         best_mtime = None
 
-        for run_dir in run_dirs:
-            meta_path = os.path.join(result_root, run_dir, stage, "metadata.json")
+        for run_root in self._iter_run_dirs():
+            meta_path = os.path.join(run_root, task_dir_name, "metadata.json")
             if not os.path.exists(meta_path):
                 continue
             metadata = self._load_metadata(meta_path)
@@ -154,198 +100,87 @@ class ResultLoader:
 
         return best_path
 
-    def _find_latest_metadata(
-        self,
-        stage: str,
-        problem_name: Optional[str] = None,
-    ) -> Optional[str]:
-        v2_path = self._find_latest_metadata_v2(stage, problem_name)
-        v1_path = self._find_latest_metadata_v1(stage, problem_name)
-
-        if v2_path:
-            return v2_path
-        if v1_path:
-            return v1_path
-        return None
-
     def _resolve_metadata_path(
         self,
-        stage: str,
+        task: str,
         problem_name: Optional[str],
         metadata_path: Optional[str],
     ) -> Optional[str]:
         if metadata_path:
             if os.path.exists(metadata_path):
                 return metadata_path
+            candidate = os.path.join(self.project_root, metadata_path)
+            if os.path.exists(candidate):
+                return candidate
             print(f"[ResultLoader] Metadata path not found: {metadata_path}")
-        meta_path = self._find_latest_metadata(stage, problem_name)
+        meta_path = self._find_latest_metadata_v3(task, problem_name)
         if meta_path:
-            source = "v2" if os.path.basename(meta_path) == "metadata.json" else "v1"
             print(
-                f"[ResultLoader] No metadata_path provided; using latest ({source}): {meta_path}"
+                f"[ResultLoader] No metadata_path provided; using latest (v3): {meta_path}"
             )
         return meta_path
 
-    def _extract_timestamp(self, filename: str) -> Optional[datetime]:
-        stem = os.path.splitext(os.path.basename(filename))[0]
-        parts = stem.split("_")
-        if len(parts) < 3:
-            return None
-        date_part = parts[-2]
-        time_part = parts[-1]
-        try:
-            return datetime.strptime(f"{date_part}_{time_part}", "%Y%m%d_%H%M%S")
-        except ValueError:
-            return None
-
-    def _find_csv_for_metadata(self, stage: str, metadata: dict, meta_path: str) -> str:
-        stage_dir = self._get_stage_dir(stage)
-        csv_path = metadata.get("csv_path")
-        if csv_path:
-            if os.path.exists(csv_path):
-                return csv_path
-            print(f"[ResultLoader] CSV path not found: {csv_path}")
-
+    def _artifact_lookup(self, metadata: dict, key: str):
         artifacts = metadata.get("artifacts", {})
-        results_csv = artifacts.get("results_csv")
-        if results_csv:
-            base_dir = os.path.dirname(meta_path)
-            candidate = os.path.join(base_dir, results_csv)
-            if os.path.exists(candidate):
-                return candidate
-            print(f"[ResultLoader] CSV path not found: {candidate}")
-
-        if not os.path.exists(stage_dir):
-            raise FileNotFoundError(f"Stage directory not found: {stage_dir}")
-
-        problem_name = metadata.get("problem")
-        created_at = metadata.get("created_at")
-        if not problem_name or not created_at:
-            print(
-                "[ResultLoader] Metadata missing 'problem' or 'created_at'; "
-                "falling back to latest CSV."
-            )
-            return self._find_latest_csv(stage, problem_name or "")
-
-        try:
-            created_dt = datetime.fromisoformat(created_at)
-        except ValueError:
-            print(
-                f"[ResultLoader] Invalid created_at in metadata: {created_at}; "
-                "falling back to latest CSV."
-            )
-            return self._find_latest_csv(stage, problem_name)
-
-        prefix = f"{stage.lower()}_result_{problem_name}"
-        candidates = [
-            os.path.join(stage_dir, f)
-            for f in os.listdir(stage_dir)
-            if f.startswith(prefix) and f.endswith(".csv")
-        ]
-        if not candidates:
-            raise FileNotFoundError(
-                f"No CSV found for stage='{stage}', problem='{problem_name}'"
-            )
-
-        best_path = None
-        best_delta = None
-
-        for path in candidates:
-            ts = self._extract_timestamp(path)
-            if not ts:
-                continue
-            delta = abs((created_dt - ts).total_seconds())
-            if best_delta is None or delta < best_delta:
-                best_delta = delta
-                best_path = path
-
-        if best_path:
-            return best_path
-
-        print("[ResultLoader] No timestamp match; falling back to latest CSV.")
-        candidates.sort(reverse=True)
-        return candidates[0]
-
-    def _find_pkl_for_metadata(self, stage: str, metadata: dict, meta_path: str) -> Optional[str]:
-        if stage.upper() != "MODELER":
+        if not isinstance(artifacts, dict):
             return None
+        if key in artifacts:
+            return artifacts[key]
+        public = artifacts.get("public", {})
+        if isinstance(public, dict) and key in public:
+            return public[key]
+        meta = artifacts.get("meta", {})
+        if isinstance(meta, dict) and key in meta:
+            return meta[key]
+        debug = artifacts.get("debug", {})
+        if isinstance(debug, dict) and key in debug:
+            return debug[key]
+        return None
 
-        stage_dir = self._get_stage_dir(stage)
-        if not os.path.exists(stage_dir):
-            raise FileNotFoundError(f"Stage directory not found: {stage_dir}")
+    def _resolve_ref(self, base_dir: str, ref: str) -> str:
+        if os.path.isabs(ref):
+            return ref
+        return os.path.join(base_dir, ref)
 
-        model_path = metadata.get("model_path")
-        if model_path:
-            if os.path.exists(model_path):
-                return model_path
-            print(f"[ResultLoader] Model path not found: {model_path}")
+    def _find_csv_for_metadata(self, metadata: dict, meta_path: str) -> str:
+        results_csv = self._artifact_lookup(metadata, "results_csv")
+        if not results_csv:
+            raise RuntimeError("Metadata missing artifacts.public.results_csv")
+        candidate = self._resolve_ref(os.path.dirname(meta_path), results_csv)
+        if not os.path.exists(candidate):
+            raise FileNotFoundError(f"CSV not found: {candidate}")
+        return candidate
 
-        artifacts = metadata.get("artifacts", {})
-        model_artifact = artifacts.get("model_path")
-        if model_artifact:
-            base_dir = os.path.dirname(meta_path)
-            candidate = os.path.join(base_dir, model_artifact)
-            if os.path.exists(candidate):
-                return candidate
+    def _find_pkl_for_metadata(self, task: str, metadata: dict, meta_path: str) -> Optional[str]:
+        if str(task).strip().upper() != "MODELER":
+            return None
+        model_ref = self._artifact_lookup(metadata, "model_path")
+        if not model_ref:
+            return None
+        candidate = self._resolve_ref(os.path.dirname(meta_path), model_ref)
+        if not os.path.exists(candidate):
             print(f"[ResultLoader] Model path not found: {candidate}")
-
-        problem_name = metadata.get("problem")
-        created_at = metadata.get("created_at")
-        if not problem_name or not created_at:
             return None
+        return candidate
 
-        try:
-            created_dt = datetime.fromisoformat(created_at)
-        except ValueError:
-            return None
-
-        candidates = [
-            os.path.join(stage_dir, f)
-            for f in os.listdir(stage_dir)
-            if f.endswith(".pkl") and problem_name in f
-        ]
-        if not candidates:
-            return None
-
-        best_path = None
-        best_delta = None
-
-        for path in candidates:
-            ts = self._extract_timestamp(path)
-            if not ts:
-                continue
-            delta = abs((created_dt - ts).total_seconds())
-            if best_delta is None or delta < best_delta:
-                best_delta = delta
-                best_path = path
-
-        if best_path:
-            return best_path
-
-        print("[ResultLoader] No PKL timestamp match; falling back to latest PKL.")
-        candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-        return candidates[0]
-
-    def load_stage(
+    def load_task(
         self,
         *,
-        stage: str,
+        task: str,
         problem_name: Optional[str] = None,
         csv_path: Optional[str] = None,
         metadata_path: Optional[str] = None,
         allow_latest_fallback: bool = True,
-    ) -> StageResult:
-        metadata = None
-
+    ) -> TaskResult:
         if not allow_latest_fallback and not metadata_path:
             raise FileNotFoundError(
                 "metadata_path is required when latest fallback is disabled."
             )
 
-        meta_path = self._resolve_metadata_path(stage, problem_name, metadata_path)
+        meta_path = self._resolve_metadata_path(task, problem_name, metadata_path)
         if not meta_path:
             raise FileNotFoundError(
-                f"No metadata found for stage='{stage}'"
+                f"No metadata found for task='{task}'"
                 + (f", problem='{problem_name}'" if problem_name else "")
             )
         metadata = self._load_metadata(meta_path)
@@ -353,16 +188,15 @@ class ResultLoader:
             raise RuntimeError(f"Failed to load metadata: {meta_path}")
 
         if csv_path is None:
-            csv_path = self._find_csv_for_metadata(stage, metadata, meta_path)
-        else:
-            if not os.path.exists(csv_path):
-                raise FileNotFoundError(f"CSV not found: {csv_path}")
+            csv_path = self._find_csv_for_metadata(metadata, meta_path)
+        elif not os.path.exists(csv_path):
+            raise FileNotFoundError(f"CSV not found: {csv_path}")
 
-        pkl_path = self._find_pkl_for_metadata(stage, metadata, meta_path)
+        pkl_path = self._find_pkl_for_metadata(task, metadata, meta_path)
         df = pd.read_csv(csv_path)
 
-        return StageResult(
-            stage=stage.upper(),
+        return TaskResult(
+            task=str(task).strip().upper(),
             problem_name=metadata.get("problem", problem_name or ""),
             csv_path=csv_path,
             pkl_path=pkl_path,

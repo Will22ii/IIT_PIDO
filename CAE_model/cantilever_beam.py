@@ -37,7 +37,7 @@ def get_problem_spec():
             {
                 "id": "sigma_max_ub",
                 "name": "sigma_max",
-                "scope": "x_only",
+                "scope": "pre",
                 "type": "<=",
                 "limit": 5000.0,
                 "expr": "1000.0*36.0*H/(2*((1./12)*b2*(H - 2*h1)**3 + 2*((1./12)*b1*h1**3 + (1./4)*b1*h1*(H - h1)**2)))",
@@ -45,7 +45,7 @@ def get_problem_spec():
             {
                 "id": "delta_max_ub",
                 "name": "delta_max",
-                "scope": "x_only",
+                "scope": "pre",
                 "type": "<=",
                 "limit": 0.10,
                 "expr": "1000.0*(36.0**3)/(3*(10.0e6)*((1./12)*b2*(H - 2*h1)**3 + 2*((1./12)*b1*h1**3 + (1./4)*b1*h1*(H - h1)**2)))",
@@ -53,7 +53,7 @@ def get_problem_spec():
         ],
     }
 
-def evaluate(x: np.ndarray, w_imp=1*1.0, w_dum=1*0.001) -> dict:
+def evaluate(x: np.ndarray, w_imp=92.77*1.0, w_dum=92.77*0.001) -> dict:
     """
     Cantilever Beam surrogate evaluation
     목적: weight 최소화

@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import inspect
+import warnings
 from typing import Any, Callable, Optional
 
 import numpy as np
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.gaussian_process import GaussianProcessRegressor
 
 from utils.boundary_sampling import sample_boundary_corners, sample_boundary_partial
 from utils.bounds_utils import compute_spans_lbs, clamp_to_bounds
+from DOE.executor.anchor_refiner import (
+    AcquisitionOptimizer,
+    kernel_common_best,
+    kernel_stable_conservative,
+)
 from DOE.executor.constraint_filter import (
     clamp_ratio,
     evaluate_constraints_batch,
@@ -16,6 +24,7 @@ from DOE.executor.constraint_filter import (
     has_constraint_defs,
 )
 from DOE.executor.dataset_store import DatasetStore
+from DOE.executor.eval_sanitizer import sanitize_evaluate_output
 from DOE.executor.plan_builder import PlanBuilder
 from DOE.executor.execution_budget import ExecutionBudget
 from DOE.executor.local_sampler import LocalSampler
@@ -70,6 +79,13 @@ class AdditionalDOEOrchestrator:
         min_additional_rounds: int = 2,
         stop_span_ratio_threshold: float = 0.3,
         stop_anchor_spread_streak: int = 2,
+        stop_min_usable_np_ratio: float = 20.0,
+        probe_stage_enabled: bool = True,
+        probe_top_ratio: float = 0.3,
+        probe_max_points: int = 5,
+        probe_min_range_ratio: float = 0.25,
+        probe_std_scale: float = 2.0,
+        probe_perturb_ratio: float = 0.02,
         initial_probe_multiplier: float = 2.0,
         plan_filter_safety: float = 1.2,
         plan_filter_r_floor: float = 0.02,
@@ -92,9 +108,16 @@ class AdditionalDOEOrchestrator:
         local_dbscan_eps_max: float = 0.5,
         local_min_radius_ratio: float = 0.01,
         local_tol_ratio: float = 0.2,
+        local_refine_min_points: int = 15,
+        local_cluster_delta_ratio: float = 0.02,
+        local_singleton_box_ratio: float = 0.03,
+        local_phase1_kappa: float = 0.75,
+        local_phase2_kappa: float = 0.5,
+        local_base_perturb_ratio: float = 0.02,
         local_constraint_retry_count: int = 1,
         local_constraint_shrink_factor: float = 0.5,
         local_constraint_min_factor: float = 2.0,
+        local_exec_pick_mode: str = "random",
         post_use_penalty: bool = True,
         post_lambda_init: float = 2.0,
         post_lambda_min: float = 0.25,
@@ -106,6 +129,8 @@ class AdditionalDOEOrchestrator:
         post_clf_min_neg: int = 5,
         hpo_runner: Optional[Any] = None,
         force_baseline: bool = False,
+        local_gp_seed: int = 42,
+        local_gp_use_white_kernel: bool = False,
     ):
         self.bounds = bounds
         self.sampler = sampler
@@ -139,7 +164,18 @@ class AdditionalDOEOrchestrator:
         self.min_additional_rounds = int(min_additional_rounds)
         self.stop_span_ratio_threshold = float(stop_span_ratio_threshold)
         self.stop_anchor_spread_streak = int(stop_anchor_spread_streak)
+        self.stop_min_usable_np_ratio = float(stop_min_usable_np_ratio)
+        if self.stop_min_usable_np_ratio < 0.0:
+            raise ValueError("stop_min_usable_np_ratio must be >= 0")
+        self.probe_stage_enabled = bool(probe_stage_enabled)
+        self.probe_top_ratio = float(probe_top_ratio)
+        self.probe_max_points = max(int(probe_max_points), 1)
+        self.probe_min_range_ratio = float(probe_min_range_ratio)
+        self.probe_std_scale = float(probe_std_scale)
+        self.probe_perturb_ratio = float(probe_perturb_ratio)
         self._anchor_spread_zero_streak = 0
+        self._probe_stage_done = False
+        self._ever_phase2 = False
         self.initial_probe_multiplier = float(initial_probe_multiplier)
         self.plan_filter_safety = float(plan_filter_safety)
         self.plan_filter_r_floor = float(plan_filter_r_floor)
@@ -148,11 +184,11 @@ class AdditionalDOEOrchestrator:
         self.constraint_defs = list(constraint_defs or [])
         self.has_constraints = has_constraint_defs(self.constraint_defs)
         self.has_pre_constraints = any(
-            str(c.get("scope", "x_only")).strip().lower() == "x_only"
+            str(c.get("scope", "pre")).strip().lower() == "pre"
             for c in self.constraint_defs
         )
         self.has_post_constraints = any(
-            str(c.get("scope", "x_only")).strip().lower() == "cae_dependent"
+            str(c.get("scope", "pre")).strip().lower() == "post"
             for c in self.constraint_defs
         )
         self.constraint_rate_hat = 1.0
@@ -174,9 +210,19 @@ class AdditionalDOEOrchestrator:
         self.local_dbscan_eps_max = float(local_dbscan_eps_max)
         self.local_min_radius_ratio = float(local_min_radius_ratio)
         self.local_tol_ratio = float(local_tol_ratio)
+        self.local_refine_min_points = int(local_refine_min_points)
+        self.local_cluster_delta_ratio = float(local_cluster_delta_ratio)
+        self.local_singleton_box_ratio = float(local_singleton_box_ratio)
+        self.local_phase1_kappa = float(local_phase1_kappa)
+        self.local_phase2_kappa = float(local_phase2_kappa)
+        self.local_base_perturb_ratio = float(local_base_perturb_ratio)
         self.local_constraint_retry_count = int(local_constraint_retry_count)
         self.local_constraint_shrink_factor = float(local_constraint_shrink_factor)
         self.local_constraint_min_factor = float(local_constraint_min_factor)
+        mode = str(local_exec_pick_mode).strip().lower()
+        if mode not in {"random", "distance"}:
+            raise ValueError("local_exec_pick_mode must be one of: random, distance")
+        self.local_exec_pick_mode = mode
         self.post_use_penalty = bool(post_use_penalty)
         self.post_lambda_init = float(post_lambda_init)
         self.post_lambda_min = float(post_lambda_min)
@@ -193,14 +239,18 @@ class AdditionalDOEOrchestrator:
         self._post_model = None
         self.post_policy_log: list[dict] = []
         self.force_baseline = bool(force_baseline)
+        self.local_gp_seed = int(local_gp_seed)
+        self.local_gp_use_white_kernel = bool(local_gp_use_white_kernel)
 
         self.store = DatasetStore(dim=len(bounds))
         self.budget = ExecutionBudget(total=self.total_budget)
 
         self.hpo_runner = hpo_runner
         self._hpo_done = False
+        self.hpo_min_samples = 10
         self.failure_reason: str | None = None
         self.local_metrics: list[dict] = []
+        self._probe_acq = AcquisitionOptimizer()
 
         # Global plan builder is fixed LHS (per your scenario)
         self.plan_builder = PlanBuilder(bounds=bounds, rng=rng)
@@ -208,6 +258,10 @@ class AdditionalDOEOrchestrator:
         self.local_sampler = LocalSampler(
             bounds=self.bounds,
             rng=self.rng,
+            gp_seed=self.local_gp_seed,
+            local_gp_use_white_kernel=self.local_gp_use_white_kernel,
+            pre_feasible_fn=self._is_pre_feasible,
+            post_feasible_prob_fn=self._post_feasible_prob,
             local_anchor_best_k=self.local_anchor_best_k,
             local_anchor_small_k=self.local_anchor_small_k,
             local_anchor_best_ratio=self.local_anchor_best_ratio,
@@ -219,6 +273,12 @@ class AdditionalDOEOrchestrator:
             local_dbscan_eps_max=self.local_dbscan_eps_max,
             local_min_radius_ratio=self.local_min_radius_ratio,
             local_tol_ratio=self.local_tol_ratio,
+            local_refine_min_points=self.local_refine_min_points,
+            local_cluster_delta_ratio=self.local_cluster_delta_ratio,
+            local_singleton_box_ratio=self.local_singleton_box_ratio,
+            local_phase1_kappa=self.local_phase1_kappa,
+            local_phase2_kappa=self.local_phase2_kappa,
+            local_base_perturb_ratio=self.local_base_perturb_ratio,
         )
 
         # Exec selection is handled inline (rank + random mix)
@@ -249,6 +309,220 @@ class AdditionalDOEOrchestrator:
                 small_k -= 1
 
         return max_k, best_k, small_k
+
+    def _fit_probe_gp(
+        self,
+        *,
+        X: np.ndarray,
+        y: np.ndarray,
+    ) -> tuple[GaussianProcessRegressor | None, bool]:
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=float).reshape(-1)
+        if X.ndim != 2 or X.shape[0] < 2 or X.shape[0] != y.shape[0]:
+            return None, False
+        try:
+            gp = GaussianProcessRegressor(
+                kernel=kernel_common_best(
+                    X.shape[1],
+                    include_white=self.local_gp_use_white_kernel,
+                ),
+                alpha=1e-6,
+                normalize_y=True,
+                n_restarts_optimizer=1,
+                random_state=self.local_gp_seed,
+            )
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                gp.fit(X, y)
+            return gp, False
+        except Exception:
+            try:
+                gp = GaussianProcessRegressor(
+                    kernel=kernel_stable_conservative(
+                        X.shape[1],
+                        include_white=self.local_gp_use_white_kernel,
+                    ),
+                    alpha=1e-5,
+                    normalize_y=False,
+                    n_restarts_optimizer=1,
+                    random_state=self.local_gp_seed,
+                )
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                    gp.fit(X, y)
+                return gp, True
+            except Exception:
+                return None, True
+
+    def _dedup_candidates_norm(
+        self,
+        *,
+        X: np.ndarray,
+        spans: np.ndarray,
+        dedup_tol: float,
+    ) -> np.ndarray:
+        X = np.asarray(X, dtype=float)
+        if X.size == 0:
+            return X
+        kept: list[np.ndarray] = []
+        for x in X:
+            if not kept:
+                kept.append(x)
+                continue
+            ref = np.vstack(kept)
+            d = np.linalg.norm((ref - x.reshape(1, -1)) / spans.reshape(1, -1), axis=1)
+            if bool(np.all(d > dedup_tol)):
+                kept.append(x)
+        return np.vstack(kept) if kept else np.empty((0, X.shape[1]), dtype=float)
+
+    def _run_probe_stage(
+        self,
+        *,
+        round_idx: int,
+        objective_sense: str,
+    ) -> bool:
+        remaining = int(self.budget.remaining)
+        if remaining <= 0:
+            return True
+        max_exec = min(int(self.probe_max_points), remaining)
+        if max_exec <= 0:
+            return True
+
+        X_hist = np.asarray(self.store.X_success, dtype=float)
+        y_hist = np.asarray(self.store.y_success, dtype=float).reshape(-1)
+        if X_hist.ndim != 2 or X_hist.shape[0] < 2 or X_hist.shape[0] != y_hist.shape[0]:
+            print(f"[ProbeStage] stage={round_idx} skipped: insufficient history")
+            return True
+
+        gp_model, fallback_used = self._fit_probe_gp(X=X_hist, y=y_hist)
+        if gp_model is None:
+            print(f"[ProbeStage] stage={round_idx} skipped: gp_fit_failed")
+            return True
+
+        sense = str(objective_sense).strip().lower()
+        n_hist = X_hist.shape[0]
+        n_top = min(max(2, int(np.ceil(n_hist * self.probe_top_ratio))), n_hist)
+        if sense == "min":
+            top_idx = np.argsort(y_hist)[:n_top]
+            best_idx = int(np.argmin(y_hist))
+        else:
+            top_idx = np.argsort(-y_hist)[:n_top]
+            best_idx = int(np.argmax(y_hist))
+        top_points = X_hist[top_idx]
+        center = np.mean(top_points, axis=0)
+        stds = np.std(top_points, axis=0)
+
+        spans, lbs = compute_spans_lbs(self.bounds)
+        ubs = lbs + spans
+        range_half = np.maximum(
+            stds * float(self.probe_std_scale),
+            spans * float(self.probe_min_range_ratio),
+        )
+        lb_probe = np.maximum(center - range_half, lbs)
+        ub_probe = np.minimum(center + range_half, ubs)
+        too_small = (ub_probe - lb_probe) < 1e-12
+        if np.any(too_small):
+            best_x = X_hist[best_idx]
+            eps = 0.5 * spans * max(float(self.probe_perturb_ratio), 1e-3)
+            lb_probe[too_small] = np.maximum(best_x[too_small] - eps[too_small], lbs[too_small])
+            ub_probe[too_small] = np.minimum(best_x[too_small] + eps[too_small], ubs[too_small])
+
+        best_x = X_hist[best_idx]
+        best_y = float(y_hist[best_idx])
+        probe_span = np.maximum(ub_probe - lb_probe, 1e-12)
+        starts: list[np.ndarray] = [np.clip(best_x.copy(), lb_probe, ub_probe)]
+        for _ in range(2):
+            starts.append(
+                np.clip(
+                    best_x + self.rng.normal(0.0, float(self.probe_perturb_ratio) * probe_span),
+                    lb_probe,
+                    ub_probe,
+                )
+            )
+        for _ in range(2):
+            starts.append(self.rng.uniform(lb_probe, ub_probe))
+
+        use_post_penalty = bool(self.post_use_penalty and self.has_post_constraints)
+        post_lambda = float(self.post_lambda_current if use_post_penalty else 0.0)
+        candidates: list[np.ndarray] = []
+        for x0 in starts:
+            x_opt = self._probe_acq.optimize(
+                model=gp_model,
+                y_best=best_y,
+                lb=lb_probe,
+                ub=ub_probe,
+                starts=np.asarray(x0, dtype=float).reshape(1, -1),
+                objective_sense=sense,
+                acq_type="LCB",
+                kappa=float(self.local_phase2_kappa),
+                pre_feasible_fn=self._is_pre_feasible,
+                post_feasible_prob_fn=self._post_feasible_prob if use_post_penalty else None,
+                post_penalty_lambda=post_lambda,
+            )
+            if x_opt is not None:
+                candidates.append(np.asarray(x_opt, dtype=float).reshape(-1))
+
+        if not candidates:
+            print(f"[ProbeStage] stage={round_idx} skipped: no_opt_candidates")
+            return True
+
+        min_exec = max(int(self.total_budget * self.exec_ratio), self.exec_min)
+        n_exec = min(min_exec, remaining)
+        n_plan_target = self._compute_n_plan(remaining=remaining, round_idx=round_idx)
+        if n_plan_target < 3 * n_exec:
+            n_plan_target = 3 * n_exec
+        n_plan = self._plan_generation_count(target_count=n_plan_target)
+        stage = round_idx + 1
+        n_divisions = int(n_plan * (2 ** (stage // 2)))
+        tol_probe = 0.5 * np.sqrt(len(self.bounds)) * (1.0 / max(n_divisions, 1))
+
+        X_probe = self._dedup_candidates_norm(
+            X=np.vstack(candidates),
+            spans=spans,
+            dedup_tol=tol_probe,
+        )
+        if X_probe.size == 0:
+            print(f"[ProbeStage] stage={round_idx} skipped: dedup_internal_empty")
+            return True
+
+        keep_hist = self._dedup_mask_against_history_norm(
+            X_new=X_probe,
+            X_old=self.store.X,
+            spans=spans,
+            dedup_tol=tol_probe,
+        )
+        X_probe = X_probe[keep_hist]
+        if X_probe.size == 0:
+            print(f"[ProbeStage] stage={round_idx} skipped: dedup_history_empty")
+            return True
+
+        X_probe_f, c_probe_f, m_probe_f, _ = self._filter_by_constraints(
+            X_probe,
+            update_ratio=False,
+        )
+        if X_probe_f.size == 0:
+            print(f"[ProbeStage] stage={round_idx} skipped: pre_constraint_empty")
+            return True
+
+        X_exec_probe = X_probe_f[:max_exec]
+        c_exec_probe = c_probe_f[:max_exec]
+        m_exec_probe = np.asarray(m_probe_f[:max_exec], dtype=float)
+        print(
+            "[ProbeStage] "
+            f"stage={round_idx} candidates={len(candidates)} "
+            f"kept={X_exec_probe.shape[0]} fallback_kernel={fallback_used}"
+        )
+        executed = self._execute_points(
+            X_exec_probe,
+            source="additional",
+            round_idx=round_idx,
+            exec_scope="probe",
+            constraints_payloads=c_exec_probe,
+            constraint_margins=m_exec_probe,
+        )
+        if not executed and self.failure_reason is None:
+            self._set_failure("FAILED_BUDGET", stage=round_idx)
+        return bool(executed)
 
     def _update_constraint_ratio(self, *, n_generated: int, n_feasible: int) -> None:
         if n_generated <= 0:
@@ -282,7 +556,7 @@ class AdditionalDOEOrchestrator:
                 X=X,
                 var_names=self.var_names,
                 constraint_defs=self.constraint_defs,
-                scope="x_only",
+                scope="pre",
             )
 
         if update_ratio:
@@ -316,11 +590,11 @@ class AdditionalDOEOrchestrator:
         n_gen = int(np.ceil(target_count * self.plan_filter_safety * inv))
         return max(n_gen, target_count)
 
-    def _update_post_rate(self, *, feasible_final: bool) -> None:
+    def _update_post_rate(self, *, feasible: bool) -> None:
         if not self.has_post_constraints:
             return
         self._post_eval_total += 1
-        if bool(feasible_final):
+        if bool(feasible):
             self._post_feas_total += 1
         raw = self._post_feas_total / max(self._post_eval_total, 1)
         self.post_feasible_rate_hat = clamp_ratio(raw, floor=self.post_feasible_rate_floor)
@@ -346,7 +620,7 @@ class AdditionalDOEOrchestrator:
         X = self.store.X
         if X.size == 0:
             return
-        y = np.asarray([1 if r.feasible_final else 0 for r in self.store.rows], dtype=int)
+        y = np.asarray([1 if r.feasible else 0 for r in self.store.rows], dtype=int)
         if y.shape[0] != X.shape[0]:
             return
 
@@ -390,6 +664,27 @@ class AdditionalDOEOrchestrator:
         except Exception as exc:
             print(f"[AdditionalDOE] post feasibility model prediction skipped: {exc}")
             return np.ones((X_candidate.shape[0],), dtype=float)
+
+    def _is_pre_feasible(self, x: np.ndarray) -> bool:
+        x_arr = np.asarray(x, dtype=float).reshape(-1)
+        if not self.has_pre_constraints:
+            return True
+        _payload, feasible, _margin = evaluate_constraints_point(
+            x=x_arr,
+            var_names=self.var_names,
+            constraint_defs=self.constraint_defs,
+            scope="pre",
+        )
+        return bool(feasible)
+
+    def _post_feasible_prob(self, x: np.ndarray) -> float:
+        x_arr = np.asarray(x, dtype=float).reshape(1, -1)
+        if not (self.post_use_penalty and self.has_post_constraints):
+            return 1.0
+        p = self._predict_post_feasible_prob(x_arr)
+        if p.size == 0:
+            return 1.0
+        return float(np.clip(p.reshape(-1)[0], 0.0, 1.0))
 
     def _make_penalized_models(self, *, models: list, objective_sense: str) -> list:
         if not (self.post_use_penalty and self.has_post_constraints and self._post_model is not None):
@@ -541,44 +836,39 @@ class AdditionalDOEOrchestrator:
         self._fit_post_feasibility_model()
         self._update_post_lambda()
 
-
-
-        # -------------------------------------------------
-        # HPO: run ONCE after initial DOE
-        # -------------------------------------------------
-        if self.hpo_runner is not None and not self._hpo_done:
-            # run HPO using initial DOE data
-            result = self.hpo_runner.run_xgb(
-                X=self.store.X,
-                y=self.store.y,
-                base_random_seed=base_seed,
-                problem_name=problem_name,
-            )
-
-            best_params = result["best_params"]
-
-
-            # inject best params into surrogate factory
-            self.surrogate_factory.xgb_params = {
-                **self.surrogate_factory.xgb_params,
-                **best_params,
-            }
-
-            self._hpo_done = True
-
         # --------------------------------------------
         # Additional DOE loop
         # --------------------------------------------
         round_idx = 0
         phase = 1
+        self._probe_stage_done = False
+        self._ever_phase2 = False
 
         while not self.budget.exhausted() and round_idx < self.max_additional_stages:
             remaining = self.budget.remaining
             if remaining <= 0:
                 break
 
+            self._maybe_run_hpo(problem_name=problem_name, base_seed=base_seed)
             self._fit_post_feasibility_model()
             self._update_post_lambda()
+            if phase == 2:
+                self._ever_phase2 = True
+            probe_ready = bool(
+                self.probe_stage_enabled
+                and (not self._probe_stage_done)
+                and self._ever_phase2
+                and (round_idx + 1 >= self.min_additional_rounds)
+            )
+            if probe_ready:
+                probe_ok = self._run_probe_stage(
+                    round_idx=round_idx,
+                    objective_sense=objective_sense,
+                )
+                self._probe_stage_done = True
+                if not probe_ok:
+                    break
+                continue
             self.post_policy_log.append(
                 {
                     "stage": int(round_idx),
@@ -621,8 +911,8 @@ class AdditionalDOEOrchestrator:
             )
 
             n_plan_target = self._compute_n_plan(remaining=remaining, round_idx=round_idx)
-            if n_plan_target < 2 * n_exec:
-                n_plan_target = 2 * n_exec
+            if n_plan_target < 3 * n_exec:
+                n_plan_target = 3 * n_exec
             n_plan = self._plan_generation_count(target_count=n_plan_target)
             stage = round_idx + 1
             base_divisions = n_plan
@@ -743,6 +1033,10 @@ class AdditionalDOEOrchestrator:
                         y_candidate=y_candidate,
                         n_samples=n_local,
                         objective_sense=objective_sense,
+                        phase=phase,
+                        stage_eps=tol,
+                        use_post_penalty=bool(self.post_use_penalty and self.has_post_constraints),
+                        post_penalty_lambda=float(self.post_lambda_current),
                         local_radius_ratio=radius_ratio,
                         debug_best_x=debug_best_x,
                         anchor_max=anchor_max,
@@ -780,41 +1074,56 @@ class AdditionalDOEOrchestrator:
             # -----------------------------
             # 3) Gate evaluation (on X_plan, once per stage)
             # -----------------------------
-            if X_plan.shape[0] < 2 * n_exec:
-                self._set_failure("FAILED_INSUFFICIENT_PLAN", stage=round_idx)
-                break
-            g2 = self.gate2.evaluate(models=gate2_eval_models, X_candidate=X_plan)
-            g1 = self.gate1.evaluate(
-                models=gate1_eval_models,
-                X_candidate=X_plan,
-                bounds=self.bounds,
-                eps=0.5 * (1.0 / n_divisions),
-            )
-            print(
-                f"[Gate1] stage={round_idx} score={g1.get('score')} passed={g1.get('passed')}"
-            )
-            print(
-                f"[Gate2] stage={round_idx} score={g2.get('score')} passed={g2.get('passed')}"
-            )
-
-            decision = self.gate_manager.evaluate(
-                gate1_result=g1,
-                gate2_result=g2,
-            )
-
-            # If gates say stop, allow one final execution from current plan
-            gate_stop = bool(decision.get("gate_stop", False))
-            if round_idx + 1 >= self.min_additional_rounds:
-                if self._should_stop_by_convergence():
-                    gate_stop = True
+            if n_exec < self.exec_min:
+                print(
+                    f"[AdditionalDOE] stage={round_idx} n_exec={n_exec} < exec_min={self.exec_min}, "
+                    "skip gate evaluation and run tail budget only."
+                )
+                gate_stop = False
+                next_phase = phase
             else:
-                if gate_stop:
-                    gate_stop = False
-            if gate_stop:
-                print(f"[AdditionalDOE] gate_stop=True, executing final batch (stage={round_idx})")
+                if X_plan.shape[0] < 3 * n_exec:
+                    self._set_failure("FAILED_INSUFFICIENT_PLAN", stage=round_idx)
+                    break
+                g2 = self.gate2.evaluate(models=gate2_eval_models, X_candidate=X_plan)
+                g1 = self.gate1.evaluate(
+                    models=gate1_eval_models,
+                    X_candidate=X_plan,
+                    bounds=self.bounds,
+                    eps=0.5 * (1.0 / n_divisions),
+                )
+                print(
+                    f"[Gate1] stage={round_idx} score={g1.get('score')} passed={g1.get('passed')}"
+                )
+                print(
+                    f"[Gate2] stage={round_idx} score={g2.get('score')} passed={g2.get('passed')}"
+                )
 
-            g1_passed = bool(decision.get("gate1_passed", False))
-            next_phase = 2 if g1_passed else 1
+                decision = self.gate_manager.evaluate(
+                    gate1_result=g1,
+                    gate2_result=g2,
+                )
+
+                # If gates say stop, allow one final execution from current plan
+                gate_stop = bool(decision.get("gate_stop", False))
+                p_dim = max(int(len(self.bounds)), 1)
+                usable_n = int(self._usable_sample_count())
+                usable_np_ratio = float(usable_n) / float(p_dim)
+                can_stop_by_data = bool(usable_np_ratio >= self.stop_min_usable_np_ratio)
+                can_stop_by_round = bool(round_idx + 1 >= self.min_additional_rounds)
+
+                if can_stop_by_round and can_stop_by_data:
+                    if self._should_stop_by_convergence():
+                        gate_stop = True
+                else:
+                    gate_stop = False
+                if gate_stop:
+                    print(f"[AdditionalDOE] gate_stop=True, executing final batch (stage={round_idx})")
+
+                g1_passed = bool(decision.get("gate1_passed", False))
+                next_phase = 2 if g1_passed else 1
+                if next_phase == 2:
+                    self._ever_phase2 = True
 
             # -----------------------------
             # 4) Filter X_plan then select X_exec
@@ -823,6 +1132,10 @@ class AdditionalDOEOrchestrator:
             n_exec_global = int(round(n_exec * ratio_global))
             n_exec_global = min(max(n_exec_global, 0), n_exec)
             n_exec_local = n_exec - n_exec_global
+            if gate_stop:
+                # Final stage policy: exploit locally as much as possible.
+                n_exec_global = 0
+                n_exec_local = n_exec
 
             print(
                 f"[AdditionalDOE] stage={round_idx} phase={phase} "
@@ -886,26 +1199,59 @@ class AdditionalDOEOrchestrator:
                 margins_g_f = margins_g_f[mask_g_anchor] if margins_g_f.size == mask_g_anchor.shape[0] else margins_g_f
                 boundary_flags_f = boundary_flags_f[mask_g_anchor] if boundary_flags_f.size == mask_g_anchor.shape[0] else boundary_flags_f
 
-            def _select_global_exec() -> tuple[np.ndarray, list[dict], np.ndarray]:
-                if n_exec_global <= 0 or Xg_f.size == 0:
+            def _select_global_exec(
+                *,
+                n_pick_override: int | None = None,
+                X_exclude: np.ndarray | None = None,
+            ) -> tuple[np.ndarray, list[dict], np.ndarray]:
+                n_pick = int(n_exec_global if n_pick_override is None else n_pick_override)
+                if n_pick <= 0 or Xg_f.size == 0:
+                    return np.empty((0, Xg_f.shape[1]), dtype=float), [], np.empty((0,), dtype=float)
+
+                Xg_work = np.asarray(Xg_f, dtype=float)
+                constraints_work = list(constraints_g_f)
+                margins_work = np.asarray(margins_g_f, dtype=float)
+                boundary_work = np.asarray(boundary_flags_f, dtype=bool)
+
+                if X_exclude is not None and np.asarray(X_exclude).size > 0:
+                    mask_ex = self._dedup_mask_against_other_norm(
+                        X_new=Xg_work,
+                        X_ref=np.asarray(X_exclude, dtype=float),
+                        spans=spans,
+                        dedup_tol=tol,
+                    )
+                    Xg_work = Xg_work[mask_ex]
+                    constraints_work = [constraints_work[i] for i in np.where(mask_ex)[0]]
+                    margins_work = (
+                        margins_work[mask_ex]
+                        if margins_work.size == mask_ex.shape[0]
+                        else margins_work
+                    )
+                    boundary_work = (
+                        boundary_work[mask_ex]
+                        if boundary_work.size == mask_ex.shape[0]
+                        else boundary_work
+                    )
+
+                if Xg_work.size == 0:
                     return np.empty((0, Xg_f.shape[1]), dtype=float), [], np.empty((0,), dtype=float)
 
                 order_g = self._rank_by_pred(
                     models=gate1_models,
-                    X_candidate=Xg_f,
+                    X_candidate=Xg_work,
                     objective_sense=objective_sense,
                 )
-                n_boundary_exec = int(round(n_exec_global * boundary_ratio))
-                n_boundary_exec = min(max(n_boundary_exec, 0), n_exec_global)
-                n_margin_exec = int(round(n_exec_global * self.global_margin_ratio))
-                n_margin_exec = min(max(n_margin_exec, 0), n_exec_global)
-                n_top_exec = int(round(n_exec_global * self.global_top_ratio))
-                n_top_exec = min(max(n_top_exec, 0), n_exec_global)
-                if n_exec_global > 0 and n_top_exec < 1:
+                n_boundary_exec = int(round(n_pick * boundary_ratio))
+                n_boundary_exec = min(max(n_boundary_exec, 0), n_pick)
+                n_margin_exec = int(round(n_pick * self.global_margin_ratio))
+                n_margin_exec = min(max(n_margin_exec, 0), n_pick)
+                n_top_exec = int(round(n_pick * self.global_top_ratio))
+                n_top_exec = min(max(n_top_exec, 0), n_pick)
+                if n_pick > 0 and n_top_exec < 1:
                     n_top_exec = 1
 
                 # top-k 최소 1개를 보장하기 위해 boundary/margin을 먼저 캡한다.
-                max_for_pre_buckets = max(n_exec_global - n_top_exec, 0)
+                max_for_pre_buckets = max(n_pick - n_top_exec, 0)
                 if (n_boundary_exec + n_margin_exec) > max_for_pre_buckets:
                     overflow = (n_boundary_exec + n_margin_exec) - max_for_pre_buckets
                     reduce_margin = min(overflow, n_margin_exec)
@@ -930,8 +1276,8 @@ class AdditionalDOEOrchestrator:
                     return out
 
                 # 1) margin 작은 순(제약 경계 근처)
-                if n_margin_exec > 0 and margins_g_f.size == Xg_f.shape[0]:
-                    margin_order = np.argsort(margins_g_f).astype(int).tolist()
+                if n_margin_exec > 0 and margins_work.size == Xg_work.shape[0]:
+                    margin_order = np.argsort(margins_work).astype(int).tolist()
                     picked = _take(margin_order, n_margin_exec)
                     selected.extend(picked)
                     selected_set.update(picked)
@@ -943,14 +1289,14 @@ class AdditionalDOEOrchestrator:
                     selected_set.update(picked)
 
                 # 3) boundary quota (가능한 만큼 확보)
-                if n_boundary_exec > 0 and boundary_flags_f.size == Xg_f.shape[0]:
-                    boundary_order = [idx for idx in order_g.tolist() if boundary_flags_f[idx]]
+                if n_boundary_exec > 0 and boundary_work.size == Xg_work.shape[0]:
+                    boundary_order = [idx for idx in order_g.tolist() if boundary_work[idx]]
                     picked = _take(boundary_order, n_boundary_exec)
                     selected.extend(picked)
                     selected_set.update(picked)
 
                 # 4) random(남은 슬롯)
-                remaining_slots = max(n_exec_global - len(selected), 0)
+                remaining_slots = max(n_pick - len(selected), 0)
                 remain_order = [idx for idx in order_g.astype(int).tolist() if idx not in selected_set]
                 if remaining_slots > 0 and remain_order:
                     rand_pool = np.asarray(remain_order, dtype=int)
@@ -961,17 +1307,21 @@ class AdditionalDOEOrchestrator:
                         selected_set.update(rand_idx)
 
                 # 여전히 부족하면 예측 순으로 채움
-                if len(selected) < n_exec_global:
+                if len(selected) < n_pick:
                     remain = [idx for idx in order_g.astype(int).tolist() if idx not in selected_set]
-                    fill = remain[: (n_exec_global - len(selected))]
+                    fill = remain[: (n_pick - len(selected))]
                     selected.extend(fill)
                     selected_set.update(fill)
 
-                selected = selected[:n_exec_global]
+                selected = selected[:n_pick]
                 if not selected:
                     return np.empty((0, Xg_f.shape[1]), dtype=float), [], np.empty((0,), dtype=float)
                 idx = np.asarray(selected, dtype=int)
-                return Xg_f[idx], [constraints_g_f[i] for i in idx], margins_g_f[idx]
+                if margins_work.size == Xg_work.shape[0]:
+                    picked_margins = margins_work[idx]
+                else:
+                    picked_margins = np.full((idx.shape[0],), float("inf"), dtype=float)
+                return Xg_work[idx], [constraints_work[i] for i in idx], picked_margins
 
             def _select_local_exec_equal() -> tuple[np.ndarray, list[dict], np.ndarray]:
                 if n_exec_local <= 0 or Xl_f.size == 0:
@@ -1090,9 +1440,30 @@ class AdditionalDOEOrchestrator:
                 if deficits > 0:
                     return np.empty((0, Xl_work.shape[1]), dtype=float), [], np.empty((0,), dtype=float)
 
+                # Capacity-based quota rebalance (constraint-agnostic)
+                # so one weak anchor does not fail the entire local allocation.
+                capacity_deficits = 0
+                for i in active:
+                    capacity_i = len(groups[i]) + (1 if anchor_keep[i] else 0)
+                    if quotas[i] > capacity_i:
+                        capacity_deficits += int(quotas[i] - capacity_i)
+                        quotas[i] = int(capacity_i)
+                if capacity_deficits > 0:
+                    for j in active:
+                        if capacity_deficits <= 0:
+                            break
+                        capacity_j = len(groups[j]) + (1 if anchor_keep[j] else 0)
+                        spare = int(capacity_j - quotas[j])
+                        if spare <= 0:
+                            continue
+                        take = min(spare, capacity_deficits)
+                        quotas[j] += take
+                        capacity_deficits -= take
+
                 picks = []
                 picks_constraints = []
                 picks_margins = []
+                local_shortage = 0
                 for i in active:
                     required = quotas[i]
                     if required <= 0:
@@ -1104,7 +1475,7 @@ class AdditionalDOEOrchestrator:
                             x=anchors[i],
                             var_names=self.var_names,
                             constraint_defs=self.constraint_defs,
-                            scope="x_only",
+                            scope="pre",
                         )
                         if not self.has_pre_constraints or f_anchor:
                             picks_constraints.append(c_anchor if self.has_pre_constraints else {})
@@ -1115,11 +1486,18 @@ class AdditionalDOEOrchestrator:
                         continue
                     cand_idx = groups[i]
                     if len(cand_idx) < need:
-                        return np.empty((0, Xl_work.shape[1]), dtype=float), [], np.empty((0,), dtype=float)
-                    pts = Xl_work[cand_idx]
-                    dists = np.linalg.norm(pts - anchors[i].reshape(1, -1), axis=1)
-                    order = np.argsort(dists)[:need]
-                    chosen_idx = [cand_idx[k] for k in order.tolist()]
+                        local_shortage += int(need - len(cand_idx))
+                        need = int(len(cand_idx))
+                    if need <= 0:
+                        continue
+                    if self.local_exec_pick_mode == "distance":
+                        pts = Xl_work[cand_idx]
+                        dists = np.linalg.norm(pts - anchors[i].reshape(1, -1), axis=1)
+                        order = np.argsort(dists)[:need]
+                        chosen_idx = [cand_idx[int(k)] for k in order.tolist()]
+                    else:
+                        chosen_rel = self.rng.choice(len(cand_idx), size=need, replace=False)
+                        chosen_idx = [cand_idx[int(k)] for k in np.asarray(chosen_rel, dtype=int).tolist()]
                     picks.append(Xl_work[chosen_idx])
                     picks_constraints.extend([constraints_work[k] for k in chosen_idx])
                     picks_margins.extend([float(margins_work[k]) for k in chosen_idx])
@@ -1127,8 +1505,11 @@ class AdditionalDOEOrchestrator:
                 if not picks:
                     return np.empty((0, Xl_work.shape[1]), dtype=float), [], np.empty((0,), dtype=float)
                 X_pick = np.vstack(picks).astype(float)
-                if X_pick.shape[0] < n_exec_local:
-                    return np.empty((0, Xl_work.shape[1]), dtype=float), [], np.empty((0,), dtype=float)
+                if local_shortage > 0:
+                    print(
+                        "[AdditionalDOE] local quota shortage "
+                        f"stage={round_idx} requested={n_exec_local} selected={X_pick.shape[0]}"
+                    )
                 return X_pick[:n_exec_local], picks_constraints[:n_exec_local], np.asarray(picks_margins[:n_exec_local], dtype=float)
 
             if n_exec_local > 0:
@@ -1138,36 +1519,97 @@ class AdditionalDOEOrchestrator:
                     self._set_failure("FAILED_DEDUP", stage=round_idx)
                     break
                 if X_exec_l.shape[0] < n_exec_local:
-                    self._set_failure("FAILED_LOCAL_FEASIBILITY", stage=round_idx)
-                    break
-                X_exec = np.vstack([X_exec_g, X_exec_l]) if X_exec_l.size else X_exec_g
-                constraints_exec = constraints_exec_g + constraints_exec_l
-                margins_exec = np.concatenate([margins_exec_g, margins_exec_l]) if (margins_exec_g.size or margins_exec_l.size) else np.empty((0,), dtype=float)
+                    shortage = int(n_exec_local - X_exec_l.shape[0])
+                    early_round_relax = bool((round_idx + 1) < int(self.min_additional_rounds))
+                    allow_global_backfill = bool(early_round_relax or (gate_stop and n_exec_global == 0))
+
+                    filled = 0
+                    if allow_global_backfill and shortage > 0:
+                        if X_exec_l.shape[0] > 0 and X_exec_g.shape[0] > 0:
+                            x_exclude = np.vstack([X_exec_l, X_exec_g])
+                        elif X_exec_l.shape[0] > 0:
+                            x_exclude = X_exec_l
+                        elif X_exec_g.shape[0] > 0:
+                            x_exclude = X_exec_g
+                        else:
+                            x_exclude = None
+
+                        X_fill_g, c_fill_g, m_fill_g = _select_global_exec(
+                            n_pick_override=shortage,
+                            X_exclude=x_exclude,
+                        )
+                        filled = int(X_fill_g.shape[0])
+                        if filled > 0:
+                            if X_exec_g.shape[0] > 0:
+                                X_exec_g = np.vstack([X_exec_g, X_fill_g])
+                                constraints_exec_g.extend(c_fill_g)
+                                if margins_exec_g.size > 0:
+                                    margins_exec_g = np.concatenate([margins_exec_g, m_fill_g])
+                                else:
+                                    margins_exec_g = np.asarray(m_fill_g, dtype=float)
+                            else:
+                                X_exec_g = X_fill_g
+                                constraints_exec_g = c_fill_g
+                                margins_exec_g = np.asarray(m_fill_g, dtype=float)
+
+                    remaining_shortage = max(shortage - filled, 0)
+                    if remaining_shortage > 0:
+                        if early_round_relax:
+                            print(
+                                "[AdditionalDOE] WARN_LOCAL_SHORTAGE_EARLY "
+                                f"stage={round_idx} shortage={remaining_shortage} "
+                                f"(min_rounds={self.min_additional_rounds})"
+                            )
+                        else:
+                            self._set_failure("FAILED_LOCAL_FEASIBILITY", stage=round_idx)
+                            break
+                    else:
+                        if gate_stop and n_exec_global == 0 and not early_round_relax:
+                            print(
+                                f"[AdditionalDOE] final-stage local shortage={shortage}, "
+                                "backfilled from global."
+                            )
+                        elif shortage > 0:
+                            print(
+                                "[AdditionalDOE] local shortage backfilled "
+                                f"stage={round_idx} shortage={shortage}"
+                            )
             else:
                 X_exec_g, constraints_exec_g, margins_exec_g = _select_global_exec()
                 if X_exec_g.shape[0] < n_exec_global:
                     self._set_failure("FAILED_DEDUP", stage=round_idx)
                     break
-                X_exec = X_exec_g
-                constraints_exec = constraints_exec_g
-                margins_exec = margins_exec_g
 
-            if X_exec.shape[0] == 0:
+            if X_exec_g.shape[0] == 0 and (n_exec_local <= 0 or X_exec_l.shape[0] == 0):
                 self._set_failure("FAILED_DEDUP", stage=round_idx)
                 break
 
             # -----------------------------
             # 5) Execute CAE
             # -----------------------------
-            executed = self._execute_points(
-                X_exec,
-                source="additional",
-                round_idx=round_idx,
-                exec_scope="mixed" if n_exec_local > 0 else "global",
-                constraints_payloads=constraints_exec,
-                constraint_margins=margins_exec,
-            )
-            if not executed:
+            executed_ok = True
+            if X_exec_g.shape[0] > 0:
+                executed_g = self._execute_points(
+                    X_exec_g,
+                    source="additional",
+                    round_idx=round_idx,
+                    exec_scope="global",
+                    constraints_payloads=constraints_exec_g,
+                    constraint_margins=margins_exec_g,
+                )
+                executed_ok = executed_ok and bool(executed_g)
+            if n_exec_local > 0 and X_exec_l.shape[0] > 0:
+                executed_l = self._execute_points(
+                    X_exec_l,
+                    source="additional",
+                    round_idx=round_idx,
+                    exec_scope="local",
+                    constraints_payloads=constraints_exec_l,
+                    constraint_margins=margins_exec_l,
+                )
+                executed_ok = executed_ok and bool(executed_l)
+
+            if not executed_ok:
                 if self.failure_reason is None:
                     self._set_failure("FAILED_BUDGET", stage=round_idx)
                 break
@@ -1214,6 +1656,15 @@ class AdditionalDOEOrchestrator:
             self._anchor_spread_zero_streak += 1
         else:
             self._anchor_spread_zero_streak = 0
+
+    def _usable_sample_count(self) -> int:
+        return int(
+            sum(
+                1
+                for r in self.store.rows
+                if bool(getattr(r, "success", False)) and bool(getattr(r, "feasible", False))
+            )
+        )
 
     def _should_stop_by_convergence(self) -> bool:
         if not self.local_metrics:
@@ -1290,15 +1741,14 @@ class AdditionalDOEOrchestrator:
                 return False
 
             out = self.evaluate_func(x)
-
-            success = bool(out.get("success", True))
-            if success:
-                objective = float(out.get("objective"))
-            else:
-                objective = float("inf")
-            outputs = out.get("outputs", {})
-            if not isinstance(outputs, dict):
-                outputs = {}
+            success, objective, outputs, invalid_reason, raw_obj_repr = sanitize_evaluate_output(out)
+            if invalid_reason is not None:
+                print(
+                    "[AdditionalDOE][INVALID_OBJECTIVE] "
+                    f"stage={round_idx} exec_scope={exec_scope} idx={i} "
+                    f"reason={invalid_reason} raw={raw_obj_repr} "
+                    "-> success=False objective=inf"
+                )
 
             if constraints_payloads is not None and i < len(constraints_payloads):
                 constraints_pre = constraints_payloads[i] if constraints_payloads[i] is not None else {}
@@ -1312,7 +1762,7 @@ class AdditionalDOEOrchestrator:
                     x=x,
                     var_names=self.var_names,
                     constraint_defs=self.constraint_defs,
-                    scope="x_only",
+                    scope="pre",
                 )
             else:
                 constraints_pre = {}
@@ -1328,7 +1778,7 @@ class AdditionalDOEOrchestrator:
                         x=x,
                         var_names=self.var_names,
                         constraint_defs=self.constraint_defs,
-                        scope="cae_dependent",
+                        scope="post",
                         env_extra={**outputs, "objective": objective},
                         fail_fast_output_missing=True,
                     )
@@ -1338,8 +1788,8 @@ class AdditionalDOEOrchestrator:
                     return False
 
             constraints = {**constraints_pre, **constraints_post}
-            feasible_final = bool(success and feasible_pre and feasible_post)
-            self._update_post_rate(feasible_final=bool(feasible_final))
+            feasible = bool(success and feasible_pre and feasible_post)
+            self._update_post_rate(feasible=bool(feasible))
 
             # store에는 기록 (실패도 기록 가능)
             self.store.add(
@@ -1348,7 +1798,7 @@ class AdditionalDOEOrchestrator:
                 constraints=constraints,
                 feasible_pre=bool(feasible_pre),
                 feasible_post=bool(feasible_post),
-                feasible_final=bool(feasible_final),
+                feasible=bool(feasible),
                 success=success,
                 margin_pre=float(margin_pre),
                 margin_post=float(margin_post),
@@ -1367,6 +1817,39 @@ class AdditionalDOEOrchestrator:
         if self.failure_reason is None:
             self.failure_reason = reason
         print(f"[AdditionalDOE] stop_reason={reason} stage={stage}")
+
+    def _maybe_run_hpo(self, *, problem_name: str, base_seed: int) -> None:
+        if self.hpo_runner is None or self._hpo_done:
+            return
+        X_hpo = np.asarray(self.store.X_success, dtype=float)
+        y_hpo = np.asarray(self.store.y_success, dtype=float)
+        n_rows = int(X_hpo.shape[0])
+        if n_rows < int(self.hpo_min_samples):
+            return
+        kfold_splits = min(5, n_rows)
+        if kfold_splits < 3:
+            return
+        try:
+            print(
+                "[AdditionalDOE] run HPO "
+                f"(n={n_rows}, kfold={kfold_splits}, seed={base_seed})"
+            )
+            result = self.hpo_runner.run_xgb(
+                X=X_hpo,
+                y=y_hpo,
+                base_random_seed=base_seed,
+                problem_name=problem_name,
+                kfold_splits=kfold_splits,
+            )
+            best_params = result["best_params"]
+            self.surrogate_factory.xgb_params = {
+                **self.surrogate_factory.xgb_params,
+                **best_params,
+            }
+            self._hpo_done = True
+            print("[AdditionalDOE] HPO applied to surrogate xgb_params")
+        except Exception as exc:
+            print(f"[AdditionalDOE] HPO skipped due to error: {exc}")
 
     def _log_local_metrics(self, *, stage: int, metrics: dict) -> None:
         payload = {"stage": stage, **metrics}
@@ -1400,6 +1883,19 @@ class AdditionalDOEOrchestrator:
         rows = self.store.rows  
 
         for i, r in enumerate(rows):
+            pre = float(r.margin_pre)
+            post = float(r.margin_post)
+            pre_ok = bool(np.isfinite(pre))
+            post_ok = bool(np.isfinite(post))
+            if pre_ok and not post_ok:
+                constraint_margin = pre
+            elif post_ok and not pre_ok:
+                constraint_margin = post
+            elif pre_ok and post_ok:
+                constraint_margin = float(min(pre, post))
+            else:
+                constraint_margin = float("inf")
+
             results.append(
                 {
                     "id": i,
@@ -1408,19 +1904,10 @@ class AdditionalDOEOrchestrator:
                     "constraints": r.constraints,
                     "margin_pre": float(r.margin_pre),
                     "margin_post": float(r.margin_post),
-                    "constraint_margin": float(
-                        np.min(
-                            np.asarray(
-                                [v for v in [r.margin_pre, r.margin_post] if np.isfinite(v)]
-                                or [float("inf")],
-                                dtype=float,
-                            )
-                        )
-                    ),
+                    "constraint_margin": float(constraint_margin),
                     "feasible_pre": bool(r.feasible_pre),
                     "feasible_post": bool(r.feasible_post),
-                    "feasible_final": bool(r.feasible_final),
-                    "feasible": bool(r.feasible_final),
+                    "feasible": bool(r.feasible),
                     "success": bool(r.success),
                     "source": r.source,
                     "round": r.round_idx,

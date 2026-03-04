@@ -31,7 +31,13 @@ from Explorer.visualization.explorer_plots import (
     plot_raw_known_optimum,
     plot_raw_overlay,
 )
-from pipeline.run_context import RunContext, get_stage_metadata_path, update_run_index
+from Explorer.visualization.plot_doe_vs_optimum import plot_doe_vs_optimum
+from pipeline.run_context import (
+    RunContext,
+    create_run_context,
+    get_task_metadata_path,
+    update_run_index,
+)
 
 
 def _load_models(pkl_path: str) -> tuple[list, list[str]]:
@@ -62,6 +68,21 @@ def _to_bool_mask(series: pd.Series) -> np.ndarray:
     )
 
 
+def _artifact_ref(metadata: dict | None, key: str) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    artifacts = metadata.get("artifacts", {})
+    if not isinstance(artifacts, dict):
+        return None
+    if key in artifacts:
+        return artifacts[key]
+    for layer in ("public", "meta", "debug"):
+        layer_map = artifacts.get(layer, {})
+        if isinstance(layer_map, dict) and key in layer_map:
+            return layer_map[key]
+    return None
+
+
 def _extract_expr_vars(expr: str) -> set[str]:
     tree = ast.parse(expr, mode="eval")
     return {
@@ -79,6 +100,103 @@ def _predict_ensemble(models: list, X: np.ndarray) -> tuple[np.ndarray, np.ndarr
         raise RuntimeError("No models available for prediction.")
     stacked = np.vstack(preds)
     return stacked.mean(axis=0), stacked.std(axis=0)
+
+
+def _normalize_debug_level(value: str | None) -> str:
+    level = str(value or "off").strip().lower()
+    if level not in {"off", "full"}:
+        raise ValueError("Explorer debug_level must be one of: off, full")
+    return level
+
+
+def _resolve_existing_cae_metadata_path(
+    *,
+    config: ExplorerConfig,
+    run_context: RunContext | None,
+) -> str:
+    if run_context is not None:
+        path = get_task_metadata_path(run_context, "CAE")
+        if path and os.path.exists(path):
+            return path
+        raise RuntimeError(
+            "Explorer requires existing CAE metadata in run context. "
+            "Run CAE task first and then execute Explorer."
+        )
+
+    raw = str(config.cae_metadata_path or "").strip()
+    if raw:
+        candidates = [raw]
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        candidates.append(os.path.join(project_root, raw))
+        for p in candidates:
+            if os.path.exists(p):
+                return p
+        raise FileNotFoundError(f"CAE metadata not found: {raw}")
+
+    raise RuntimeError(
+        "Explorer requires existing CAE metadata. "
+        "Provide ExplorerConfig.cae_metadata_path or run via pipeline run_context."
+    )
+
+
+def _load_cae_metadata(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Invalid CAE metadata payload: {path}")
+    return payload
+
+
+def _extract_cae_fields(cae_meta: dict) -> tuple[str, list, list, str]:
+    problem_name = str(cae_meta.get("problem", "")).strip()
+    inputs = cae_meta.get("inputs", {}) if isinstance(cae_meta.get("inputs", {}), dict) else {}
+    variables = inputs.get("variables", [])
+    if not isinstance(variables, list):
+        variables = []
+    constraint_defs = inputs.get("constraint_defs", [])
+    if not isinstance(constraint_defs, list):
+        constraint_defs = []
+    resolved = cae_meta.get("resolved_params", {}) if isinstance(cae_meta.get("resolved_params", {}), dict) else {}
+    objective_sense = str(resolved.get("objective_sense", "min")).strip().lower()
+    if objective_sense not in {"min", "max"}:
+        objective_sense = "min"
+    if not problem_name:
+        raise RuntimeError("CAE metadata missing required field: problem")
+    if len(variables) == 0:
+        raise RuntimeError("CAE metadata missing required field: inputs.variables")
+    return problem_name, variables, constraint_defs, objective_sense
+
+
+def _extract_seed_from_cae_metadata(*, cae_meta: dict, cae_meta_path: str) -> int:
+    resolved = cae_meta.get("resolved_params", {}) if isinstance(cae_meta.get("resolved_params", {}), dict) else {}
+    direct_candidates = [
+        resolved.get("seed"),
+        cae_meta.get("seed"),
+        (cae_meta.get("inputs", {}) if isinstance(cae_meta.get("inputs", {}), dict) else {}).get("seed"),
+    ]
+    for cand in direct_candidates:
+        try:
+            if cand is not None:
+                return int(cand)
+        except Exception:
+            pass
+
+    inputs = cae_meta.get("inputs", {}) if isinstance(cae_meta.get("inputs", {}), dict) else {}
+    user_ref = str(inputs.get("user_config", "")).strip()
+    if user_ref:
+        user_cfg_path = user_ref
+        if not os.path.isabs(user_cfg_path):
+            user_cfg_path = os.path.join(os.path.dirname(cae_meta_path), user_cfg_path)
+        if os.path.exists(user_cfg_path):
+            with open(user_cfg_path, "r", encoding="utf-8") as f:
+                user_cfg = json.load(f)
+            if isinstance(user_cfg, dict) and ("seed" in user_cfg):
+                return int(user_cfg["seed"])
+
+    raise RuntimeError(
+        "CAE metadata missing seed information. "
+        "Expected one of: resolved_params.seed, inputs.seed, or inputs.user_config(seed)."
+    )
 
 
 def _resolve_known_optimum(
@@ -126,162 +244,148 @@ class ExplorerOrchestrator:
         self.run_context = run_context
 
     def run(self) -> dict:
-        loader = ResultLoader()
+        if self.config.cae is None:
+            raise RuntimeError("ExplorerConfig.cae is required.")
 
-        doe_result = None
-        modeler_result = None
+        loader = ResultLoader()
+        cae_meta_path = _resolve_existing_cae_metadata_path(
+            config=self.config,
+            run_context=self.run_context,
+        )
+        cae_meta = _load_cae_metadata(cae_meta_path)
+        (
+            cae_problem_name,
+            cae_variables,
+            cae_constraint_defs,
+            cae_objective_sense,
+        ) = _extract_cae_fields(cae_meta)
+        cae_seed = _extract_seed_from_cae_metadata(cae_meta=cae_meta, cae_meta_path=cae_meta_path)
+        configured_problem = str(self.config.cae.user.problem_name).strip()
+        if configured_problem and configured_problem != cae_problem_name:
+            raise RuntimeError(
+                "Problem mismatch between Explorer config and CAE metadata: "
+                f"config={configured_problem}, cae_metadata={cae_problem_name}"
+            )
+
         doe_meta = {}
         modeler_meta = {}
         doe_df = None
         modeler_df = None
         doe_problem_name = None
+        modeler_problem_name = None
         doe_csv_path = None
         modeler_pkl_path = None
         modeler_feas_pkl_path = None
-        modeler_stage_dir = None
+        modeler_task_dir = None
 
-        if self.config.doe_csv_path:
-            if not os.path.exists(self.config.doe_csv_path):
-                raise FileNotFoundError(f"DOE CSV not found: {self.config.doe_csv_path}")
-            doe_csv_path = self.config.doe_csv_path
-            doe_df = pd.read_csv(doe_csv_path)
-            if self.config.doe_metadata_path:
-                print(f"[Explorer] DOE metadata path provided: {self.config.doe_metadata_path}")
-                with open(self.config.doe_metadata_path, "r") as f:
-                    doe_meta = json.load(f)
-            doe_problem_name = (
-                doe_meta.get("problem")
-                if doe_meta
-                else (self.config.cae.user.problem_name if self.config.cae else None)
-            )
-        elif self.config.doe_metadata_path:
+        if self.config.doe_metadata_path:
             print(f"[Explorer] DOE metadata path provided: {self.config.doe_metadata_path}")
-            with open(self.config.doe_metadata_path, "r") as f:
-                doe_meta = json.load(f)
-            if "artifacts" in doe_meta and "results_csv" in doe_meta["artifacts"]:
-                stage_dir = os.path.dirname(self.config.doe_metadata_path)
-                results_csv = doe_meta["artifacts"]["results_csv"]
-                doe_csv_path = os.path.join(stage_dir, results_csv)
-                doe_df = pd.read_csv(doe_csv_path)
-                doe_problem_name = doe_meta.get("problem")
-            else:
-                doe_result = loader.load_stage(
-                    stage="DOE",
-                    metadata_path=self.config.doe_metadata_path,
-                    allow_latest_fallback=False,
-                )
-                doe_df = doe_result.df
-                doe_meta = doe_result.metadata or {}
-                doe_problem_name = doe_result.problem_name
-                doe_csv_path = doe_result.csv_path
-        elif self.run_context:
-            doe_meta_path = get_stage_metadata_path(self.run_context, "DOE")
-            if not doe_meta_path:
-                raise RuntimeError("DOE metadata not found in run context.")
-            with open(doe_meta_path, "r") as f:
-                doe_meta = json.load(f)
-            stage_dir = os.path.dirname(doe_meta_path)
-            results_csv = doe_meta["artifacts"]["results_csv"]
-            doe_csv_path = os.path.join(stage_dir, results_csv)
-            doe_df = pd.read_csv(doe_csv_path)
-            doe_problem_name = doe_meta.get("problem")
-        else:
-            if not self.config.cae.system.allow_latest_fallback:
-                raise RuntimeError("Latest fallback is disabled. Provide metadata or paths.")
-            print("[Explorer] Metadata paths not provided; using latest DOE/Modeler metadata.")
-            doe_result = loader.load_stage(stage="DOE", allow_latest_fallback=True)
+            doe_result = loader.load_task(
+                task="DOE",
+                metadata_path=self.config.doe_metadata_path,
+                csv_path=self.config.doe_csv_path,
+                allow_latest_fallback=False,
+            )
             doe_df = doe_result.df
             doe_meta = doe_result.metadata or {}
             doe_problem_name = doe_result.problem_name
             doe_csv_path = doe_result.csv_path
+            if doe_problem_name and str(doe_problem_name).strip() != str(cae_problem_name).strip():
+                raise RuntimeError(
+                    "Problem mismatch between DOE metadata and CAE metadata: "
+                    f"doe={doe_problem_name}, cae={cae_problem_name}"
+                )
+        elif self.config.doe_csv_path:
+            if not os.path.exists(self.config.doe_csv_path):
+                raise FileNotFoundError(f"DOE CSV not found: {self.config.doe_csv_path}")
+            doe_csv_path = self.config.doe_csv_path
+            doe_df = pd.read_csv(doe_csv_path)
+            doe_problem_name = (
+                self.config.cae.user.problem_name if self.config.cae else None
+            )
+        elif self.run_context:
+            doe_meta_path = get_task_metadata_path(self.run_context, "DOE")
+            if not doe_meta_path:
+                raise RuntimeError("DOE metadata not found in run context.")
+            doe_result = loader.load_task(
+                task="DOE",
+                metadata_path=doe_meta_path,
+                allow_latest_fallback=False,
+            )
+            doe_df = doe_result.df
+            doe_meta = doe_result.metadata or {}
+            doe_problem_name = doe_result.problem_name
+            doe_csv_path = doe_result.csv_path
+            if doe_problem_name and str(doe_problem_name).strip() != str(cae_problem_name).strip():
+                raise RuntimeError(
+                    "Problem mismatch between DOE metadata and CAE metadata: "
+                    f"doe={doe_problem_name}, cae={cae_problem_name}"
+                )
+        else:
+            raise RuntimeError(
+                "Explorer requires explicit DOE/Modeler inputs. "
+                "Provide paths or run via pipeline run_context."
+            )
 
-        if self.config.model_pkl_path:
+        if self.config.modeler_metadata_path:
+            print(f"[Explorer] Modeler metadata path provided: {self.config.modeler_metadata_path}")
+            modeler_task_dir = os.path.dirname(self.config.modeler_metadata_path)
+            modeler_result = loader.load_task(
+                task="Modeler",
+                metadata_path=self.config.modeler_metadata_path,
+                allow_latest_fallback=False,
+            )
+            modeler_df = modeler_result.df
+            modeler_meta = modeler_result.metadata or {}
+            modeler_problem_name = modeler_result.problem_name
+            modeler_pkl_path = self.config.model_pkl_path or modeler_result.pkl_path
+            if not modeler_pkl_path:
+                model_ref = _artifact_ref(modeler_meta, "model_path")
+                if model_ref:
+                    modeler_pkl_path = (
+                        model_ref if os.path.isabs(model_ref) else os.path.join(modeler_task_dir, model_ref)
+                    )
+            feas_model_ref = _artifact_ref(modeler_meta, "feas_model_path")
+            if feas_model_ref:
+                modeler_feas_pkl_path = (
+                    feas_model_ref
+                    if os.path.isabs(feas_model_ref)
+                    else os.path.join(modeler_task_dir, feas_model_ref)
+                )
+        elif self.config.model_pkl_path:
             if not os.path.exists(self.config.model_pkl_path):
                 raise FileNotFoundError(f"Model PKL not found: {self.config.model_pkl_path}")
             modeler_pkl_path = self.config.model_pkl_path
-            if self.config.modeler_metadata_path:
-                print(f"[Explorer] Modeler metadata path provided: {self.config.modeler_metadata_path}")
-                with open(self.config.modeler_metadata_path, "r") as f:
-                    modeler_meta = json.load(f)
-                modeler_stage_dir = os.path.dirname(self.config.modeler_metadata_path)
-                artifacts_meta = modeler_meta.get("artifacts", {}) if isinstance(modeler_meta, dict) else {}
-                results_csv = artifacts_meta.get("results_csv")
-                if results_csv:
-                    modeler_csv_path = os.path.join(modeler_stage_dir, results_csv)
-                    if os.path.exists(modeler_csv_path):
-                        modeler_df = pd.read_csv(modeler_csv_path)
-                feas_model_path = artifacts_meta.get("feas_model_path") or modeler_meta.get("feas_model_path")
-                if feas_model_path:
-                    modeler_feas_pkl_path = (
-                        feas_model_path
-                        if os.path.isabs(feas_model_path)
-                        else os.path.join(modeler_stage_dir, feas_model_path)
-                    )
-            else:
-                modeler_meta = {}
-        elif self.config.modeler_metadata_path:
-            print(f"[Explorer] Modeler metadata path provided: {self.config.modeler_metadata_path}")
-            with open(self.config.modeler_metadata_path, "r") as f:
-                modeler_meta = json.load(f)
-            artifacts_meta = modeler_meta.get("artifacts", {}) if isinstance(modeler_meta, dict) else {}
-            modeler_stage_dir = os.path.dirname(self.config.modeler_metadata_path)
-            results_csv = artifacts_meta.get("results_csv")
-            if results_csv:
-                modeler_csv_path = os.path.join(modeler_stage_dir, results_csv)
-                if os.path.exists(modeler_csv_path):
-                    modeler_df = pd.read_csv(modeler_csv_path)
-            model_path = artifacts_meta.get("model_path") or modeler_meta.get("model_path")
-            if model_path:
-                modeler_pkl_path = (
-                    model_path
-                    if os.path.isabs(model_path)
-                    else os.path.join(modeler_stage_dir, model_path)
-                )
-            feas_model_path = artifacts_meta.get("feas_model_path") or modeler_meta.get("feas_model_path")
-            if feas_model_path:
-                modeler_feas_pkl_path = (
-                    feas_model_path
-                    if os.path.isabs(feas_model_path)
-                    else os.path.join(modeler_stage_dir, feas_model_path)
-                )
-            if modeler_pkl_path is None:
-                modeler_result = loader.load_stage(
-                    stage="MODELER",
-                    metadata_path=self.config.modeler_metadata_path,
-                    allow_latest_fallback=False,
-                )
-                modeler_df = modeler_result.df
-                modeler_meta = modeler_result.metadata or {}
-                modeler_pkl_path = modeler_result.pkl_path
-                if modeler_feas_pkl_path is None:
-                    modeler_feas_pkl_path = modeler_meta.get("feas_model_path")
-            else:
-                modeler_result = None
+            modeler_meta = {}
         elif self.run_context:
-            modeler_meta_path = get_stage_metadata_path(self.run_context, "Modeler")
+            modeler_meta_path = get_task_metadata_path(self.run_context, "Modeler")
             if not modeler_meta_path:
                 raise RuntimeError("Modeler metadata not found in run context.")
-            with open(modeler_meta_path, "r") as f:
-                modeler_meta = json.load(f)
-            modeler_stage_dir = os.path.dirname(modeler_meta_path)
-            results_csv = modeler_meta["artifacts"]["results_csv"]
-            modeler_csv_path = os.path.join(modeler_stage_dir, results_csv)
-            modeler_df = pd.read_csv(modeler_csv_path)
-            model_path = modeler_meta.get("artifacts", {}).get("model_path")
-            if model_path:
-                modeler_pkl_path = os.path.join(modeler_stage_dir, model_path)
-            feas_model_path = modeler_meta.get("artifacts", {}).get("feas_model_path")
-            if feas_model_path:
-                modeler_feas_pkl_path = os.path.join(modeler_stage_dir, feas_model_path)
-        else:
-            modeler_result = loader.load_stage(stage="MODELER", allow_latest_fallback=True)
+            modeler_task_dir = os.path.dirname(modeler_meta_path)
+            modeler_result = loader.load_task(
+                task="Modeler",
+                metadata_path=modeler_meta_path,
+                allow_latest_fallback=False,
+            )
             modeler_df = modeler_result.df
             modeler_meta = modeler_result.metadata or {}
+            modeler_problem_name = modeler_result.problem_name
             modeler_pkl_path = modeler_result.pkl_path
-            modeler_feas_pkl_path = modeler_meta.get("feas_model_path")
+            feas_model_ref = _artifact_ref(modeler_meta, "feas_model_path")
+            if feas_model_ref:
+                modeler_feas_pkl_path = (
+                    feas_model_ref
+                    if os.path.isabs(feas_model_ref)
+                    else os.path.join(modeler_task_dir, feas_model_ref)
+                )
+        else:
+            raise RuntimeError(
+                "Explorer requires explicit DOE/Modeler inputs. "
+                "Provide paths or run via pipeline run_context."
+            )
 
         if modeler_feas_pkl_path and not os.path.isabs(modeler_feas_pkl_path):
-            base_dir = modeler_stage_dir or (
+            base_dir = modeler_task_dir or (
                 os.path.dirname(self.config.modeler_metadata_path)
                 if self.config.modeler_metadata_path
                 else None
@@ -290,10 +394,19 @@ class ExplorerOrchestrator:
                 modeler_feas_pkl_path = os.path.join(base_dir, modeler_feas_pkl_path)
 
         if not doe_problem_name:
-            raise RuntimeError("DOE problem name not found.")
-
-        if self.config.cae is None:
-            raise RuntimeError("ExplorerConfig.cae is required for seed/objective_sense.")
+            doe_problem_name = cae_problem_name
+        if not doe_problem_name:
+            raise RuntimeError("Problem name not found from DOE/CAE metadata.")
+        if str(doe_problem_name).strip() != str(cae_problem_name).strip():
+            raise RuntimeError(
+                "Problem mismatch between DOE source and CAE metadata: "
+                f"doe={doe_problem_name}, cae={cae_problem_name}"
+            )
+        if modeler_problem_name and str(modeler_problem_name).strip() != str(cae_problem_name).strip():
+            raise RuntimeError(
+                "Problem mismatch between Modeler metadata and CAE metadata: "
+                f"modeler={modeler_problem_name}, cae={cae_problem_name}"
+            )
 
         if not modeler_pkl_path:
             raise RuntimeError("Modeler PKL not found. Check modeler metadata.")
@@ -302,7 +415,7 @@ class ExplorerOrchestrator:
 
         selected_features = resolve_selected_features(
             modeler_meta=modeler_meta,
-            modeler_stage_dir=modeler_stage_dir,
+            modeler_task_dir=modeler_task_dir,
             modeler_df=modeler_df,
             feature_cols=feature_cols,
             doe_df=doe_df,
@@ -311,6 +424,7 @@ class ExplorerOrchestrator:
         raw_constraint_defs = (
             (doe_meta or {}).get("constraint_defs")
             or (doe_meta or {}).get("inputs", {}).get("constraint_defs")
+            or cae_constraint_defs
             or []
         )
         try:
@@ -321,14 +435,15 @@ class ExplorerOrchestrator:
 
         pre_constraint_defs = [
             c for c in constraint_defs
-            if str(c.get("scope", "x_only")).strip().lower() == "x_only"
+            if str(c.get("scope", "pre")).strip().lower() == "pre"
         ]
         post_constraint_defs = [
             c for c in constraint_defs
-            if str(c.get("scope", "x_only")).strip().lower() == "cae_dependent"
+            if str(c.get("scope", "pre")).strip().lower() == "post"
         ]
         has_pre_constraints = len(pre_constraint_defs) > 0
         has_post_constraints = len(post_constraint_defs) > 0
+        pre_filter_disabled_reason = None
 
         # pre 제약식을 selected_features 축에서 평가할 수 없는 경우(식 변수 누락)는 pre 필터를 끈다.
         if has_pre_constraints:
@@ -352,20 +467,30 @@ class ExplorerOrchestrator:
                     "[Explorer] pre-constraint filter disabled: "
                     f"missing vars in selected_features -> {sorted(missing_vars)}"
                 )
+                pre_filter_disabled_reason = (
+                    "missing_vars_in_selected_features:"
+                    + ",".join(sorted(missing_vars))
+                )
                 has_pre_constraints = False
                 pre_constraint_defs = []
 
         feasibility_payload = None
+        feasibility_model_kind_used = "none"
+        feasibility_model_path_used = None
         if has_post_constraints:
             if modeler_feas_pkl_path and os.path.exists(modeler_feas_pkl_path):
                 feasibility_payload = _load_feasibility_model(modeler_feas_pkl_path)
+                feasibility_model_kind_used = str(feasibility_payload.get("kind", "unknown"))
+                feasibility_model_path_used = modeler_feas_pkl_path
                 print(f"[Explorer] feasibility model loaded: {modeler_feas_pkl_path}")
             else:
                 print("[Explorer] post constraints exist but feasibility model not found; post penalty disabled.")
 
         variables = None
         if doe_meta:
-            variables = doe_meta.get("variables")
+            variables = doe_meta.get("variables") or doe_meta.get("inputs", {}).get("variables")
+        if not variables and cae_variables:
+            variables = cae_variables
         if not variables and self.config.cae and self.config.cae.user.variables:
             variables = self.config.cae.user.variables
         if not variables and self.run_context:
@@ -384,11 +509,7 @@ class ExplorerOrchestrator:
             df=doe_df,
         )
 
-        meta_seed = (doe_meta or {}).get("seed")
-        seed = self.config.cae.user.seed if self.config.cae else None
-        rng_seed = seed if seed is not None else meta_seed
-        if rng_seed is None:
-            raise RuntimeError("Seed not found in DOE metadata.")
+        rng_seed = int(cae_seed)
 
         rng = np.random.default_rng(rng_seed)
         has_post_penalty = bool(has_post_constraints and feasibility_payload is not None)
@@ -406,8 +527,8 @@ class ExplorerOrchestrator:
             if "success" in doe_df.columns
             else np.ones((len(doe_df),), dtype=bool)
         )
-        if "feasible_final" in doe_df.columns:
-            feasible_mask_base = _to_bool_mask(doe_df["feasible_final"])
+        if "feasible" in doe_df.columns:
+            feasible_mask_base = _to_bool_mask(doe_df["feasible"])
             base_mask = success_mask_base & feasible_mask_base
         else:
             feasible_mask_base = success_mask_base.copy()
@@ -507,13 +628,13 @@ class ExplorerOrchestrator:
                 X=X_boundary_raw,
                 var_names=selected_features,
                 constraint_defs=pre_constraint_defs,
-                scope="x_only",
+                scope="pre",
             )
             mask_l, _, _ = evaluate_constraints_batch(
                 X=X_lhc_raw,
                 var_names=selected_features,
                 constraint_defs=pre_constraint_defs,
-                scope="x_only",
+                scope="pre",
             )
             X_boundary = X_boundary_raw[mask_b]
             X_lhc = X_lhc_raw[mask_l]
@@ -553,7 +674,7 @@ class ExplorerOrchestrator:
                     p_feasible_pred = np.asarray(clf.predict_proba(X)[:, 1], dtype=float)
                     p_feasible_pred = np.clip(p_feasible_pred, 0.0, 1.0)
                 penalty = post_lambda * (1.0 - p_feasible_pred)
-                if str(self.config.cae.user.objective_sense).strip().lower() == "min":
+                if str(cae_objective_sense).strip().lower() == "min":
                     score = y_mean + penalty
                 else:
                     score = y_mean - penalty
@@ -570,9 +691,7 @@ class ExplorerOrchestrator:
         df["p_feasible_pred"] = p_feasible_pred
 
         objective_sense = (
-            self.config.cae.user.objective_sense
-            if self.config.cae
-            else (doe_meta or {}).get("objective_sense", "max")
+            str(cae_objective_sense)
         )
         quantile_threshold = float(self.config.system.quantile_threshold)
         if objective_sense == "min":
@@ -586,21 +705,48 @@ class ExplorerOrchestrator:
         project_root = os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         )
-        stage_dir = None
-        artifacts_dir = None
-        if self.run_context:
-            stage_dir = os.path.join(self.run_context.run_root, "Explorer")
-            artifacts_dir = os.path.join(stage_dir, "artifacts")
-            os.makedirs(artifacts_dir, exist_ok=True)
+        if self.run_context is None:
+            design_bounds = None
+            if variables:
+                design_bounds = {
+                    v["name"]: [v["lb"], v["ub"]]
+                    for v in variables
+                    if isinstance(v, dict) and {"name", "lb", "ub"}.issubset(v.keys())
+                }
+            user_snapshot = {
+                "problem": doe_problem_name,
+                "seed": int(rng_seed),
+                "objective_sense": objective_sense,
+                "task": "Explorer",
+            }
+            if design_bounds:
+                user_snapshot["design_bounds"] = design_bounds
+            self.run_context = create_run_context(
+                project_root=project_root,
+                user_config_snapshot=user_snapshot,
+            )
+        if get_task_metadata_path(self.run_context, "CAE") is None:
+            update_run_index(self.run_context, "CAE", os.path.abspath(cae_meta_path))
+
+        task_dir = os.path.join(self.run_context.run_root, "Explorer")
+        artifacts_root = os.path.join(task_dir, "artifacts")
+        public_dir = os.path.join(artifacts_root, "public")
+        meta_dir = os.path.join(artifacts_root, "meta")
+        debug_dir = os.path.join(artifacts_root, "debug")
+        os.makedirs(public_dir, exist_ok=True)
+        os.makedirs(meta_dir, exist_ok=True)
+        os.makedirs(debug_dir, exist_ok=True)
 
         use_timestamp = (
             self.config.cae.system.use_timestamp
             if self.config.cae is not None
             else False
         )
+        debug_level = _normalize_debug_level(self.config.system.debug_level)
+        keep_debug = debug_level == "full"
         use_raw = len(selected_features) == 2
         overlay_path = None
-        if use_raw:
+        if use_raw and keep_debug:
             overlay_path = plot_raw_overlay(
                 X_all=X,
                 mask=mask,
@@ -608,7 +754,7 @@ class ExplorerOrchestrator:
                 problem_name=doe_problem_name,
                 project_root=project_root,
                 use_timestamp=bool(use_timestamp),
-                save_path=os.path.join(artifacts_dir, "raw_overlay.png") if artifacts_dir else None,
+                save_path=os.path.join(debug_dir, "raw_overlay.png"),
             )
 
         save_plot = bool(self.config.system.save_plot)
@@ -616,8 +762,6 @@ class ExplorerOrchestrator:
         eps_used = None
         dbscan_plot_path = None
         known_optimum_plot_path = None
-        span_heatmap_path = None
-        y_gradient_plot_path = None
         dbscan_min_samples = self.config.system.dbscan_min_samples
         if dbscan_min_samples is not None:
             try:
@@ -652,7 +796,7 @@ class ExplorerOrchestrator:
                             problem_name=doe_problem_name,
                             project_root=project_root,
                             use_timestamp=bool(use_timestamp),
-                            save_path=os.path.join(artifacts_dir, "raw_dbscan.png") if artifacts_dir else None,
+                            save_path=os.path.join(debug_dir, "raw_dbscan.png"),
                         )
             except Exception as exc:
                 print(f"[Explorer] DBSCAN skipped: {exc}")
@@ -673,7 +817,7 @@ class ExplorerOrchestrator:
                         problem_name=doe_problem_name,
                         project_root=project_root,
                         use_timestamp=bool(use_timestamp),
-                        save_path=os.path.join(artifacts_dir, "raw_optimum.png") if artifacts_dir else None,
+                        save_path=os.path.join(debug_dir, "raw_optimum.png"),
                     )
             except Exception as exc:
                 print(f"[Explorer] Known optimum plot skipped: {exc}")
@@ -683,6 +827,7 @@ class ExplorerOrchestrator:
         # Dual-cluster comparison: model vs objective
         # -------------------------------------------------
         pair_overlay_paths = []
+        doe_vs_optimum_plot_paths = []
         tsne_overlay_path = None
         pred_stats = {}
         obj_stats = {}
@@ -703,8 +848,8 @@ class ExplorerOrchestrator:
             # (2) Objective clusters from executed DOE data
             if doe_df is not None:
                 obj_df = doe_df.copy()
-                if "feasible_final" in obj_df.columns:
-                    f = obj_df["feasible_final"]
+                if "feasible" in obj_df.columns:
+                    f = obj_df["feasible"]
                     if f.dtype == bool:
                         obj_df = obj_df[f.fillna(False)]
                     else:
@@ -772,6 +917,8 @@ class ExplorerOrchestrator:
             X_pred_sel=X_pred_sel,
             X_obj_sel=X_obj_sel,
         )
+        bounds_path = None
+        vol_ratio = None
 
         if selected_bounds is not None:
             selected_bounds = apply_bounds_margin(
@@ -817,19 +964,9 @@ class ExplorerOrchestrator:
                     "volume_ratio": float(vol_ratio),
                     "bounds_order": list(selected_features),
                 }
-            if artifacts_dir:
-                bounds_path = os.path.join(artifacts_dir, "selected_bounds.json")
-                with open(bounds_path, "w", encoding="utf-8") as f:
-                    json.dump(bounds_payload, f, indent=2)
-            else:
-                project_root = os.path.dirname(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                )
-                out_dir = os.path.join(project_root, "result", "explorer")
-                os.makedirs(out_dir, exist_ok=True)
-                bounds_path = os.path.join(out_dir, "selected_bounds.json")
-                with open(bounds_path, "w", encoding="utf-8") as f:
-                    json.dump(bounds_payload, f, indent=2)
+            bounds_path = os.path.join(public_dir, "selected_bounds.json")
+            with open(bounds_path, "w", encoding="utf-8") as f:
+                json.dump(bounds_payload, f, indent=2)
 
         if X_pred_sel.size or X_obj_sel.size:
             if X_pred_sel.size and X_obj_sel.size:
@@ -846,9 +983,9 @@ class ExplorerOrchestrator:
                     pairs = [(i, j) for i in range(len(selected_features)) for j in range(i + 1, len(selected_features))]
                     for i, j in pairs:
                         out_path = os.path.join(
-                            artifacts_dir,
+                            debug_dir,
                             f"pair_dual_{selected_features[i]}_{selected_features[j]}.png",
-                        ) if artifacts_dir else None
+                        )
                         pair_overlay_paths.append(
                             plot_dual_cluster_pair(
                                 X_pred=X_pred_sel,
@@ -871,9 +1008,9 @@ class ExplorerOrchestrator:
                     pairs = [(i, j) for i in range(len(selected_features)) for j in range(i + 1, len(selected_features))]
                     for i, j in pairs:
                         out_path = os.path.join(
-                            artifacts_dir,
+                            debug_dir,
                             f"pair_bounds_{selected_features[i]}_{selected_features[j]}.png",
-                        ) if artifacts_dir else None
+                        )
                         pair_overlay_paths.append(
                             plot_bounds_pair(
                                 X_points=selected_points,
@@ -902,8 +1039,23 @@ class ExplorerOrchestrator:
                     project_root=project_root,
                     use_timestamp=bool(use_timestamp),
                     max_points=int(self.config.system.tsne_max_points),
-                    save_path=os.path.join(artifacts_dir, "tsne_dual.png") if artifacts_dir else None,
+                    save_path=os.path.join(debug_dir, "tsne_dual.png"),
                 )
+
+                # DOE/Explorer pairwise debug: stage-wise + known optimum + constraint-aware filtering
+                try:
+                    plot_out = plot_doe_vs_optimum(
+                        doe_df=doe_df if doe_df is not None else pd.DataFrame(),
+                        explorer_df=df,
+                        selected_features=selected_features,
+                        known_optimum=self.config.user.known_optimum,
+                        objective_sense=objective_sense,
+                        out_dir=debug_dir,
+                        respect_constraints=bool(has_pre_constraints or has_post_constraints),
+                    )
+                    doe_vs_optimum_plot_paths = list(plot_out.get("saved", []))
+                except Exception as exc:
+                    print(f"[Explorer] DOE-vs-optimum plot skipped: {exc}")
             except Exception as exc:
                 print(f"[Explorer] Dual cluster plots skipped: {exc}")
 
@@ -911,124 +1063,128 @@ class ExplorerOrchestrator:
         workflow_info["EXPLORER"] = "LHC"
 
         saver = ResultSaver(use_timestamp=bool(use_timestamp))
-        if self.run_context:
-            prev_doe_meta = get_stage_metadata_path(self.run_context, "DOE")
-            prev_modeler_meta = get_stage_metadata_path(self.run_context, "Modeler")
-            prev_doe_ref = (
-                os.path.relpath(prev_doe_meta, stage_dir) if prev_doe_meta else None
-            )
-            prev_modeler_ref = (
-                os.path.relpath(prev_modeler_meta, stage_dir) if prev_modeler_meta else None
-            )
-            inputs = {
-                "user_config": os.path.relpath(
-                    self.run_context.user_config_snapshot_path,
-                    os.path.join(self.run_context.run_root, "Explorer"),
-                ),
-                "system_config_snapshot": {
-                    "n_samples": n_samples,
-                    "quantile_threshold": quantile_threshold,
-                    "dbscan_min_samples": dbscan_min_samples,
-                },
-                "previous": {
-                    "DOE": prev_doe_ref,
-                    "Modeler": prev_modeler_ref,
-                },
-            }
-            resolved_params = {
-                "threshold_value": threshold,
-                "dbscan_eps_used": eps_used,
-                "dbscan_min_samples_used": dbscan_min_samples,
-                "base_n_success_feasible": int(base_n),
-                "nominal_n": int(nominal_n),
-                "target_n_generated": int(n_samples),
-                "generated_boundary": int(X_boundary_raw.shape[0]),
-                "generated_lhc": int(X_lhc_raw.shape[0]),
-                "generated_total_raw": int(pre_generated),
-                "generated_total_after_pre": int(X.shape[0]),
-                "pre_filter_kept": int(pre_kept),
-                "r_used": float(r_used),
-                "r_used_source": r_used_source,
-                "has_pre_constraints": bool(has_pre_constraints),
-                "has_post_constraints": bool(has_post_constraints),
-                "post_penalty_active": bool(has_post_penalty),
-                "post_lambda": float(post_lambda),
-                "post_lambda_source": post_lambda_source,
-            }
-            n_q_samples = int(mask.sum())
-            n_clusters = 0
-            cluster_sizes = []
-            if labels is not None:
-                unique = [int(v) for v in np.unique(labels) if v != -1]
-                n_clusters = len(unique)
-                cluster_sizes = [int((labels == v).sum()) for v in unique]
-            results_summary = {
-                "n_candidates_total": int(len(df)),
-                "n_q_samples": n_q_samples,
-                "n_clusters": n_clusters,
-                "cluster_sizes": cluster_sizes,
-                "n_generated_raw": int(pre_generated),
-                "n_generated_after_pre": int(X.shape[0]),
-                "post_penalty_active": bool(has_post_penalty),
-            }
-            artifacts = {
-                "raw_overlay": os.path.relpath(overlay_path, stage_dir) if overlay_path else None,
-                "raw_dbscan": os.path.relpath(dbscan_plot_path, stage_dir) if dbscan_plot_path else None,
-                "raw_optimum": os.path.relpath(known_optimum_plot_path, stage_dir) if known_optimum_plot_path else None,
-                "pair_dual_clusters": [os.path.relpath(p, stage_dir) for p in pair_overlay_paths] if pair_overlay_paths else None,
-                "tsne_dual_clusters": os.path.relpath(tsne_overlay_path, stage_dir) if tsne_overlay_path else None,
-                "selected_bounds": os.path.relpath(bounds_path, stage_dir) if selected_bounds is not None else None,
-            }
-            stage_out = saver.save_stage_v2(
-                run_root=self.run_context.run_root,
-                stage="Explorer",
-                problem_name=doe_problem_name,
-                df=df,
-                inputs=inputs,
-                resolved_params=resolved_params,
-                results=results_summary,
-                artifacts=artifacts,
-            )
-            update_run_index(self.run_context, "Explorer", stage_out["metadata"])
-        else:
-            stage_out = saver.save_stage_csv(
-                stage="EXPLORER",
-                df=df,
-                problem_name=doe_problem_name,
-                extra_metadata={
-                    "seed": rng_seed,
-                    "n_samples": n_samples,
-                    "workflow_info": workflow_info,
-                    "selected_features": selected_features,
-                    "model_path": modeler_pkl_path,
-                    "training_csv_path": doe_csv_path,
-                    "quantile_threshold": quantile_threshold,
-                    "objective_sense": objective_sense,
-                    "threshold_value": threshold,
-                    "dbscan_eps": eps_used,
-                    "dbscan_min_samples": dbscan_min_samples,
-                    "selected_bounds_path": bounds_path if selected_bounds is not None else None,
-                    "selected_bounds_volume_ratio": vol_ratio if selected_bounds is not None else None,
-                    "base_n_success_feasible": int(base_n),
-                    "nominal_n": int(nominal_n),
-                    "target_n_generated": int(n_samples),
-                    "generated_boundary": int(X_boundary_raw.shape[0]),
-                    "generated_lhc": int(X_lhc_raw.shape[0]),
-                    "generated_total_raw": int(pre_generated),
-                    "generated_total_after_pre": int(X.shape[0]),
-                    "pre_filter_kept": int(pre_kept),
-                    "r_used": float(r_used),
-                    "r_used_source": r_used_source,
-                    "has_pre_constraints": bool(has_pre_constraints),
-                    "has_post_constraints": bool(has_post_constraints),
-                    "post_penalty_active": bool(has_post_penalty),
-                    "post_lambda": float(post_lambda),
-                    "post_lambda_source": post_lambda_source,
-                },
-            )
+        prev_doe_meta = get_task_metadata_path(self.run_context, "DOE")
+        prev_modeler_meta = get_task_metadata_path(self.run_context, "Modeler")
+        if not prev_doe_meta:
+            prev_doe_meta = self.config.doe_metadata_path
+        if not prev_modeler_meta:
+            prev_modeler_meta = self.config.modeler_metadata_path
+
+        def _rel_or_abs(path: str | None) -> str | None:
+            if not path:
+                return None
+            try:
+                return os.path.relpath(path, task_dir)
+            except ValueError:
+                return path
+
+        previous = {}
+        prev_doe_ref = _rel_or_abs(prev_doe_meta)
+        prev_modeler_ref = _rel_or_abs(prev_modeler_meta)
+        if prev_doe_ref:
+            previous["DOE"] = prev_doe_ref
+        if prev_modeler_ref:
+            previous["Modeler"] = prev_modeler_ref
+
+        inputs = {
+            "user_config": os.path.relpath(
+                self.run_context.user_config_snapshot_path,
+                task_dir,
+            ),
+            "system_config_snapshot": {
+                "n_samples": n_samples,
+                "sample_multiplier": sample_multiplier,
+                "quantile_threshold": quantile_threshold,
+                "dbscan_min_samples": dbscan_min_samples,
+                "debug_level": debug_level,
+            },
+            "previous": previous,
+            "selected_features": selected_features,
+            "model_path_input": modeler_pkl_path,
+            "doe_csv_input": doe_csv_path,
+        }
+        resolved_params = {
+            "seed": int(rng_seed),
+            "objective_sense": objective_sense,
+            "threshold_value": threshold,
+            "dbscan_eps_used": eps_used,
+            "dbscan_min_samples_used": dbscan_min_samples,
+            "base_n_success_feasible": int(base_n),
+            "nominal_n": int(nominal_n),
+            "target_n_generated": int(n_samples),
+            "generated_boundary": int(X_boundary_raw.shape[0]),
+            "generated_lhc": int(X_lhc_raw.shape[0]),
+            "generated_total_raw": int(pre_generated),
+            "generated_total_after_pre": int(X.shape[0]),
+            "pre_filter_kept": int(pre_kept),
+            "r_used": float(r_used),
+            "r_used_source": r_used_source,
+            "has_pre_constraints": bool(has_pre_constraints),
+            "has_post_constraints": bool(has_post_constraints),
+            "post_penalty_active": bool(has_post_penalty),
+            "post_lambda": float(post_lambda),
+            "post_lambda_source": post_lambda_source,
+            "pre_filter_disabled_reason": pre_filter_disabled_reason,
+            "feas_model_kind_used": feasibility_model_kind_used,
+            "feas_model_path_used": feasibility_model_path_used,
+            "selected_bounds_volume_ratio": vol_ratio,
+            "workflow_info": workflow_info,
+        }
+        n_q_samples = int(mask.sum())
+        n_clusters = 0
+        cluster_sizes = []
+        if labels is not None:
+            unique = [int(v) for v in np.unique(labels) if v != -1]
+            n_clusters = len(unique)
+            cluster_sizes = [int((labels == v).sum()) for v in unique]
+        results_summary = {
+            "n_candidates_total": int(len(df)),
+            "n_q_samples": n_q_samples,
+            "n_clusters": n_clusters,
+            "cluster_sizes": cluster_sizes,
+            "n_generated_raw": int(pre_generated),
+            "n_generated_after_pre": int(X.shape[0]),
+            "post_penalty_active": bool(has_post_penalty),
+            "pred_mean_volume": pred_mean_vol,
+            "obj_mean_volume": obj_mean_vol,
+        }
+
+        public_artifacts = {}
+        meta_artifacts = {}
+        debug_artifacts = {}
+        if bounds_path:
+            public_artifacts["selected_bounds"] = os.path.relpath(bounds_path, task_dir)
+        if overlay_path:
+            debug_artifacts["raw_overlay"] = os.path.relpath(overlay_path, task_dir)
+        if dbscan_plot_path:
+            debug_artifacts["raw_dbscan"] = os.path.relpath(dbscan_plot_path, task_dir)
+        if known_optimum_plot_path:
+            debug_artifacts["raw_optimum"] = os.path.relpath(known_optimum_plot_path, task_dir)
+        if pair_overlay_paths:
+            debug_artifacts["pair_dual_clusters"] = [os.path.relpath(p, task_dir) for p in pair_overlay_paths]
+        if doe_vs_optimum_plot_paths:
+            debug_artifacts["doe_vs_optimum_pairwise"] = [
+                os.path.relpath(p, task_dir) for p in doe_vs_optimum_plot_paths
+            ]
+        if tsne_overlay_path:
+            debug_artifacts["tsne_dual_clusters"] = os.path.relpath(tsne_overlay_path, task_dir)
+
+        task_out = saver.save_task_v3(
+            run_root=self.run_context.run_root,
+            task="Explorer",
+            problem_name=doe_problem_name,
+            df=df,
+            inputs=inputs,
+            resolved_params=resolved_params,
+            results=results_summary,
+            public_artifacts=public_artifacts,
+            meta_artifacts=meta_artifacts,
+            debug_artifacts=debug_artifacts,
+        )
+        update_run_index(self.run_context, "Explorer", task_out["metadata"])
 
         return {
-            "csv": stage_out["csv"],
-            "metadata": stage_out["metadata"],
+            "csv": task_out["csv"],
+            "metadata": task_out["metadata"],
             "labels": labels,
         }

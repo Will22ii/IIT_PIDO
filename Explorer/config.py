@@ -34,7 +34,7 @@ class ExplorerSystemConfig:
 
     # DBSCAN 설정값
     dbscan_min_samples: int = 2
-    dbscan_eps_quantile: float = 0.95
+    dbscan_eps_quantile: float = 0.9
 
     # Post 제약 결합 점수 fallback 람다 (DOE 메타에 post_lambda 없을 때 사용)
     post_lambda_default: float = 2.0
@@ -42,6 +42,8 @@ class ExplorerSystemConfig:
     # 시각화 옵션
     save_plot: bool = True
     tsne_max_points: int = 2000
+    # 출력 디버그 레벨: off | full
+    debug_level: str = "off"
 
 
 @dataclass
@@ -49,6 +51,7 @@ class ExplorerConfig:
     user: ExplorerUserConfig
     system: ExplorerSystemConfig
     cae: CAEConfig
+    cae_metadata_path: str | None = None
     doe_csv_path: str | None = None
     doe_metadata_path: str | None = None
     model_pkl_path: str | None = None

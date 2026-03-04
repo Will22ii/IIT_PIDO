@@ -12,7 +12,7 @@ class ModelTrainer:
     """
     Trainer for Modeler stage.
 
-    - Fixed K-Fold (K=5)
+    - Fixed/Repeated K-Fold
     - Model registry based selection
     - Supports external model parameters (e.g. HPO results)
     - Collect fold-level predictions and models
@@ -27,12 +27,14 @@ class ModelTrainer:
         model_params: Optional[Dict] = None,   # ✅ HPO 결과 주입
         model_name: str = "xgb",
         kfold_splits: int = 5,
+        kfold_repeats: int = 1,
     ):
         self.base_random_seed = base_random_seed
         self.target_col = target_col
         self.feature_cols = feature_cols
         self.model_name = model_name
         self.kfold_splits = kfold_splits
+        self.kfold_repeats = kfold_repeats
 
         # HPO 결과 or None
         self.model_params = model_params or {}
@@ -40,6 +42,7 @@ class ModelTrainer:
         self.splitter = FixedKFoldSplitter(
             base_random_seed=self.base_random_seed,
             n_splits=self.kfold_splits,
+            n_repeats=self.kfold_repeats,
         )
 
     # -------------------------------------------------
@@ -79,7 +82,8 @@ class ModelTrainer:
         # -----------------------------
         models: List = []
         fold_predictions = []
-        oof_pred = np.zeros(len(df))
+        oof_sum = np.zeros(len(df), dtype=float)
+        oof_count = np.zeros(len(df), dtype=int)
 
         # -----------------------------
         # K-Fold loop
@@ -104,21 +108,33 @@ class ModelTrainer:
             y_valid_pred = model.predict(
                 X[valid_idx]
             )
+            y_valid_pred = np.asarray(y_valid_pred, dtype=float).reshape(-1)
 
             # store
             models.append(model)
             fold_predictions.append({
                 "run_id": run_id,
+                "repeat_id": self.splitter.get_repeat_id(run_id),
+                "fold_id": self.splitter.get_fold_id(run_id),
                 "valid_idx": valid_idx,
                 "y_pred": y_valid_pred,
             })
 
-            oof_pred[valid_idx] = y_valid_pred
+            oof_sum[valid_idx] += y_valid_pred
+            oof_count[valid_idx] += 1
+
+        oof_pred = np.divide(
+            oof_sum,
+            np.maximum(oof_count, 1),
+            out=np.zeros_like(oof_sum, dtype=float),
+            where=oof_count > 0,
+        )
 
         return {
             "models": models,
             "fold_predictions": fold_predictions,
             "oof_prediction": oof_pred,
+            "oof_prediction_count": oof_count,
             "y_true": y,
             "feature_cols": feature_cols,
         }

@@ -16,8 +16,9 @@ def clamp_ratio(value: float, *, floor: float) -> float:
 
 
 def _normalize_scope(scope: str | None) -> str:
-    value = str(scope or "x_only").strip().lower()
-    if value not in {"x_only", "cae_dependent"}:
+    # Canonical scope is pre/post only.
+    value = str(scope or "pre").strip().lower()
+    if value not in {"pre", "post"}:
         raise ValueError(f"unsupported constraint scope: {scope}")
     return value
 
@@ -63,7 +64,7 @@ def validate_constraint_defs(constraint_defs: list | None) -> list[dict]:
         except Exception as exc:
             raise ValueError(f"constraint_defs[{idx}] invalid expr syntax: {expr}") from exc
 
-        scope = _normalize_scope(raw.get("scope", "x_only"))
+        scope = _normalize_scope(raw.get("scope", "pre"))
 
         item = dict(raw)
         item["id"] = cid
@@ -205,7 +206,7 @@ def evaluate_constraints_point(
     margin_values = []
 
     for cname, cdef in _iter_constraint_defs(constraint_defs):
-        cscope = _normalize_scope(cdef.get("scope", "x_only"))
+        cscope = _normalize_scope(cdef.get("scope", "pre"))
         if scope != "all" and cscope != scope:
             continue
 

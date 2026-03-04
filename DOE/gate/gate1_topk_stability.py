@@ -2,20 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Sequence
 
 import numpy as np
 
 from utils.bounds_utils import normalize_with_bounds
-@dataclass(frozen=True)
-class Gate1Result:
-    passed: bool
-    score: float
-    coverage_ref: float
-    coverage_small: float
-    coverage_medium: float
-    thresholds: Dict[str, float]
 
 
 class Gate1TopKStability:

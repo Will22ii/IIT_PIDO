@@ -48,9 +48,11 @@ class HPORunner:
         n_trials: int = 80,
         lambda_std: float = 0.5,
         use_timestamp: bool = True,
+        show_optuna_log: bool = False,
     ):
         self.n_trials = n_trials
         self.lambda_std = lambda_std
+        self.show_optuna_log = bool(show_optuna_log)
 
     # -------------------------------------------------
     # Main entry
@@ -72,8 +74,13 @@ class HPORunner:
         -------
         dict with best_params and metrics
         """
+        if self.show_optuna_log:
+            optuna.logging.set_verbosity(optuna.logging.INFO)
+        else:
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-        study = optuna.create_study(direction="minimize")
+        sampler = optuna.samplers.TPESampler(seed=base_random_seed)
+        study = optuna.create_study(direction="minimize", sampler=sampler)
 
         objective = make_robust_objective(
             X=X,

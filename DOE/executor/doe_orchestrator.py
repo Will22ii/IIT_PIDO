@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import numpy as np
 import pandas as pd
 
@@ -14,7 +15,7 @@ from DOE.executor.constraint_filter import (
     validate_constraint_defs,
 )
 from DOE.executor.additional_orchestrator import AdditionalDOEOrchestrator
-from DOE.executor.doe_report_builder import DOEReportBuilder
+from DOE.executor.eval_sanitizer import sanitize_evaluate_output
 from DOE.executor.surrogate_factory import SurrogateFactory
 from DOE.gate.gate1_topk_stability import Gate1TopKStability
 from DOE.gate.gate2_uncertainty import Gate2Uncertainty
@@ -51,6 +52,12 @@ DEFAULT_ADDITIONAL_CFG = {
     "local_dbscan_eps_max": 0.3,
     "local_min_radius_ratio": 0.01,
     "local_tol_ratio": 0.2,
+    "local_refine_min_points": 15,
+    "local_cluster_delta_ratio": 0.02,
+    "local_singleton_box_ratio": 0.03,
+    "local_phase1_kappa": 0.75,
+    "local_phase2_kappa": 0.5,
+    "local_base_perturb_ratio": 0.02,
     "gate2_k": 2,
     "gate2_cdf_level": 0.9,
     "gate2_ratio_threshold": 0.9,
@@ -60,6 +67,13 @@ DEFAULT_ADDITIONAL_CFG = {
     "min_additional_rounds": 3,
     "stop_span_ratio_threshold": 0.3,
     "stop_anchor_spread_streak": 2,
+    "stop_min_usable_np_ratio": 20.0,
+    "probe_stage_enabled": True,
+    "probe_top_ratio": 0.3,
+    "probe_max_points": 5,
+    "probe_min_range_ratio": 0.25,
+    "probe_std_scale": 2.0,
+    "probe_perturb_ratio": 0.02,
     "initial_probe_multiplier": 2.0,
     "plan_filter_safety": 1.2,
     "plan_filter_r_floor": 0.02,
@@ -67,6 +81,7 @@ DEFAULT_ADDITIONAL_CFG = {
     "local_constraint_retry_count": 1,
     "local_constraint_shrink_factor": 0.5,
     "local_constraint_min_factor": 2.0,
+    "local_exec_pick_mode": "random",
     "post_use_penalty": True,
     "post_lambda_init": 2.0,
     "post_lambda_min": 0.25,
@@ -76,7 +91,77 @@ DEFAULT_ADDITIONAL_CFG = {
     "post_clf_min_samples": 30,
     "post_clf_min_pos": 5,
     "post_clf_min_neg": 5,
+    "local_gp_use_white_kernel": False,
 }
+
+
+def _normalize_debug_level(value: str | None) -> str:
+    level = str(value or "off").strip().lower()
+    if level not in {"off", "full"}:
+        raise ValueError("DOE debug_level must be one of: off, full")
+    return level
+
+
+def _sanitize_constraint_token(raw: str) -> str:
+    token = re.sub(r"[^0-9a-zA-Z_]+", "_", str(raw or "").strip().lower())
+    token = re.sub(r"_+", "_", token).strip("_")
+    return token or "constraint"
+
+
+def _build_constraint_column_map(
+    *,
+    results: list[dict],
+    constraint_defs: list[dict] | None,
+) -> dict[str, str]:
+    ordered_ids: list[str] = []
+    seen_ids: set[str] = set()
+
+    for item in constraint_defs or []:
+        if not isinstance(item, dict):
+            continue
+        cid = str(item.get("id", "")).strip()
+        if cid and cid not in seen_ids:
+            ordered_ids.append(cid)
+            seen_ids.add(cid)
+
+    for r in results:
+        constraints = r.get("constraints") or {}
+        if not isinstance(constraints, dict):
+            continue
+        for key, cinfo in constraints.items():
+            if not isinstance(cinfo, dict):
+                continue
+            cid = str(cinfo.get("id", key)).strip()
+            if cid and cid not in seen_ids:
+                ordered_ids.append(cid)
+                seen_ids.add(cid)
+
+    mapping: dict[str, str] = {}
+    used_tokens: set[str] = set()
+    for cid in ordered_ids:
+        base = _sanitize_constraint_token(cid)
+        token = base
+        suffix = 2
+        while token in used_tokens:
+            token = f"{base}_{suffix}"
+            suffix += 1
+        mapping[cid] = token
+        used_tokens.add(token)
+    return mapping
+
+
+def _combine_constraint_margin(*, margin_pre: float, margin_post: float) -> float:
+    pre = float(margin_pre)
+    post = float(margin_post)
+    pre_ok = bool(np.isfinite(pre))
+    post_ok = bool(np.isfinite(post))
+    if pre_ok and not post_ok:
+        return pre
+    if post_ok and not pre_ok:
+        return post
+    if pre_ok and post_ok:
+        return float(min(pre, post))
+    return float("inf")
 
 
 def _save_doe_results(
@@ -94,210 +179,153 @@ def _save_doe_results(
     resolved_params_extra: dict | None = None,
     results_extra: dict | None = None,
     extra_metadata: dict | None = None,
-    stage_name: str = "DOE",
+    task_name: str = "DOE",
     constraint_defs: list[dict] | None = None,
+    debug_level: str = "off",
 ) -> dict:
+    debug_level = _normalize_debug_level(debug_level)
+    keep_debug = debug_level == "full"
     var_names = [v["name"] for v in variables]
-    rows = []
-    constraint_rows = []
+    constraint_column_map = _build_constraint_column_map(
+        results=results,
+        constraint_defs=constraint_defs,
+    )
+    rows_public = []
+    rows_internal = []
     for r in results:
-        row = {
+        row_public = {
             "id": r["id"],
             "objective": r["objective"],
-            "feasible_pre": r.get("feasible_pre", True),
-            "feasible_post": r.get("feasible_post", True),
-            "feasible_final": r.get("feasible_final", r.get("feasible", True)),
-            "feasible": r.get("feasible", r.get("feasible_final", True)),
+            "feasible": r.get("feasible", True),
             "success": r["success"],
-            "margin_pre": r.get("margin_pre", float("inf")),
-            "margin_post": r.get("margin_post", float("inf")),
-            "constraint_margin": r.get("constraint_margin", float("inf")),
+            "source": r.get("source", "basic"),
+            "round": r.get("round"),
+            "exec_scope": r.get("exec_scope", "basic"),
         }
-        row["source"] = r.get("source", "basic")
-        row["round"] = r.get("round")
-        row["exec_scope"] = r.get("exec_scope", "basic")
         for name, v in zip(var_names, r["x"]):
-            row[name] = v
-        rows.append(row)
+            row_public[name] = v
 
         constraints = r.get("constraints") or {}
-        if isinstance(constraints, dict):
-            for cid, cinfo in constraints.items():
-                if not isinstance(cinfo, dict):
-                    continue
-                constraint_rows.append(
-                    {
-                        "sample_id": r["id"],
-                        "constraint_id": cinfo.get("id", cid),
-                        "constraint_name": cinfo.get("name", cid),
-                        "scope": cinfo.get("scope"),
-                        "type": cinfo.get("type"),
-                        "limit": cinfo.get("limit"),
-                        "value": cinfo.get("value"),
-                        "margin": cinfo.get("margin"),
-                        "g": cinfo.get("g"),
-                        "ok": cinfo.get("ok"),
-                        "expr_error": cinfo.get("expr_error"),
-                        "source": r.get("source", "basic"),
-                        "round": r.get("round"),
-                        "exec_scope": r.get("exec_scope", "basic"),
-                    }
-                )
+        if not isinstance(constraints, dict):
+            constraints = {}
+        constraint_by_id = {}
+        for cid, cinfo in constraints.items():
+            if not isinstance(cinfo, dict):
+                continue
+            resolved_id = str(cinfo.get("id", cid)).strip()
+            if resolved_id:
+                constraint_by_id[resolved_id] = cinfo
 
-    df = pd.DataFrame(rows)
-    df_constraints = pd.DataFrame(constraint_rows)
+        for constraint_id, token in constraint_column_map.items():
+            cinfo = constraint_by_id.get(constraint_id)
+            row_public[f"constraint_{token}_value"] = (
+                cinfo.get("value") if isinstance(cinfo, dict) else np.nan
+            )
+            ok = cinfo.get("ok") if isinstance(cinfo, dict) else None
+            row_public[f"constraint_{token}_feasible"] = (
+                bool(ok) if ok is not None else None
+            )
 
-    if run_context:
-        inputs = {
-            "user_config": os.path.relpath(
-                run_context.user_config_snapshot_path,
-                os.path.join(run_context.run_root, stage_name),
-            ),
-            "system_config_snapshot": system_config_snapshot or {},
-            "previous": {},
-            "variables": variables,
-            "constraint_defs": constraint_defs or [],
-        }
-        resolved_params = {
-            "n_samples": len(df),
-        }
-        if resolved_params_extra:
-            resolved_params.update(resolved_params_extra)
-        results_summary = {
-            "n_samples_total": len(df),
-            "n_success": int(df["success"].sum()) if "success" in df.columns else 0,
-            "n_feasible": int(df["feasible"].sum()) if "feasible" in df.columns else 0,
-        }
-        if not df_constraints.empty:
-            results_summary["n_constraint_rows"] = int(len(df_constraints))
-        if results_extra:
-            results_summary.update(results_extra)
-        artifacts = {}
-        stage_out = saver.save_stage_v2(
-            run_root=run_context.run_root,
-            stage=stage_name,
-            problem_name=problem_name,
-            df=df,
-            inputs=inputs,
-            resolved_params=resolved_params,
-            results=results_summary,
-            artifacts=artifacts,
+        rows_public.append(row_public)
+
+        row_internal = dict(row_public)
+        row_internal["feasible_pre"] = r.get("feasible_pre", True)
+        row_internal["feasible_post"] = r.get("feasible_post", True)
+        row_internal["margin_pre"] = r.get("margin_pre", float("inf"))
+        row_internal["margin_post"] = r.get("margin_post", float("inf"))
+        row_internal["constraint_margin"] = r.get("constraint_margin", float("inf"))
+        row_internal["source"] = r.get("source", "basic")
+        row_internal["round"] = r.get("round")
+        row_internal["exec_scope"] = r.get("exec_scope", "basic")
+        row_internal["constraint_details_json"] = json.dumps(
+            constraints,
+            ensure_ascii=False,
         )
-        post_policy_log = None
-        if results_extra and isinstance(results_extra.get("post_policy_log"), list):
-            post_policy_log = results_extra.get("post_policy_log")
-        if post_policy_log:
-            post_policy_csv = os.path.join(stage_out["artifacts_dir"], "doe_post_policy_log.csv")
-            pd.DataFrame(post_policy_log).to_csv(post_policy_csv, index=False)
-            with open(stage_out["metadata"], "r") as f:
-                meta = json.load(f)
-            meta.setdefault("artifacts", {})
-            meta["artifacts"]["post_policy_log_csv"] = os.path.relpath(
-                post_policy_csv,
-                stage_out["stage_dir"],
-            )
-            with open(stage_out["metadata"], "w") as f:
-                json.dump(meta, f, indent=2)
-        if not df_constraints.empty:
-            constraints_csv = os.path.join(stage_out["artifacts_dir"], "doe_constraints.csv")
-            df_constraints.to_csv(constraints_csv, index=False)
-            with open(stage_out["metadata"], "r") as f:
-                meta = json.load(f)
-            meta.setdefault("artifacts", {})
-            meta["artifacts"]["constraints_csv"] = os.path.relpath(
-                constraints_csv,
-                stage_out["stage_dir"],
-            )
-            with open(stage_out["metadata"], "w") as f:
-                json.dump(meta, f, indent=2)
-        update_run_index(run_context, stage_name, stage_out["metadata"])
-    else:
-        stage_out = saver.save_stage_csv(
-            stage="DOE",
-            df=df,
-            problem_name=problem_name,
-            extra_metadata={
-                "seed": seed,
-                "n_samples": len(df),
-                "workflow_info": workflow_info,
-                "objective_sense": objective_sense,
-                "variables": variables,
-                "additional_doe": additional_doe,
-                "constraint_defs": constraint_defs or [],
-                **(extra_metadata or {}),
-            },
-        )
-        if not df_constraints.empty:
-            constraints_csv = os.path.join(
-                os.path.dirname(stage_out["csv"]),
-                f"doe_constraints_{problem_name}.csv",
-            )
-            df_constraints.to_csv(constraints_csv, index=False)
-            with open(stage_out["metadata"], "r") as f:
-                meta = json.load(f)
-            meta["constraints_csv_path"] = constraints_csv
-            with open(stage_out["metadata"], "w") as f:
-                json.dump(meta, f, indent=2)
-        post_policy_log = None
-        if results_extra and isinstance(results_extra.get("post_policy_log"), list):
-            post_policy_log = results_extra.get("post_policy_log")
-        if post_policy_log:
-            post_policy_csv = os.path.join(
-                os.path.dirname(stage_out["csv"]),
-                f"doe_post_policy_log_{problem_name}.csv",
-            )
-            pd.DataFrame(post_policy_log).to_csv(post_policy_csv, index=False)
-            with open(stage_out["metadata"], "r") as f:
-                meta = json.load(f)
-            meta["post_policy_log_csv_path"] = post_policy_csv
-            with open(stage_out["metadata"], "w") as f:
-                json.dump(meta, f, indent=2)
+        rows_internal.append(row_internal)
 
-    print(f"\nDOE CSV saved to: {stage_out['csv']}")
-    print(f"DOE metadata saved to: {stage_out['metadata']}")
+    df_public = pd.DataFrame(rows_public)
+    df_internal = pd.DataFrame(rows_internal)
 
-    return {
-        "df": df,
-        "stage_out": stage_out,
+    if run_context is None:
+        raise RuntimeError("run_context is required for v3 task output.")
+
+    inputs = {
+        "user_config": os.path.relpath(
+            run_context.user_config_snapshot_path,
+            os.path.join(run_context.run_root, task_name),
+        ),
+        "system_config_snapshot": system_config_snapshot or {},
+        "previous": {},
+        "variables": variables,
+        "constraint_defs": constraint_defs or [],
     }
+    resolved_params = {
+        "n_samples": len(df_public),
+        "seed": seed,
+        "objective_sense": objective_sense,
+        "additional_doe": additional_doe,
+        "constraint_scope_schema": "pre_post_only",
+        "debug_level": debug_level,
+        "constraint_column_schema": "constraint_<id>_{value|feasible}",
+        "constraint_columns": [
+            {
+                "constraint_id": cid,
+                "value_col": f"constraint_{token}_value",
+                "feasible_col": f"constraint_{token}_feasible",
+            }
+            for cid, token in constraint_column_map.items()
+        ],
+        "workflow_info": workflow_info,
+    }
+    if resolved_params_extra:
+        resolved_params.update(resolved_params_extra)
+    if extra_metadata:
+        extra_context = dict(extra_metadata)
+        if extra_context:
+            resolved_params["extra_context"] = extra_context
 
+    results_summary = {
+        "n_samples_total": len(df_public),
+        "n_success": int(df_public["success"].sum()) if "success" in df_public.columns else 0,
+        "n_feasible": int(df_public["feasible"].sum()) if "feasible" in df_public.columns else 0,
+    }
+    if results_extra:
+        for key, value in results_extra.items():
+            results_summary[key] = value
+    public_artifacts = {}
+    meta_artifacts = {}
+    debug_artifacts = {}
+    if keep_debug:
+        debug_artifacts["results_internal_csv"] = os.path.join(
+            "artifacts", "debug", "doe_results_internal.csv"
+        )
 
-def _save_final_report(
-    *,
-    problem_name: str,
-    workflow_info: dict,
-    results: list[dict],
-    n_samples: int,
-    dimension: int,
-    objective_sense: str,
-    dump_table: bool,
-    output_path: str | None = None,
-    use_timestamp: bool = False,
-):
-    report_lines = DOEReportBuilder.build(
+    task_out = saver.save_task_v3(
+        run_root=run_context.run_root,
+        task=task_name,
         problem_name=problem_name,
-        workflow_info=workflow_info,
-        results=results,
-        n_samples=n_samples,
-        dimension=dimension,
-        objective_sense=objective_sense,
-        dump_table=dump_table,
+        df=df_public,
+        inputs=inputs,
+        resolved_params=resolved_params,
+        results=results_summary,
+        public_artifacts=public_artifacts,
+        meta_artifacts=meta_artifacts,
+        debug_artifacts=debug_artifacts,
     )
 
-    if output_path:
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write("========================================\n")
-            f.write(f"{problem_name} DOE RESULT\n")
-            f.write("========================================\n\n")
-            for line in report_lines:
-                f.write(line + "\n")
-    else:
-        saver_txt = ResultSaver(use_timestamp=use_timestamp)
-        saver_txt.save_final_txt(
-            content_lines=report_lines,
-            problem_name=problem_name,
-            workflow_info=workflow_info,
-        )
+    if keep_debug:
+        internal_csv = os.path.join(task_out["debug_dir"], "doe_results_internal.csv")
+        df_internal.to_csv(internal_csv, index=False)
+
+    update_run_index(run_context, task_name, task_out["metadata"])
+
+    print(f"\nDOE CSV saved to: {task_out['csv']}")
+    print(f"DOE metadata saved to: {task_out['metadata']}")
+
+    return {
+        "df": df_public,
+        "task_out": task_out,
+    }
 
 
 def run_doe_orchestrator(
@@ -312,8 +340,9 @@ def run_doe_orchestrator(
     use_additional: bool = False,
     additional_cfg: dict | None = None,
     run_context: RunContext | None = None,
-    stage_name: str = "DOE",
+    task_name: str = "DOE",
 ) -> list[dict]:
+    run_cfg["debug_level"] = _normalize_debug_level(run_cfg.get("debug_level", "off"))
     dim = len(variables)
     seed = run_cfg["seed"]
     n_samples_total = int(run_cfg["n_samples"])
@@ -325,7 +354,7 @@ def run_doe_orchestrator(
     var_names = [v["name"] for v in variables]
     constraint_defs = validate_constraint_defs(problem_spec.get("constraint_defs", []) or [])
     has_pre_constraints = any(
-        str(c.get("scope", "x_only")).strip().lower() == "x_only"
+        str(c.get("scope", "pre")).strip().lower() == "pre"
         for c in constraint_defs
     )
     filter_safety = float(run_cfg.get("plan_filter_safety", 1.2))
@@ -370,7 +399,7 @@ def run_doe_orchestrator(
                 X=X_probe,
                 var_names=var_names,
                 constraint_defs=constraint_defs,
-                scope="x_only",
+                scope="pre",
             )
             n_feas = int(feas_mask.sum())
             r_hat = clamp_ratio(
@@ -406,11 +435,13 @@ def run_doe_orchestrator(
 
         for i, x in enumerate(X):
             y = evaluate_func(x)
-            success = bool(y.get("success", True))
-            objective = float(y.get("objective", float("inf")))
-            outputs = y.get("outputs", {})
-            if not isinstance(outputs, dict):
-                outputs = {}
+            success, objective, outputs, invalid_reason, raw_obj_repr = sanitize_evaluate_output(y)
+            if invalid_reason is not None:
+                print(
+                    "[DOE][INVALID_OBJECTIVE] "
+                    f"idx={i} reason={invalid_reason} raw={raw_obj_repr} "
+                    "-> success=False objective=inf"
+                )
 
             constraints_pre = picked_constraints[i] if i < len(picked_constraints) else {}
             feasible_pre = evaluate_feasibility(constraints_pre)
@@ -424,7 +455,7 @@ def run_doe_orchestrator(
                     x=np.asarray(x, dtype=float),
                     var_names=var_names,
                     constraint_defs=constraint_defs,
-                    scope="cae_dependent",
+                    scope="post",
                     env_extra={**outputs, "objective": objective},
                     fail_fast_output_missing=True,
                 )
@@ -434,9 +465,11 @@ def run_doe_orchestrator(
                 ) from exc
 
             constraints = {**constraints_pre, **constraints_post}
-            feasible_final = bool(success and feasible_pre and feasible_post)
-            margin_vals = [v for v in [margin_pre, margin_post] if np.isfinite(v)]
-            constraint_margin = float(min(margin_vals) if margin_vals else float("inf"))
+            feasible = bool(success and feasible_pre and feasible_post)
+            constraint_margin = _combine_constraint_margin(
+                margin_pre=margin_pre,
+                margin_post=margin_post,
+            )
 
             results.append({
                 "id": i,
@@ -448,15 +481,14 @@ def run_doe_orchestrator(
                 "constraint_margin": float(constraint_margin),
                 "feasible_pre": bool(feasible_pre),
                 "feasible_post": bool(feasible_post),
-                "feasible_final": bool(feasible_final),
-                "feasible": bool(feasible_final),
+                "feasible": bool(feasible),
                 "success": bool(success),
             })
 
             print(
                 f"[{i+1:03d}/{n_samples}] "
                 f"objective = {objective}, "
-                f"feasible_final = {feasible_final}"
+                f"feasible = {feasible}"
             )
 
         system_snapshot = {
@@ -478,37 +510,10 @@ def run_doe_orchestrator(
             additional_doe=False,
             run_context=run_context,
             system_config_snapshot=system_snapshot,
-            stage_name=stage_name,
+            task_name=task_name,
             constraint_defs=constraint_defs,
+            debug_level=str(run_cfg.get("debug_level", "off")),
         )
-
-        report_path = None
-        if run_context:
-            report_path = os.path.join(
-                out["stage_out"]["artifacts_dir"],
-                "doe_report.txt",
-            )
-            out["stage_out"]["artifacts_dir"]
-        _save_final_report(
-            problem_name=problem_spec["name"],
-            workflow_info=workflow_info,
-            results=results,
-            n_samples=n_samples,
-            dimension=dim,
-            objective_sense=objective_sense,
-            dump_table=False,
-            output_path=report_path,
-            use_timestamp=bool(run_cfg.get("use_timestamp", False)),
-        )
-        if run_context and report_path:
-            with open(out["stage_out"]["metadata"], "r") as f:
-                meta = json.load(f)
-            meta["artifacts"]["doe_report"] = os.path.relpath(
-                report_path,
-                out["stage_out"]["stage_dir"],
-            )
-            with open(out["stage_out"]["metadata"], "w") as f:
-                json.dump(meta, f, indent=2)
 
         print("\n===================================")
         print(" DOE 실행 완료")
@@ -591,6 +596,13 @@ def run_doe_orchestrator(
         min_additional_rounds=cfg["min_additional_rounds"],
         stop_span_ratio_threshold=cfg["stop_span_ratio_threshold"],
         stop_anchor_spread_streak=cfg["stop_anchor_spread_streak"],
+        stop_min_usable_np_ratio=cfg.get("stop_min_usable_np_ratio", 20.0),
+        probe_stage_enabled=cfg.get("probe_stage_enabled", True),
+        probe_top_ratio=cfg.get("probe_top_ratio", 0.3),
+        probe_max_points=cfg.get("probe_max_points", 5),
+        probe_min_range_ratio=cfg.get("probe_min_range_ratio", 0.25),
+        probe_std_scale=cfg.get("probe_std_scale", 2.0),
+        probe_perturb_ratio=cfg.get("probe_perturb_ratio", 0.02),
         initial_probe_multiplier=cfg.get("initial_probe_multiplier", 2.0),
         plan_filter_safety=cfg.get("plan_filter_safety", 1.2),
         plan_filter_r_floor=cfg.get("plan_filter_r_floor", 0.02),
@@ -610,9 +622,16 @@ def run_doe_orchestrator(
         local_dbscan_eps_max=cfg["local_dbscan_eps_max"],
         local_min_radius_ratio=cfg["local_min_radius_ratio"],
         local_tol_ratio=cfg["local_tol_ratio"],
+        local_refine_min_points=cfg.get("local_refine_min_points", 15),
+        local_cluster_delta_ratio=cfg.get("local_cluster_delta_ratio", 0.02),
+        local_singleton_box_ratio=cfg.get("local_singleton_box_ratio", 0.03),
+        local_phase1_kappa=cfg.get("local_phase1_kappa", 0.75),
+        local_phase2_kappa=cfg.get("local_phase2_kappa", 0.5),
+        local_base_perturb_ratio=cfg.get("local_base_perturb_ratio", 0.02),
         local_constraint_retry_count=cfg.get("local_constraint_retry_count", 1),
         local_constraint_shrink_factor=cfg.get("local_constraint_shrink_factor", 0.5),
         local_constraint_min_factor=cfg.get("local_constraint_min_factor", 2.0),
+        local_exec_pick_mode=cfg.get("local_exec_pick_mode", "random"),
         post_use_penalty=cfg.get("post_use_penalty", True),
         post_lambda_init=cfg.get("post_lambda_init", 2.0),
         post_lambda_min=cfg.get("post_lambda_min", 0.25),
@@ -624,6 +643,8 @@ def run_doe_orchestrator(
         post_clf_min_neg=cfg.get("post_clf_min_neg", 5),
         hpo_runner=hpo_runner,
         force_baseline=force_baseline,
+        local_gp_seed=seed,
+        local_gp_use_white_kernel=cfg.get("local_gp_use_white_kernel", False),
     )
 
     results = orchestrator.run(
@@ -650,7 +671,7 @@ def run_doe_orchestrator(
         additional_doe=True,
         run_context=run_context,
         system_config_snapshot=system_snapshot,
-        stage_name=stage_name,
+        task_name=task_name,
         resolved_params_extra={
             "failure_reason": diagnostics.get("failure_reason"),
             "constraint_rate_hat": diagnostics.get("constraint_rate_hat"),
@@ -658,48 +679,16 @@ def run_doe_orchestrator(
             "post_lambda": diagnostics.get("post_lambda"),
             "post_model_active": diagnostics.get("post_model_active"),
         },
-        results_extra={
-            "local_metrics": diagnostics.get("local_metrics"),
-            "post_policy_log": diagnostics.get("post_policy_log"),
-        },
         extra_metadata={
             "failure_reason": diagnostics.get("failure_reason"),
-            "local_metrics": diagnostics.get("local_metrics"),
             "constraint_rate_hat": diagnostics.get("constraint_rate_hat"),
             "post_feasible_rate_hat": diagnostics.get("post_feasible_rate_hat"),
             "post_lambda": diagnostics.get("post_lambda"),
             "post_model_active": diagnostics.get("post_model_active"),
-            "post_policy_log": diagnostics.get("post_policy_log"),
         },
         constraint_defs=constraint_defs,
+        debug_level=str(run_cfg.get("debug_level", "off")),
     )
-
-    report_path = None
-    if run_context:
-        report_path = os.path.join(
-            out["stage_out"]["artifacts_dir"],
-            "doe_report.txt",
-        )
-    _save_final_report(
-        problem_name=problem_spec["name"],
-        workflow_info=workflow_info,
-        results=results,
-        n_samples=len(results),
-        dimension=dim,
-        objective_sense=objective_sense,
-        dump_table=True,
-        output_path=report_path,
-        use_timestamp=bool(run_cfg.get("use_timestamp", False)),
-    )
-    if run_context and report_path:
-        with open(out["stage_out"]["metadata"], "r") as f:
-            meta = json.load(f)
-        meta["artifacts"]["doe_report"] = os.path.relpath(
-            report_path,
-            out["stage_out"]["stage_dir"],
-        )
-        with open(out["stage_out"]["metadata"], "w") as f:
-            json.dump(meta, f, indent=2)
 
     print("\n===================================")
     print(" DOE + ADDITIONAL DOE 실행 완료")
