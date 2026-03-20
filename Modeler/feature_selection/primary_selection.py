@@ -26,6 +26,8 @@ class FeatureSelectionConfig:
     weight_global_rich: float = 0.5
     elite_small_threshold: int = 40
     elite_rich_threshold: int = 80
+    elite_mode: str = "bonus"
+    elite_bonus_beta: float = 0.30
     # decision guards
     final_score_threshold: float = 0.6
     global_score_floor: float = 0.2
@@ -461,6 +463,13 @@ class FeatureSelector:
         we = 1.0 - wg
         return float(np.clip(wg, 0.0, 1.0)), float(np.clip(we, 0.0, 1.0))
 
+    @staticmethod
+    def _normalize_elite_mode(mode: str) -> str:
+        mode_norm = str(mode).strip().lower()
+        if mode_norm not in {"blend", "bonus", "off"}:
+            return "bonus"
+        return mode_norm
+
     def _finalize_selection(
         self,
         *,
@@ -509,19 +518,38 @@ class FeatureSelector:
             out["perm_vote_score_elite"] = pd.to_numeric(out["perm_vote_score_global"], errors="coerce").fillna(0.0)
             out["drop_vote_score_elite"] = pd.to_numeric(out["drop_vote_score_global"], errors="coerce").fillna(0.0)
 
-        wg, we = self._resolve_scale_weights(low_data=bool(low_data), n_elite=int(n_elite))
-        out["weight_global"] = float(wg)
-        out["weight_elite"] = float(we)
-        out["final_score"] = (
-            float(wg) * pd.to_numeric(out["global_score"], errors="coerce").fillna(0.0)
-            + float(we) * pd.to_numeric(out["elite_score"], errors="coerce").fillna(0.0)
-        )
+        global_score = pd.to_numeric(out["global_score"], errors="coerce").fillna(0.0)
+        elite_score = pd.to_numeric(out["elite_score"], errors="coerce").fillna(0.0)
+        elite_mode = self._normalize_elite_mode(self.config.elite_mode)
+        out["elite_mode"] = str(elite_mode)
+
+        if elite_mode == "blend":
+            wg, we = self._resolve_scale_weights(low_data=bool(low_data), n_elite=int(n_elite))
+            out["weight_global"] = float(wg)
+            out["weight_elite"] = float(we)
+            out["elite_bonus_beta"] = 0.0
+            out["elite_bonus"] = 0.0
+            out["final_score"] = (float(wg) * global_score) + (float(we) * elite_score)
+        elif elite_mode == "bonus":
+            beta = float(np.clip(float(self.config.elite_bonus_beta), 0.0, 1.0))
+            bonus_gap = (elite_score - global_score).clip(lower=0.0)
+            out["weight_global"] = 1.0
+            out["weight_elite"] = 0.0
+            out["elite_bonus_beta"] = float(beta)
+            out["elite_bonus"] = float(beta) * bonus_gap
+            out["final_score"] = global_score + out["elite_bonus"]
+        else:
+            out["weight_global"] = 1.0
+            out["weight_elite"] = 0.0
+            out["elite_bonus_beta"] = 0.0
+            out["elite_bonus"] = 0.0
+            out["final_score"] = global_score
 
         tau = float(self.config.final_score_threshold)
         g_floor = float(self.config.global_score_floor)
         out["selected"] = (
             (pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0) >= tau)
-            & (pd.to_numeric(out["global_score"], errors="coerce").fillna(0.0) >= g_floor)
+            & (global_score >= g_floor)
         )
         out["reason"] = np.where(out["selected"], "weighted_vote_pass", "weighted_vote_fail")
         out["forced_by_constraint"] = False

@@ -8,6 +8,7 @@ from sklearn.dummy import DummyClassifier
 from xgboost import XGBClassifier
 
 from Modeler.executor.trainer import ModelTrainer
+from utils.bool_mask import to_bool_mask
 
 
 @dataclass
@@ -16,18 +17,6 @@ class ModelArtifactResult:
     feas_model_path: str | None
     feas_model_kind: str
     feas_model_stats: dict
-
-
-def _to_bool_mask(series: pd.Series) -> np.ndarray:
-    if series.dtype == bool:
-        return series.fillna(False).to_numpy(dtype=bool)
-    return (
-        series.astype(str)
-        .str.strip()
-        .str.lower()
-        .isin({"true", "1", "y", "yes", "t"})
-        .to_numpy(dtype=bool)
-    )
 
 
 def train_and_save_model_artifacts(
@@ -88,7 +77,11 @@ def train_and_save_model_artifacts(
             df_cls = pd.DataFrame(columns=needed_cols)
 
         if target_feas_col in df_cls.columns and len(df_cls) > 0:
-            y_cls = _to_bool_mask(df_cls[target_feas_col]).astype(int)
+            y_cls = to_bool_mask(
+                df_cls[target_feas_col],
+                column_name=target_feas_col,
+                warn_prefix="[Modeler][BoolParse]",
+            ).astype(int)
             X_cls = df_cls[selected_features].to_numpy(dtype=float)
         else:
             y_cls = np.asarray([], dtype=int)

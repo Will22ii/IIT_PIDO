@@ -7,17 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-
-def _to_bool_mask(series: pd.Series) -> np.ndarray:
-    if series.dtype == bool:
-        return series.fillna(False).to_numpy(dtype=bool)
-    return (
-        series.astype(str)
-        .str.strip()
-        .str.lower()
-        .isin({"true", "1", "y", "yes", "t"})
-        .to_numpy(dtype=bool)
-    )
+from utils.bool_mask import to_bool_mask
 
 
 def _known_optimum_map(known_optimum: object | None) -> dict[str, float]:
@@ -39,18 +29,34 @@ def _constraint_mask(df: pd.DataFrame, *, respect_constraints: bool) -> np.ndarr
         return np.zeros((0,), dtype=bool)
     mask = np.ones((len(df),), dtype=bool)
     if "success" in df.columns:
-        mask &= _to_bool_mask(df["success"])
+        mask &= to_bool_mask(
+            df["success"],
+            column_name="success",
+            warn_prefix="[ExplorerPlot][BoolParse]",
+        )
     if not respect_constraints:
         return mask
 
     if "feasible" in df.columns:
-        mask &= _to_bool_mask(df["feasible"])
+        mask &= to_bool_mask(
+            df["feasible"],
+            column_name="feasible",
+            warn_prefix="[ExplorerPlot][BoolParse]",
+        )
         return mask
 
     if "feasible_pre" in df.columns:
-        mask &= _to_bool_mask(df["feasible_pre"])
+        mask &= to_bool_mask(
+            df["feasible_pre"],
+            column_name="feasible_pre",
+            warn_prefix="[ExplorerPlot][BoolParse]",
+        )
     if "feasible_post" in df.columns:
-        mask &= _to_bool_mask(df["feasible_post"])
+        mask &= to_bool_mask(
+            df["feasible_post"],
+            column_name="feasible_post",
+            warn_prefix="[ExplorerPlot][BoolParse]",
+        )
     return mask
 
 

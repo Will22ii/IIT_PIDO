@@ -56,6 +56,7 @@ def save_modeler_outputs(
     plot_path: str | None,
     drop_plot_path: str | None,
     compare_plot_path: str | None,
+    secondary_plot_path: str | None,
 ) -> ModelerSaveResult:
     base_meta = doe_meta or {}
     workflow_info = base_meta.get("workflow_info", {}) if base_meta else {}
@@ -100,18 +101,17 @@ def save_modeler_outputs(
         "fi_scale_weight_global_default": float(config_system.fi_weight_global_default),
         "fi_scale_weight_global_low": float(config_system.fi_weight_global_low),
         "fi_scale_weight_global_rich": float(config_system.fi_weight_global_rich),
+        "fi_elite_mode": str(config_system.fi_elite_mode),
+        "fi_elite_bonus_beta": float(config_system.fi_elite_bonus_beta),
         "fi_final_score_threshold": float(config_system.fi_final_score_threshold),
         "fi_global_score_floor": float(config_system.fi_global_score_floor),
         "fi_use_score_drop": bool(config_system.fi_use_score_drop),
         "fi_drop_metric": str(config_system.fi_drop_metric),
         "use_secondary_selection": bool(config_user.use_secondary_selection),
-        "secondary_n_knots": int(config_system.secondary_n_knots),
-        "secondary_ridge_alpha": float(config_system.secondary_ridge_alpha),
-        "secondary_null_repeats": int(config_system.secondary_null_repeats),
-        "secondary_min_mean_r2": float(config_system.secondary_min_mean_r2),
-        "secondary_min_delta_vs_null": float(config_system.secondary_min_delta_vs_null),
+        "secondary_target_kr": int(config_system.secondary_target_kr),
+        "secondary_min_repeats": int(config_system.secondary_min_repeats),
+        "secondary_min_delta_r2": float(config_system.secondary_min_delta_r2),
         "secondary_min_freq": float(config_system.secondary_min_freq),
-        "secondary_fold_pass_r2": float(config_system.secondary_fold_pass_r2),
         "has_post_constraints": bool(has_post_constraints),
         "feas_model_kind": feas_model_kind,
         "workflow_info": workflow_info,
@@ -164,6 +164,8 @@ def save_modeler_outputs(
         debug_artifacts["feature_selection_drop_plot"] = os.path.relpath(drop_plot_path, task_dir)
     if compare_plot_path and os.path.exists(compare_plot_path):
         debug_artifacts["feature_selection_compare_plot"] = os.path.relpath(compare_plot_path, task_dir)
+    if secondary_plot_path and os.path.exists(secondary_plot_path):
+        debug_artifacts["feature_selection_secondary_plot"] = os.path.relpath(secondary_plot_path, task_dir)
 
     out = saver.save_task_v3(
         run_root=run_context.run_root,

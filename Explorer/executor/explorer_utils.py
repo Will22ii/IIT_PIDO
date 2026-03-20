@@ -141,17 +141,194 @@ def apply_bounds_margin(
     selected_bounds: list[Tuple[float, float]],
     bounds: list[Tuple[float, float]],
     margin_ratio: float,
+    min_volume_ratio: float = 0.20,
 ) -> list[Tuple[float, float]]:
-    if margin_ratio <= 0:
+    if not selected_bounds or not bounds or len(selected_bounds) != len(bounds):
         return selected_bounds
-    spans = [float(ub - lb) for lb, ub in bounds]
-    mean_span = float(np.mean(spans)) if spans else 0.0
-    eps = mean_span * float(margin_ratio)
-    if eps <= 0:
+
+    v_cap = 0.25
+    min_v = float(np.clip(min_volume_ratio, 0.0, 1.0))
+
+    def _volume_ratio(
+        *,
+        sel_bounds: list[Tuple[float, float]],
+    ) -> float:
+        ratios = []
+        for (s_lb, s_ub), (g_lb, g_ub) in zip(sel_bounds, bounds):
+            g_span = float(g_ub - g_lb)
+            if g_span <= 0.0:
+                ratios.append(0.0)
+                continue
+            s_lo = float(min(s_lb, s_ub))
+            s_hi = float(max(s_lb, s_ub))
+            ratios.append(max(0.0, (s_hi - s_lo) / g_span))
+        return float(np.prod(ratios)) if ratios else 0.0
+
+    def _expand_interval_asymmetric(
+        *,
+        lo: float,
+        hi: float,
+        gl: float,
+        gu: float,
+        target_width: float,
+    ) -> tuple[float, float]:
+        gl = float(gl)
+        gu = float(gu)
+        lo = float(np.clip(lo, gl, gu))
+        hi = float(np.clip(hi, gl, gu))
+        if hi < lo:
+            lo, hi = hi, lo
+
+        max_w = max(gu - gl, 0.0)
+        tgt = float(np.clip(target_width, 0.0, max_w))
+        cur_w = max(hi - lo, 0.0)
+        if cur_w >= tgt - 1e-12:
+            return lo, hi
+
+        need = tgt - cur_w
+        left_room = max(lo - gl, 0.0)
+        right_room = max(gu - hi, 0.0)
+
+        add_left = min(left_room, 0.5 * need)
+        add_right = min(right_room, 0.5 * need)
+        lo -= add_left
+        hi += add_right
+        need -= (add_left + add_right)
+        left_room -= add_left
+        right_room -= add_right
+
+        if need > 1e-12:
+            if right_room >= left_room:
+                extra_right = min(right_room, need)
+                hi += extra_right
+                need -= extra_right
+                right_room -= extra_right
+                if need > 1e-12:
+                    extra_left = min(left_room, need)
+                    lo -= extra_left
+                    need -= extra_left
+            else:
+                extra_left = min(left_room, need)
+                lo -= extra_left
+                need -= extra_left
+                left_room -= extra_left
+                if need > 1e-12:
+                    extra_right = min(right_room, need)
+                    hi += extra_right
+                    need -= extra_right
+
+        lo = float(np.clip(lo, gl, gu))
+        hi = float(np.clip(hi, gl, gu))
+        if hi < lo:
+            lo, hi = hi, lo
+        return lo, hi
+
+    def _current_ratios(sel_bounds: list[Tuple[float, float]]) -> tuple[list[float], list[float]]:
+        ratios: list[float] = []
+        spans: list[float] = []
+        for (s_lb, s_ub), (g_lb, g_ub) in zip(sel_bounds, bounds):
+            gl = float(g_lb)
+            gu = float(g_ub)
+            g_span = max(gu - gl, 0.0)
+            spans.append(g_span)
+            if g_span <= 0.0:
+                ratios.append(0.0)
+                continue
+            lo = float(np.clip(min(s_lb, s_ub), gl, gu))
+            hi = float(np.clip(max(s_lb, s_ub), gl, gu))
+            ratios.append(float(np.clip((hi - lo) / g_span, 0.0, 1.0)))
+        return ratios, spans
+
+    def _widen_to_ratios(
+        *,
+        base_bounds: list[Tuple[float, float]],
+        target_ratios: list[float],
+    ) -> list[Tuple[float, float]]:
+        out: list[Tuple[float, float]] = []
+        for (s_lb, s_ub), (g_lb, g_ub), t_ratio in zip(base_bounds, bounds, target_ratios):
+            gl = float(g_lb)
+            gu = float(g_ub)
+            g_span = max(gu - gl, 0.0)
+            lo = float(np.clip(min(s_lb, s_ub), gl, gu))
+            hi = float(np.clip(max(s_lb, s_ub), gl, gu))
+            target_w = float(np.clip(t_ratio, 0.0, 1.0)) * g_span
+            lo_new, hi_new = _expand_interval_asymmetric(
+                lo=lo,
+                hi=hi,
+                gl=gl,
+                gu=gu,
+                target_width=target_w,
+            )
+            out.append((lo_new, hi_new))
+        return out
+
+    raw_v = _volume_ratio(sel_bounds=selected_bounds)
+    if not np.isfinite(raw_v):
         return selected_bounds
-    expanded = []
-    for (s_lb, s_ub), (o_lb, o_ub) in zip(selected_bounds, bounds):
-        lb_new = max(float(s_lb) - eps, float(o_lb))
-        ub_new = min(float(s_ub) + eps, float(o_ub))
-        expanded.append((lb_new, ub_new))
+    if raw_v >= v_cap and raw_v >= min_v:
+        return selected_bounds
+
+    expanded = list(selected_bounds)
+    base_margin = float(margin_ratio)
+
+    if raw_v < v_cap and base_margin > 0.0:
+        m = base_margin * max(v_cap - raw_v, 0.0) / v_cap
+        if m > 0.0:
+            expanded_try = []
+            for (s_lb, s_ub), (g_lb, g_ub) in zip(expanded, bounds):
+                gl = float(g_lb)
+                gu = float(g_ub)
+                g_span = max(gu - gl, 1e-12)
+                s_lo = float(min(s_lb, s_ub))
+                s_hi = float(max(s_lb, s_ub))
+                target_w = max(s_hi - s_lo, 0.0) + 2.0 * m * g_span
+                lo, hi = _expand_interval_asymmetric(
+                    lo=s_lo,
+                    hi=s_hi,
+                    gl=gl,
+                    gu=gu,
+                    target_width=target_w,
+                )
+                if not np.isfinite(lo) or not np.isfinite(hi) or hi < lo:
+                    return selected_bounds
+                expanded_try.append((lo, hi))
+            expanded = expanded_try
+
+    cur_v = _volume_ratio(sel_bounds=expanded)
+    if not np.isfinite(cur_v):
+        return selected_bounds
+    if min_v <= 0.0 or cur_v >= min_v:
+        return expanded
+
+    d = max(int(len(bounds)), 1)
+    alpha = float((max(min_v, 1e-12) / max(cur_v, 1e-12)) ** (1.0 / float(d)))
+    if not np.isfinite(alpha):
+        return expanded
+
+    ratios_cur, _ = _current_ratios(expanded)
+    target_ratios = [min(1.0, max(0.0, float(r) * max(alpha, 1.0))) for r in ratios_cur]
+    expanded = _widen_to_ratios(base_bounds=expanded, target_ratios=target_ratios)
+
+    cur_v = _volume_ratio(sel_bounds=expanded)
+    if not np.isfinite(cur_v):
+        return selected_bounds
+    if cur_v >= min_v:
+        return expanded
+
+    # Additional floor booster: move each per-dimension ratio toward 1.0 with a shared beta
+    # and solve the smallest beta that satisfies target volume.
+    ratios_cur, _ = _current_ratios(expanded)
+    lo_beta = 0.0
+    hi_beta = 1.0
+    for _ in range(40):
+        mid = 0.5 * (lo_beta + hi_beta)
+        mid_ratios = [float(r + mid * (1.0 - r)) for r in ratios_cur]
+        vol_mid = float(np.prod(mid_ratios)) if mid_ratios else 0.0
+        if vol_mid >= min_v:
+            hi_beta = mid
+        else:
+            lo_beta = mid
+    final_ratios = [float(r + hi_beta * (1.0 - r)) for r in ratios_cur]
+    expanded = _widen_to_ratios(base_bounds=expanded, target_ratios=final_ratios)
+
     return expanded

@@ -4,7 +4,6 @@ from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.manifold import TSNE
 
 
 def plot_raw_overlay(
@@ -302,112 +301,6 @@ def plot_dual_cluster_pair(
             if xo.shape[0] == len(feature_names):
                 ax_left.scatter(xo[i], xo[j], marker="*", s=140, color="red", zorder=5)
                 ax_right.scatter(xo[i], xo[j], marker="*", s=140, color="red", zorder=5)
-
-    fig.tight_layout()
-    fig.savefig(plot_path, dpi=150)
-    plt.close(fig)
-    return plot_path
-
-
-def plot_dual_cluster_tsne(
-    *,
-    X_pred: np.ndarray,
-    labels_pred: np.ndarray,
-    X_obj: np.ndarray,
-    labels_obj: np.ndarray,
-    x_opt: list[np.ndarray] | np.ndarray | None = None,
-    problem_name: str,
-    project_root: str,
-    use_timestamp: bool,
-    max_points: int = 2000,
-    save_path: str | None = None,
-) -> str:
-    output_dir = os.path.join(project_root, "result", "explorer")
-    os.makedirs(output_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S") if use_timestamp else ""
-    suffix = f"_{ts}" if ts else ""
-    filename = f"explorer_tsne_dual_{problem_name}{suffix}.png"
-    plot_path = save_path or os.path.join(output_dir, filename)
-
-    def _downsample(X: np.ndarray, y: np.ndarray):
-        if X.shape[0] <= max_points:
-            return X, y
-        rng = np.random.default_rng(42)
-        idx = rng.choice(X.shape[0], size=max_points, replace=False)
-        return X[idx], y[idx]
-
-    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6))
-    ax_left, ax_right = axes
-
-    if X_pred.size:
-        Xp, yp = _downsample(X_pred, labels_pred)
-        x_opts = x_opt if isinstance(x_opt, list) else ([x_opt] if x_opt is not None else [])
-        if x_opts and all(xo.shape[0] == Xp.shape[1] for xo in x_opts):
-            Xp_aug = np.vstack([Xp] + [xo.reshape(1, -1) for xo in x_opts])
-        else:
-            Xp_aug = Xp
-        n_pred = Xp_aug.shape[0]
-        perplexity_pred = min(30.0, max(5.0, float(n_pred // 3)))
-        if n_pred <= perplexity_pred:
-            perplexity_pred = max(1.0, float(n_pred - 1))
-        tsne_pred = TSNE(
-            n_components=2,
-            init="pca",
-            learning_rate="auto",
-            random_state=42,
-            perplexity=perplexity_pred,
-        )
-        Zp = tsne_pred.fit_transform(Xp_aug)
-        Zp_main = Zp[:Xp.shape[0]]
-        for lab, color, name in [(0, "#1f77b4", "pred:best"), (1, "#17becf", "pred:second")]:
-            mask = yp == lab
-            if np.any(mask):
-                ax_left.scatter(Zp_main[mask, 0], Zp_main[mask, 1], s=14, alpha=0.85, color=color, label=name)
-        if x_opts and all(xo.shape[0] == Xp.shape[1] for xo in x_opts):
-            for k in range(len(x_opts)):
-                z_opt = Zp[-(k + 1)]
-                ax_left.scatter(z_opt[0], z_opt[1], marker="*", s=140, color="red", zorder=5)
-        ax_left.set_title("t-SNE: model clusters")
-        ax_left.grid(True, alpha=0.3)
-        ax_left.legend(loc="best", frameon=False)
-    else:
-        ax_left.set_title("t-SNE: model clusters (empty)")
-        ax_left.axis("off")
-
-    if X_obj.size:
-        Xo, yo = _downsample(X_obj, labels_obj)
-        x_opts = x_opt if isinstance(x_opt, list) else ([x_opt] if x_opt is not None else [])
-        if x_opts and all(xo.shape[0] == Xo.shape[1] for xo in x_opts):
-            Xo_aug = np.vstack([Xo] + [xo.reshape(1, -1) for xo in x_opts])
-        else:
-            Xo_aug = Xo
-        n_obj = Xo_aug.shape[0]
-        perplexity_obj = min(30.0, max(5.0, float(n_obj // 3)))
-        if n_obj <= perplexity_obj:
-            perplexity_obj = max(1.0, float(n_obj - 1))
-        tsne_obj = TSNE(
-            n_components=2,
-            init="pca",
-            learning_rate="auto",
-            random_state=42,
-            perplexity=perplexity_obj,
-        )
-        Zo = tsne_obj.fit_transform(Xo_aug)
-        Zo_main = Zo[:Xo.shape[0]]
-        for lab, color, name in [(0, "#ff7f0e", "obj:best"), (1, "#2ca02c", "obj:second")]:
-            mask = yo == lab
-            if np.any(mask):
-                ax_right.scatter(Zo_main[mask, 0], Zo_main[mask, 1], s=14, alpha=0.85, color=color, label=name)
-        if x_opts and all(xo.shape[0] == Xo.shape[1] for xo in x_opts):
-            for k in range(len(x_opts)):
-                z_opt = Zo[-(k + 1)]
-                ax_right.scatter(z_opt[0], z_opt[1], marker="*", s=140, color="red", zorder=5)
-        ax_right.set_title("t-SNE: objective clusters")
-        ax_right.grid(True, alpha=0.3)
-        ax_right.legend(loc="best", frameon=False)
-    else:
-        ax_right.set_title("t-SNE: objective clusters (empty)")
-        ax_right.axis("off")
 
     fig.tight_layout()
     fig.savefig(plot_path, dpi=150)

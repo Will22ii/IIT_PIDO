@@ -7,7 +7,9 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from Modeler.executor.data_workflow import prepare_modeler_data_policy
+from Modeler.executor.data_workflow import (
+    prepare_modeler_data_policy,
+)
 from Modeler.executor.hpo_workflow import (
     resolve_hpo_params,
     update_hpo_cache,
@@ -90,6 +92,8 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
         "weight_global_rich": config.system.fi_weight_global_rich,
         "elite_small_threshold": config.system.fi_elite_small_threshold,
         "elite_rich_threshold": config.system.fi_elite_rich_threshold,
+        "elite_mode": config.system.fi_elite_mode,
+        "elite_bonus_beta": config.system.fi_elite_bonus_beta,
         "final_score_threshold": config.system.fi_final_score_threshold,
         "global_score_floor": config.system.fi_global_score_floor,
         "quantile_top_ratio_default": config.system.fi_quantile_top_ratio_default,
@@ -227,10 +231,12 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
         keep_debug=keep_debug,
         use_score_drop=bool(config.system.fi_use_score_drop),
     )
+    primary_selected_df = selection_result.selected_df.copy()
     selected_df = selection_result.selected_df
     selected_features = selection_result.selected_features
     selected_path = selection_result.selected_path
 
+    secondary_diagnostics: list[dict] = []
     if use_secondary_selection:
         core_features = list(selected_features)
         core_set = set(str(f) for f in core_features)
@@ -238,21 +244,25 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
             f for f in feature_cols
             if str(f) not in core_set
         ]
+        df_secondary = df.loc[elite_mask].reset_index(drop=True)
+        print(
+            "[Modeler][Secondary][DATA] "
+            f"N={len(df_secondary)} core={len(core_features)} "
+            f"candidates={len(secondary_candidates)} "
+            f"elite_ratio_eff={float(elite_ratio_eff):.3f}"
+        )
         secondary_cfg = SecondarySelectionConfig(
-            n_knots=int(config.system.secondary_n_knots),
-            ridge_alpha=float(config.system.secondary_ridge_alpha),
-            null_repeats=int(config.system.secondary_null_repeats),
-            min_mean_r2=float(config.system.secondary_min_mean_r2),
-            min_delta_vs_null=float(config.system.secondary_min_delta_vs_null),
+            target_kr=int(config.system.secondary_target_kr),
+            min_repeats=int(config.system.secondary_min_repeats),
+            min_delta_r2=float(config.system.secondary_min_delta_r2),
             min_freq=float(config.system.secondary_min_freq),
-            fold_pass_r2=float(config.system.secondary_fold_pass_r2),
         )
         secondary_result = run_secondary_selection(
-            df=df,
+            df=df_secondary,
             target_col=target_col,
             base_seed=int(base_seed),
-            model_name=model_name,
-            model_params=best_params,
+            model_name=str(model_name),
+            model_params=dict(best_params or {}),
             kfold_splits=int(kfold_splits),
             kfold_repeats=int(kfold_repeats),
             core_features=core_features,
@@ -264,6 +274,7 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
             selected_features=selected_features,
             secondary_features=secondary_result.selected_features,
         )
+        secondary_diagnostics = list(secondary_result.diagnostics or [])
         selected_df.to_csv(selected_path, index=False)
 
     cleanup_fi_temp_artifacts(
@@ -276,13 +287,15 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
         drop_elite_path=drop_elite_path,
     )
 
-    plot_path, drop_plot_path, compare_plot_path = render_fi_debug_plots(
+    plot_path, drop_plot_path, compare_plot_path, secondary_plot_path = render_fi_debug_plots(
         keep_debug=keep_debug,
         debug_dir=debug_dir,
-        selected_df=selected_df,
+        primary_selected_df=primary_selected_df,
         perm_epsilon=float(config.system.perm_epsilon),
         drop_epsilon=float(config.system.fi_drop_epsilon),
         use_score_drop=bool(config.system.fi_use_score_drop),
+        use_secondary_selection=bool(use_secondary_selection),
+        secondary_diagnostics=secondary_diagnostics,
     )
     if plot_path:
         print(f"- Saved feature selection plot: {plot_path}")
@@ -347,6 +360,7 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
         plot_path=plot_path,
         drop_plot_path=drop_plot_path,
         compare_plot_path=compare_plot_path,
+        secondary_plot_path=secondary_plot_path,
     )
 
     if hpo_signature and best_params:

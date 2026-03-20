@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from CAE_tool_interface.config import CAEConfig
 
@@ -24,11 +24,13 @@ class ExplorerSystemConfig:
     # 경계 샘플 중 코너 조합 비율 (0~1)
     boundary_corner_ratio: float = 0.4
 
-    # 선택 경계 마진 비율 (평균 span 기준, 0이면 미사용)
-    bounds_margin_ratio: float = 0.0
+    # 선택 경계 마진 기본 계수 (adaptive: m = base * (0.25 - raw_v) / 0.25, raw_v>=0.25면 off)
+    bounds_margin_ratio: float = 0.03
+    # 선택 경계 최소 부피비(역마진 floor). raw/final volume이 이 값보다 작으면 확장 시도
+    bounds_min_volume_ratio: float = 0.20
 
     # 상위/하위 분위수 기준
-    quantile_threshold: float = 0.95
+    quantile_threshold: float = 0.90
     # 최소 top-k 보장 개수
     min_topk_count: int = 20
 
@@ -41,9 +43,14 @@ class ExplorerSystemConfig:
 
     # 시각화 옵션
     save_plot: bool = True
-    tsne_max_points: int = 2000
     # 출력 디버그 레벨: off | full
     debug_level: str = "off"
+    # Explorer 전략 ID (배치 실험 구분용)
+    strategy_id: str = "S0_baseline_dual_union"
+    # Probe 기반 전략 시작점 개수(미사용 전략에서도 메타 기록용)
+    probe_multistart: int = 20
+    # 전략별 추가 파라미터 메타(실험 추적용)
+    strategy_params: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass

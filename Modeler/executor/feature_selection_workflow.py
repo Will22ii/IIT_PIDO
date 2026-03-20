@@ -14,7 +14,15 @@ from Modeler.visualization.feature_selection_plots import (
     plot_drop_effect,
     plot_perm_drop_compare,
     plot_perm_effect,
+    plot_secondary_selection,
 )
+
+
+def _normalize_elite_mode(mode: str) -> str:
+    mode_norm = str(mode).strip().lower()
+    if mode_norm not in {"blend", "bonus", "off"}:
+        return "bonus"
+    return mode_norm
 
 
 @dataclass
@@ -54,6 +62,8 @@ def run_fi_selection_workflow(
     analyzer = ImportanceAnalyzer(
         perm_sample_size=perm_sample_size,
     )
+    elite_mode = _normalize_elite_mode(feature_selection_cfg.get("elite_mode", "bonus"))
+    use_elite_scale = elite_mode != "off"
 
     importance_global = analyzer.run_perm_effect(
         models=models,
@@ -64,22 +74,27 @@ def run_fi_selection_workflow(
         subset_mask=None,
         scale_label="global",
     )
-    importance_elite = analyzer.run_perm_effect(
-        models=models,
-        fold_predictions=fold_predictions,
-        X_ref=X_ref,
-        problem_name=problem_name,
-        random_seed=base_seed,
-        subset_mask=elite_mask,
-        scale_label="elite",
-    )
-    perm_imp_df = pd.concat(
-        [
-            importance_global.get("perm_effect_raw", pd.DataFrame()),
-            importance_elite.get("perm_effect_raw", pd.DataFrame()),
-        ],
-        ignore_index=True,
-    )
+    if use_elite_scale:
+        importance_elite = analyzer.run_perm_effect(
+            models=models,
+            fold_predictions=fold_predictions,
+            X_ref=X_ref,
+            problem_name=problem_name,
+            random_seed=base_seed,
+            subset_mask=elite_mask,
+            scale_label="elite",
+        )
+        perm_imp_df = pd.concat(
+            [
+                importance_global.get("perm_effect_raw", pd.DataFrame()),
+                importance_elite.get("perm_effect_raw", pd.DataFrame()),
+            ],
+            ignore_index=True,
+        )
+    else:
+        importance_elite = {"perm_effect_raw": pd.DataFrame()}
+        perm_imp_df = importance_global.get("perm_effect_raw", pd.DataFrame()).copy()
+        print("[Modeler][FI-ELITE] elite_mode=off -> skip elite permutation importance")
 
     drop_imp_df = pd.DataFrame()
     if bool(use_score_drop):
@@ -93,23 +108,27 @@ def run_fi_selection_workflow(
             subset_mask=None,
             scale_label="global",
         )
-        drop_elite = analyzer.run_score_drop(
-            models=models,
-            fold_predictions=fold_predictions,
-            X_ref=X_ref,
-            y_true=y_true,
-            problem_name=problem_name,
-            random_seed=base_seed,
-            subset_mask=elite_mask,
-            scale_label="elite",
-        )
-        drop_imp_df = pd.concat(
-            [
-                drop_global.get("score_drop_raw", pd.DataFrame()),
-                drop_elite.get("score_drop_raw", pd.DataFrame()),
-            ],
-            ignore_index=True,
-        )
+        if use_elite_scale:
+            drop_elite = analyzer.run_score_drop(
+                models=models,
+                fold_predictions=fold_predictions,
+                X_ref=X_ref,
+                y_true=y_true,
+                problem_name=problem_name,
+                random_seed=base_seed,
+                subset_mask=elite_mask,
+                scale_label="elite",
+            )
+            drop_imp_df = pd.concat(
+                [
+                    drop_global.get("score_drop_raw", pd.DataFrame()),
+                    drop_elite.get("score_drop_raw", pd.DataFrame()),
+                ],
+                ignore_index=True,
+            )
+        else:
+            drop_imp_df = drop_global.get("score_drop_raw", pd.DataFrame()).copy()
+            print("[Modeler][FI-ELITE] elite_mode=off -> skip elite score-drop importance")
 
     selector = FeatureSelector(
         FeatureSelectionConfig(**feature_selection_cfg)
@@ -228,34 +247,45 @@ def render_fi_debug_plots(
     *,
     keep_debug: bool,
     debug_dir: str,
-    selected_df: pd.DataFrame,
+    primary_selected_df: pd.DataFrame,
     perm_epsilon: float,
     drop_epsilon: float,
     use_score_drop: bool,
-) -> tuple[str | None, str | None, str | None]:
+    use_secondary_selection: bool = False,
+    secondary_diagnostics: list[dict] | None = None,
+) -> tuple[str | None, str | None, str | None, str | None]:
     plot_path = None
     drop_plot_path = None
     compare_plot_path = None
+    secondary_plot_path = None
     if not keep_debug:
-        return plot_path, drop_plot_path, compare_plot_path
+        return plot_path, drop_plot_path, compare_plot_path, secondary_plot_path
 
     plot_path = os.path.join(debug_dir, "feature_selection_plot.png")
     plot_perm_effect(
-        selected_df=selected_df,
+        selected_df=primary_selected_df,
         perm_epsilon=perm_epsilon,
         output_path=plot_path,
     )
-    if bool(use_score_drop) and ("drop_metric_mean" in selected_df.columns):
+    if bool(use_score_drop) and ("drop_metric_mean" in primary_selected_df.columns):
         drop_plot_path = os.path.join(debug_dir, "feature_selection_drop_plot.png")
         plot_drop_effect(
-            selected_df=selected_df,
+            selected_df=primary_selected_df,
             drop_epsilon=drop_epsilon,
             metric_col="drop_metric_mean",
             output_path=drop_plot_path,
         )
         compare_plot_path = os.path.join(debug_dir, "feature_selection_compare_plot.png")
         plot_perm_drop_compare(
-            selected_df=selected_df,
+            selected_df=primary_selected_df,
             output_path=compare_plot_path,
         )
-    return plot_path, drop_plot_path, compare_plot_path
+    if bool(use_secondary_selection):
+        sec_df = pd.DataFrame(secondary_diagnostics or [])
+        if not sec_df.empty:
+            secondary_plot_path = os.path.join(debug_dir, "feature_selection_secondary_plot.png")
+            plot_secondary_selection(
+                diagnostics_df=sec_df,
+                output_path=secondary_plot_path,
+            )
+    return plot_path, drop_plot_path, compare_plot_path, secondary_plot_path

@@ -10,7 +10,7 @@ import numpy as np
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.gaussian_process import GaussianProcessRegressor
 
-from utils.boundary_sampling import sample_boundary_corners, sample_boundary_partial
+from utils.boundary_sampling import sample_boundary_corners, sample_boundary_corners_random, sample_boundary_partial
 from utils.bounds_utils import compute_spans_lbs, clamp_to_bounds
 from DOE.executor.anchor_refiner import (
     AcquisitionOptimizer,
@@ -66,6 +66,7 @@ class AdditionalDOEOrchestrator:
         total_budget: int,
         init_ratio: float = 0.3,
         exec_ratio: float = 0.1,
+        initial_corner_ratio: float = 0.05,
         global_random_ratio: float = 0.3,
         global_boundary_ratio: float = 0.1,
         global_margin_ratio: float = 0.2,
@@ -77,6 +78,7 @@ class AdditionalDOEOrchestrator:
         phase1_global_ratio: Optional[float] = None,
         phase2_global_ratio: Optional[float] = None,
         min_additional_rounds: int = 2,
+        phase2_min_usable_np_ratio: float = 15.0,
         stop_span_ratio_threshold: float = 0.3,
         stop_anchor_spread_streak: int = 2,
         stop_min_usable_np_ratio: float = 20.0,
@@ -89,6 +91,7 @@ class AdditionalDOEOrchestrator:
         initial_probe_multiplier: float = 2.0,
         plan_filter_safety: float = 1.2,
         plan_filter_r_floor: float = 0.02,
+        success_rate_floor: float = 0.02,
         max_additional_stages: int = 10,
         var_names: list[str] | None = None,
         constraint_defs: list[dict] | None = None,
@@ -148,6 +151,9 @@ class AdditionalDOEOrchestrator:
         self.total_budget = int(total_budget)
         self.init_ratio = float(init_ratio)
         self.exec_ratio = float(exec_ratio)
+        self.initial_corner_ratio = float(initial_corner_ratio)
+        if not (0.0 <= self.initial_corner_ratio <= 1.0):
+            raise ValueError("initial_corner_ratio must be in [0, 1]")
         self.global_random_ratio = float(global_random_ratio)
         self.global_boundary_ratio = float(global_boundary_ratio)
         self.global_margin_ratio = float(global_margin_ratio)
@@ -162,6 +168,9 @@ class AdditionalDOEOrchestrator:
         self.phase1_global_ratio = float(phase1_global_ratio)
         self.phase2_global_ratio = float(phase2_global_ratio)
         self.min_additional_rounds = int(min_additional_rounds)
+        self.phase2_min_usable_np_ratio = float(phase2_min_usable_np_ratio)
+        if self.phase2_min_usable_np_ratio < 0.0:
+            raise ValueError("phase2_min_usable_np_ratio must be >= 0")
         self.stop_span_ratio_threshold = float(stop_span_ratio_threshold)
         self.stop_anchor_spread_streak = int(stop_anchor_spread_streak)
         self.stop_min_usable_np_ratio = float(stop_min_usable_np_ratio)
@@ -179,6 +188,9 @@ class AdditionalDOEOrchestrator:
         self.initial_probe_multiplier = float(initial_probe_multiplier)
         self.plan_filter_safety = float(plan_filter_safety)
         self.plan_filter_r_floor = float(plan_filter_r_floor)
+        self.success_rate_floor = float(success_rate_floor)
+        if not (0.0 <= self.success_rate_floor <= 1.0):
+            raise ValueError("success_rate_floor must be in [0, 1]")
         self.max_additional_stages = int(max_additional_stages)
         self.var_names = list(var_names or [f"x{i+1}" for i in range(len(bounds))])
         self.constraint_defs = list(constraint_defs or [])
@@ -779,46 +791,94 @@ class AdditionalDOEOrchestrator:
         # Phase 0: Initial DOE (user-selected sampler)
         # --------------------------------------------
         n_init = max(int(self.total_budget * self.init_ratio), 1)
+        n_baseline_reserved = 1 if (self.force_baseline and n_init > 0) else 0
+        n_init_regular = n_init - n_baseline_reserved
+        n_corner_target = int(round(float(n_init_regular) * self.initial_corner_ratio))
+        n_corner_target = min(max(n_corner_target, 0), max(n_init_regular, 0))
+
+        X_corner, corner_constraints, corner_margins = self._sample_initial_corners(
+            n_target=n_corner_target,
+            update_ratio=self.has_pre_constraints,
+        )
+        n_corner_ok = int(X_corner.shape[0])
+        n_regular_target = max(n_init_regular - n_corner_ok, 0)
 
         if self.has_pre_constraints:
-            probe_size = max(1, int(np.ceil(n_init * self.initial_probe_multiplier)))
-            max_attempts = max(2, int(np.ceil(1.0 / max(self.plan_filter_r_floor, 1e-6))))
-            pool_X: list[np.ndarray] = []
-            pool_constraints: list[dict] = []
-            pool_margins: list[float] = []
+            if n_regular_target > 0:
+                probe_size = max(1, int(np.ceil(n_regular_target * self.initial_probe_multiplier)))
+                max_attempts = max(2, int(np.ceil(1.0 / max(self.plan_filter_r_floor, 1e-6))))
+                pool_X: list[np.ndarray] = []
+                pool_constraints: list[dict] = []
+                pool_margins: list[float] = []
 
-            for attempt in range(max_attempts):
-                X_probe = self._sample_initial(n_samples=probe_size)
-                if self.force_baseline and attempt == 0 and X_probe.shape[0] > 0:
-                    X_probe[0, :] = np.asarray(baseline, dtype=float).reshape(-1)
+                for _attempt in range(max_attempts):
+                    X_probe = self._sample_initial(n_samples=probe_size)
 
-                X_probe_f, constraints_f, margins_f, _ = self._filter_by_constraints(
-                    X_probe,
-                    update_ratio=True,
-                )
-                for i in range(X_probe_f.shape[0]):
-                    pool_X.append(X_probe_f[i])
-                    pool_constraints.append(constraints_f[i])
-                    pool_margins.append(float(margins_f[i]))
+                    X_probe_f, constraints_f, margins_f, _ = self._filter_by_constraints(
+                        X_probe,
+                        update_ratio=True,
+                    )
+                    for i in range(X_probe_f.shape[0]):
+                        pool_X.append(X_probe_f[i])
+                        pool_constraints.append(constraints_f[i])
+                        pool_margins.append(float(margins_f[i]))
 
-                if len(pool_X) >= n_init:
-                    break
+                    if len(pool_X) >= n_regular_target:
+                        break
 
-            if len(pool_X) < n_init:
-                self._set_failure("FAILED_FILTER_MIN", stage=0)
-                return self._export_results()
+                if len(pool_X) < n_regular_target:
+                    self._set_failure("FAILED_FILTER_MIN", stage=0)
+                    return self._export_results()
 
-            pick_idx = self.rng.choice(np.arange(len(pool_X)), size=n_init, replace=False)
-            X_init = np.vstack([pool_X[i].reshape(1, -1) for i in pick_idx]).astype(float)
-            init_constraints = [pool_constraints[i] for i in pick_idx]
-            init_margins = np.asarray([pool_margins[i] for i in pick_idx], dtype=float)
+                pick_idx = self.rng.choice(np.arange(len(pool_X)), size=n_regular_target, replace=False)
+                X_regular = np.vstack([pool_X[i].reshape(1, -1) for i in pick_idx]).astype(float)
+                regular_constraints = [pool_constraints[i] for i in pick_idx]
+                regular_margins = [float(pool_margins[i]) for i in pick_idx]
+            else:
+                X_regular = np.empty((0, len(self.bounds)), dtype=float)
+                regular_constraints = []
+                regular_margins = []
         else:
             self.constraint_rate_hat = 1.0
-            X_init = self._sample_initial(n_samples=n_init)
-            if self.force_baseline and X_init.shape[0] > 0:
-                X_init[0, :] = np.asarray(baseline, dtype=float).reshape(-1)
-            init_constraints = [{} for _ in range(X_init.shape[0])]
-            init_margins = np.full((X_init.shape[0],), float("inf"), dtype=float)
+            if n_regular_target > 0:
+                X_regular = self._sample_initial(n_samples=n_regular_target)
+            else:
+                X_regular = np.empty((0, len(self.bounds)), dtype=float)
+            regular_constraints = [{} for _ in range(X_regular.shape[0])]
+            regular_margins = [float("inf")] * X_regular.shape[0]
+
+        X_init_parts: list[np.ndarray] = []
+        init_constraints: list[dict] = []
+        init_margin_list: list[float] = []
+
+        if n_baseline_reserved > 0:
+            baseline_x = np.asarray(baseline, dtype=float).reshape(1, -1)
+            if self.has_pre_constraints:
+                baseline_constraints, _, baseline_margin = evaluate_constraints_point(
+                    x=np.asarray(baseline, dtype=float),
+                    var_names=self.var_names,
+                    constraint_defs=self.constraint_defs,
+                    scope="pre",
+                )
+            else:
+                baseline_constraints = {}
+                baseline_margin = float("inf")
+            X_init_parts.append(baseline_x)
+            init_constraints.append(baseline_constraints)
+            init_margin_list.append(float(baseline_margin))
+
+        if X_corner.shape[0] > 0:
+            X_init_parts.append(np.asarray(X_corner, dtype=float))
+            init_constraints.extend(corner_constraints)
+            init_margin_list.extend(float(v) for v in corner_margins)
+
+        if X_regular.shape[0] > 0:
+            X_init_parts.append(np.asarray(X_regular, dtype=float))
+            init_constraints.extend(regular_constraints)
+            init_margin_list.extend(float(v) for v in regular_margins)
+
+        X_init = np.vstack(X_init_parts) if X_init_parts else np.empty((0, len(self.bounds)), dtype=float)
+        init_margins = np.asarray(init_margin_list, dtype=float)
 
         executed = self._execute_points(
             X_init,
@@ -831,6 +891,19 @@ class AdditionalDOEOrchestrator:
         if not executed:
             if self.failure_reason is None:
                 self._set_failure("FAILED_BUDGET", stage=0)
+            return self._export_results()
+
+        # Guardrail: if CAE success ratio is too low, stop before surrogate build.
+        n_success, n_total, success_ratio = self._success_stats()
+        if success_ratio < float(self.success_rate_floor):
+            self._set_failure("FAILED_SUCCESS_RATE_MIN", stage=0)
+            print(
+                "[AdditionalDOE] "
+                f"success={n_success}/{n_total} "
+                f"(ratio={success_ratio:.4f}) < floor={self.success_rate_floor:.4f}. "
+                "Likely CAE runtime/output instability "
+                "(explicit success=False, invalid payload, non-numeric/non-finite objective)."
+            )
             return self._export_results()
 
         self._fit_post_feasibility_model()
@@ -961,12 +1034,13 @@ class AdditionalDOEOrchestrator:
                 if n_partial > 0:
                     # use LHC points as base for partial boundary
                     X_base = self.plan_builder.build(n_plan=max(n_partial, 1), n_divisions=n_divisions)
+                    boundary_dims_k = max(1, len(self.bounds) - 2)
                     X_partial = sample_boundary_partial(
                         self.bounds,
                         offset=offset,
                         base_points=X_base,
                         n_samples=n_partial,
-                        n_boundary_dims=min(2, len(self.bounds)),
+                        n_boundary_dims=boundary_dims_k,
                         rng=self.rng,
                     )
                 else:
@@ -1121,7 +1195,8 @@ class AdditionalDOEOrchestrator:
                     print(f"[AdditionalDOE] gate_stop=True, executing final batch (stage={round_idx})")
 
                 g1_passed = bool(decision.get("gate1_passed", False))
-                next_phase = 2 if g1_passed else 1
+                can_enter_phase2_by_data = bool(usable_np_ratio > self.phase2_min_usable_np_ratio)
+                next_phase = 2 if (g1_passed and can_enter_phase2_by_data) else 1
                 if next_phase == 2:
                     self._ever_phase2 = True
 
@@ -1155,6 +1230,25 @@ class AdditionalDOEOrchestrator:
             constraints_g_f = [constraints_g[i] for i in np.where(mask_g)[0]]
             margins_g_f = margins_g[mask_g] if margins_g.size == Xg.shape[0] else np.empty((Xg_f.shape[0],), dtype=float)
             boundary_flags_f = boundary_flags[mask_g] if boundary_flags.size == Xg.shape[0] else np.zeros((Xg_f.shape[0],), dtype=bool)
+
+            # Internal Xg dedup after history dedup:
+            # keep boundary points and drop only LHC points overlapping boundary.
+            if Xg_f.size > 0 and boundary_flags_f.size == Xg_f.shape[0]:
+                idx_boundary = np.where(boundary_flags_f)[0]
+                idx_lhc = np.where(~boundary_flags_f)[0]
+                if idx_boundary.size > 0 and idx_lhc.size > 0:
+                    keep_lhc = self._dedup_mask_against_other_norm(
+                        X_new=Xg_f[idx_lhc],
+                        X_ref=Xg_f[idx_boundary],
+                        spans=spans,
+                        dedup_tol=tol,
+                    )
+                    keep_xg_internal = np.ones((Xg_f.shape[0],), dtype=bool)
+                    keep_xg_internal[idx_lhc] = keep_lhc
+                    Xg_f = Xg_f[keep_xg_internal]
+                    constraints_g_f = [constraints_g_f[i] for i in np.where(keep_xg_internal)[0]]
+                    margins_g_f = margins_g_f[keep_xg_internal] if margins_g_f.size == keep_xg_internal.shape[0] else margins_g_f
+                    boundary_flags_f = boundary_flags_f[keep_xg_internal]
 
             if tol_local > 0.0:
                 mask_l = self._dedup_mask_against_history_raw(
@@ -1357,6 +1451,8 @@ class AdditionalDOEOrchestrator:
 
                 active = []
                 for i in range(anchor_count):
+                    # Keep anchor active when either anchor itself survives dedup
+                    # or it still has local candidate points assigned.
                     available = len(groups[i]) + (1 if anchor_keep[i] else 0)
                     if available > 0:
                         active.append(i)
@@ -1624,13 +1720,22 @@ class AdditionalDOEOrchestrator:
         if round_idx >= self.max_additional_stages and not self.budget.exhausted() and self.failure_reason is None:
             self._set_failure("STOP_MAX_ADDITIONAL_STAGES", stage=round_idx)
 
+        exec_used = int(self.budget.used)
+        exec_total = int(self.budget.total)
         if self.failure_reason is not None:
-            print(f"[AdditionalDOE] terminated: {self.failure_reason}")
+            print(
+                f"[AdditionalDOE] terminated: {self.failure_reason} "
+                f"(executed={exec_used}/{exec_total})"
+            )
         else:
-            print("[AdditionalDOE] terminated: COMPLETED")
+            print(
+                "[AdditionalDOE] terminated: COMPLETED "
+                f"(executed={exec_used}/{exec_total})"
+            )
         return self._export_results()
 
     def get_diagnostics(self) -> dict:
+        n_success, n_total, success_ratio = self._success_stats()
         out = {
             "failure_reason": self.failure_reason,
             "local_metrics": self.local_metrics,
@@ -1639,6 +1744,10 @@ class AdditionalDOEOrchestrator:
             "post_lambda": float(self.post_lambda_current),
             "post_model_active": bool(self._post_model is not None),
             "post_policy_log": self.post_policy_log,
+            "success_rate_floor": float(self.success_rate_floor),
+            "success_count": int(n_success),
+            "success_total": int(n_total),
+            "success_ratio": float(success_ratio),
         }
         if self.has_pre_constraints:
             out["constraint_stats"] = {
@@ -1656,6 +1765,12 @@ class AdditionalDOEOrchestrator:
             self._anchor_spread_zero_streak += 1
         else:
             self._anchor_spread_zero_streak = 0
+
+    def _success_stats(self) -> tuple[int, int, float]:
+        n_total = int(self.store.size)
+        n_success = int(len(self.store.successful_rows))
+        ratio = float(n_success / max(n_total, 1))
+        return n_success, n_total, ratio
 
     def _usable_sample_count(self) -> int:
         return int(
@@ -1676,6 +1791,78 @@ class AdditionalDOEOrchestrator:
         if self._anchor_spread_zero_streak >= self.stop_anchor_spread_streak:
             return True
         return False
+
+    def _sample_initial_corners(
+        self,
+        *,
+        n_target: int,
+        update_ratio: bool = False,
+    ) -> tuple[np.ndarray, list[dict], list[float]]:
+        n_target = int(max(n_target, 0))
+        if n_target <= 0:
+            return np.empty((0, len(self.bounds)), dtype=float), [], []
+
+        offset = np.zeros((len(self.bounds),), dtype=float)
+        n_corner_pool = n_target if not self.has_pre_constraints else max((2 * n_target), (n_target + 4))
+        corner_pool = sample_boundary_corners_random(
+            self.bounds,
+            offset=offset,
+            n_samples=n_corner_pool,
+            rng=self.rng,
+        )
+        if corner_pool.size == 0:
+            return np.empty((0, len(self.bounds)), dtype=float), [], []
+        corner_pool = np.unique(np.asarray(corner_pool, dtype=float), axis=0)
+        if corner_pool.shape[0] == 0:
+            return np.empty((0, len(self.bounds)), dtype=float), [], []
+
+        if not self.has_pre_constraints:
+            n_take = min(n_target, corner_pool.shape[0])
+            if n_take <= 0:
+                return np.empty((0, len(self.bounds)), dtype=float), [], []
+            pick_idx = self.rng.choice(corner_pool.shape[0], size=n_take, replace=False)
+            X_corner = corner_pool[pick_idx].astype(float)
+            return (
+                X_corner,
+                [{} for _ in range(X_corner.shape[0])],
+                [float("inf")] * X_corner.shape[0],
+            )
+
+        remaining_idx = np.arange(corner_pool.shape[0], dtype=int)
+        picked_rows: list[np.ndarray] = []
+        picked_constraints: list[dict] = []
+        picked_margins: list[float] = []
+
+        # First draw + one additional draw from unused corners.
+        for _attempt in range(2):
+            need = n_target - len(picked_rows)
+            if need <= 0 or remaining_idx.size == 0:
+                break
+            n_take = min(need, remaining_idx.size)
+            pick_pos = self.rng.choice(remaining_idx.size, size=n_take, replace=False)
+            pick_idx = remaining_idx[pick_pos]
+            keep_mask = np.ones((remaining_idx.size,), dtype=bool)
+            keep_mask[pick_pos] = False
+            remaining_idx = remaining_idx[keep_mask]
+
+            X_try = corner_pool[pick_idx]
+            X_feas, constraints_feas, margins_feas, _ = self._filter_by_constraints(
+                X_try,
+                update_ratio=update_ratio,
+            )
+            if X_feas.size == 0:
+                continue
+            for i in range(X_feas.shape[0]):
+                if len(picked_rows) >= n_target:
+                    break
+                picked_rows.append(X_feas[i].reshape(1, -1))
+                picked_constraints.append(constraints_feas[i])
+                picked_margins.append(float(margins_feas[i]))
+
+        if not picked_rows:
+            return np.empty((0, len(self.bounds)), dtype=float), [], []
+        X_corner = np.vstack(picked_rows).astype(float)
+        return X_corner, picked_constraints, picked_margins
 
     def _sample_initial(self, *, n_samples: int) -> np.ndarray:
         """

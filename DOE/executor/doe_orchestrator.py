@@ -6,6 +6,7 @@ import re
 import numpy as np
 import pandas as pd
 
+from utils.boundary_sampling import sample_boundary_corners_random
 from utils.feasibility import evaluate_feasibility
 from utils.result_saver import ResultSaver
 from DOE.executor.constraint_filter import (
@@ -27,7 +28,7 @@ from pipeline.run_context import RunContext, update_run_index
 DEFAULT_ADDITIONAL_CFG = {
     "init_ratio": 0.4,
     "exec_ratio": 0.1,
-    "global_random_ratio": 0.4,
+    "initial_corner_ratio": 0.05,
     "global_boundary_ratio": 0.2,
     "global_margin_ratio": 0.2,
     "global_top_ratio": 0.2,
@@ -65,6 +66,7 @@ DEFAULT_ADDITIONAL_CFG = {
     "phase1_global_ratio": 0.8,
     "phase2_global_ratio": 0.2,
     "min_additional_rounds": 3,
+    "phase2_min_usable_np_ratio": 15.0,
     "stop_span_ratio_threshold": 0.3,
     "stop_anchor_spread_streak": 2,
     "stop_min_usable_np_ratio": 20.0,
@@ -75,6 +77,7 @@ DEFAULT_ADDITIONAL_CFG = {
     "probe_std_scale": 2.0,
     "probe_perturb_ratio": 0.02,
     "initial_probe_multiplier": 2.0,
+    "success_rate_floor": 0.02,
     "plan_filter_safety": 1.2,
     "plan_filter_r_floor": 0.02,
     "max_additional_stages": 10,
@@ -162,6 +165,33 @@ def _combine_constraint_margin(*, margin_pre: float, margin_post: float) -> floa
     if pre_ok and post_ok:
         return float(min(pre, post))
     return float("inf")
+
+
+def _calc_success_stats(results: list[dict]) -> tuple[int, int, float]:
+    total = int(len(results))
+    success_count = int(
+        sum(1 for r in results if bool((r or {}).get("success", False)))
+    )
+    ratio = float(success_count / max(total, 1))
+    return success_count, total, ratio
+
+
+def _raise_if_success_rate_below_floor(
+    *,
+    success_count: int,
+    total_count: int,
+    success_ratio: float,
+    floor: float,
+) -> None:
+    if float(success_ratio) >= float(floor):
+        return
+    raise RuntimeError(
+        "FAILED_SUCCESS_RATE_MIN: "
+        f"success={int(success_count)}/{int(total_count)} "
+        f"(ratio={float(success_ratio):.4f}) < floor={float(floor):.4f}. "
+        "Likely CAE runtime/output instability "
+        "(explicit success=False, invalid payload, non-numeric/non-finite objective)."
+    )
 
 
 def _save_doe_results(
@@ -359,6 +389,12 @@ def run_doe_orchestrator(
     )
     filter_safety = float(run_cfg.get("plan_filter_safety", 1.2))
     filter_r_floor = float(run_cfg.get("plan_filter_r_floor", 0.02))
+    success_rate_floor = float(run_cfg.get("success_rate_floor", 0.02))
+    if not (0.0 <= success_rate_floor <= 1.0):
+        raise ValueError("DOE success_rate_floor must be in [0, 1].")
+    initial_corner_ratio = float(run_cfg.get("initial_corner_ratio", 0.05))
+    if not (0.0 <= initial_corner_ratio <= 1.0):
+        raise ValueError("DOE initial_corner_ratio must be in [0, 1].")
 
     workflow_info = {
         "DOE": algo_name,
@@ -369,6 +405,8 @@ def run_doe_orchestrator(
 
     if not use_additional:
         n_samples = int(run_cfg["n_samples"])
+        n_baseline_reserved = 1 if (force_baseline and n_samples > 0) else 0
+        n_regular_samples = n_samples - n_baseline_reserved
 
         print("\nDOE 설정 요약")
         print(f"- 문제명           : {problem_spec['name']}")
@@ -381,53 +419,161 @@ def run_doe_orchestrator(
         saver = ResultSaver(use_timestamp=bool(run_cfg.get("use_timestamp", False)))
 
         bounds = [(v["lb"], v["ub"]) for v in variables]
-        baseline = np.array([v["baseline"] for v in variables])
+        baseline = np.array([v["baseline"] for v in variables], dtype=float)
 
         probe_multiplier = float(run_cfg.get("initial_probe_multiplier", 2.0))
-        if has_pre_constraints:
-            n_probe = max(n_samples, int(np.ceil(n_samples * probe_multiplier)))
-            n_probe = int(np.ceil(n_probe * filter_safety))
-            X_probe = sampler(
-                n_samples=n_probe,
-                bounds=bounds,
+        n_corner_target = int(round(float(n_regular_samples) * initial_corner_ratio))
+        n_corner_target = min(max(n_corner_target, 0), max(n_regular_samples, 0))
+
+        X_corner = np.empty((0, len(bounds)), dtype=float)
+        corner_constraints: list[dict] = []
+        corner_margins: list[float] = []
+        filter_gen_total = 0
+        filter_feas_total = 0
+
+        if n_corner_target > 0:
+            n_corner_pool = n_corner_target if not has_pre_constraints else max((2 * n_corner_target), (n_corner_target + 4))
+            corner_pool = sample_boundary_corners_random(
+                bounds,
+                offset=np.zeros((len(bounds),), dtype=float),
+                n_samples=n_corner_pool,
                 rng=rng,
-                n_divisions=max(n_probe, 1),
             )
-            if force_baseline and X_probe.shape[0] > 0:
-                X_probe[0, :] = baseline
-            feas_mask, constraint_payloads, margins_pre = evaluate_constraints_batch(
-                X=X_probe,
-                var_names=var_names,
-                constraint_defs=constraint_defs,
-                scope="pre",
-            )
-            n_feas = int(feas_mask.sum())
-            r_hat = clamp_ratio(
-                n_feas / max(X_probe.shape[0], 1),
-                floor=filter_r_floor,
-            )
-            if n_feas < n_samples:
-                raise RuntimeError(
-                    f"FAILED_FILTER_MIN: initial feasible points {n_feas} < target {n_samples}"
+            if corner_pool.size > 0:
+                corner_pool = np.unique(np.asarray(corner_pool, dtype=float), axis=0)
+                if has_pre_constraints:
+                    remaining_idx = np.arange(corner_pool.shape[0], dtype=int)
+                    corner_rows: list[np.ndarray] = []
+                    for _attempt in range(2):
+                        need = n_corner_target - len(corner_rows)
+                        if need <= 0 or remaining_idx.size == 0:
+                            break
+                        n_take = min(need, remaining_idx.size)
+                        pick_pos = rng.choice(remaining_idx.size, size=n_take, replace=False)
+                        pick_idx = remaining_idx[pick_pos]
+                        keep_mask = np.ones((remaining_idx.size,), dtype=bool)
+                        keep_mask[pick_pos] = False
+                        remaining_idx = remaining_idx[keep_mask]
+
+                        X_try = corner_pool[pick_idx]
+                        feas_mask, constraint_payloads, margins_pre = evaluate_constraints_batch(
+                            X=X_try,
+                            var_names=var_names,
+                            constraint_defs=constraint_defs,
+                            scope="pre",
+                        )
+                        n_feas_corner = int(np.sum(feas_mask))
+                        filter_gen_total += int(X_try.shape[0])
+                        filter_feas_total += n_feas_corner
+                        if n_feas_corner <= 0:
+                            continue
+                        feas_idx = np.where(feas_mask)[0]
+                        for j in feas_idx.tolist():
+                            if len(corner_rows) >= n_corner_target:
+                                break
+                            corner_rows.append(X_try[j].reshape(1, -1))
+                            corner_constraints.append(constraint_payloads[j])
+                            corner_margins.append(float(margins_pre[j]))
+                    if corner_rows:
+                        X_corner = np.vstack(corner_rows).astype(float)
+                else:
+                    n_take = min(n_corner_target, corner_pool.shape[0])
+                    if n_take > 0:
+                        pick_idx = rng.choice(corner_pool.shape[0], size=n_take, replace=False)
+                        X_corner = corner_pool[pick_idx].astype(float)
+                        corner_constraints = [{} for _ in range(X_corner.shape[0])]
+                        corner_margins = [float("inf")] * X_corner.shape[0]
+
+        n_corner_ok = int(X_corner.shape[0])
+        n_sampler_target = max(n_regular_samples - n_corner_ok, 0)
+
+        if has_pre_constraints:
+            if n_sampler_target > 0:
+                n_probe = max(n_sampler_target, int(np.ceil(n_sampler_target * probe_multiplier)))
+                n_probe = int(np.ceil(n_probe * filter_safety))
+                X_probe = sampler(
+                    n_samples=n_probe,
+                    bounds=bounds,
+                    rng=rng,
+                    n_divisions=max(n_probe, 1),
                 )
-            feas_idx = np.where(feas_mask)[0]
-            pick_idx = rng.choice(feas_idx, size=n_samples, replace=False)
-            X = X_probe[pick_idx]
-            picked_constraints = [constraint_payloads[i] for i in pick_idx]
-            picked_margins = np.asarray([margins_pre[i] for i in pick_idx], dtype=float)
+                feas_mask, constraint_payloads, margins_pre = evaluate_constraints_batch(
+                    X=X_probe,
+                    var_names=var_names,
+                    constraint_defs=constraint_defs,
+                    scope="pre",
+                )
+                n_feas = int(feas_mask.sum())
+                filter_gen_total += int(X_probe.shape[0])
+                filter_feas_total += int(n_feas)
+                if n_feas < n_sampler_target:
+                    raise RuntimeError(
+                        f"FAILED_FILTER_MIN: initial feasible points {n_feas} < target {n_sampler_target}"
+                    )
+                feas_idx = np.where(feas_mask)[0]
+                pick_idx = rng.choice(feas_idx, size=n_sampler_target, replace=False)
+                X_regular = X_probe[pick_idx]
+                regular_constraints = [constraint_payloads[i] for i in pick_idx]
+                regular_margins = [float(margins_pre[i]) for i in pick_idx]
+            else:
+                n_probe = 0
+                X_regular = np.empty((0, len(bounds)), dtype=float)
+                regular_constraints = []
+                regular_margins = []
+            if filter_gen_total > 0:
+                r_hat = clamp_ratio(
+                    filter_feas_total / max(filter_gen_total, 1),
+                    floor=filter_r_floor,
+                )
+            else:
+                r_hat = 1.0
         else:
             r_hat = 1.0
-            n_probe = n_samples
-            X = sampler(
-                n_samples=n_samples,
-                bounds=bounds,
-                rng=rng,
-                n_divisions=max(n_samples, 1),
-            )
-            if force_baseline and X.shape[0] > 0:
-                X[0, :] = baseline
-            picked_constraints = [{} for _ in range(X.shape[0])]
-            picked_margins = np.full((X.shape[0],), float("inf"), dtype=float)
+            n_probe = n_sampler_target
+            if n_sampler_target > 0:
+                X_regular = sampler(
+                    n_samples=n_sampler_target,
+                    bounds=bounds,
+                    rng=rng,
+                    n_divisions=max(n_sampler_target, 1),
+                )
+            else:
+                X_regular = np.empty((0, len(bounds)), dtype=float)
+            regular_constraints = [{} for _ in range(X_regular.shape[0])]
+            regular_margins = [float("inf")] * X_regular.shape[0]
+
+        X_parts: list[np.ndarray] = []
+        picked_constraints: list[dict] = []
+        picked_margin_list: list[float] = []
+
+        if n_baseline_reserved > 0:
+            baseline_x = np.asarray(baseline, dtype=float).reshape(1, -1)
+            if has_pre_constraints:
+                baseline_constraints, _, baseline_margin = evaluate_constraints_point(
+                    x=np.asarray(baseline, dtype=float),
+                    var_names=var_names,
+                    constraint_defs=constraint_defs,
+                    scope="pre",
+                )
+            else:
+                baseline_constraints = {}
+                baseline_margin = float("inf")
+            X_parts.append(baseline_x)
+            picked_constraints.append(baseline_constraints)
+            picked_margin_list.append(float(baseline_margin))
+
+        if X_corner.shape[0] > 0:
+            X_parts.append(np.asarray(X_corner, dtype=float))
+            picked_constraints.extend(corner_constraints)
+            picked_margin_list.extend(float(v) for v in corner_margins)
+
+        if X_regular.shape[0] > 0:
+            X_parts.append(np.asarray(X_regular, dtype=float))
+            picked_constraints.extend(regular_constraints)
+            picked_margin_list.extend(float(v) for v in regular_margins)
+
+        X = np.vstack(X_parts) if X_parts else np.empty((0, len(bounds)), dtype=float)
+        picked_margins = np.asarray(picked_margin_list, dtype=float)
 
         print("\nDOE 샘플 생성 완료")
         print("\nCAE 평가 시작...\n")
@@ -485,19 +631,32 @@ def run_doe_orchestrator(
                 "success": bool(success),
             })
 
-            print(
-                f"[{i+1:03d}/{n_samples}] "
-                f"objective = {objective}, "
-                f"feasible = {feasible}"
-            )
+            if not bool(feasible):
+                print(
+                    f"[{i+1:03d}/{n_samples}] "
+                    f"objective = {objective}, "
+                    f"feasible = {feasible}"
+                )
+
+        n_success, n_total, success_ratio = _calc_success_stats(results)
+        _raise_if_success_rate_below_floor(
+            success_count=n_success,
+            total_count=n_total,
+            success_ratio=success_ratio,
+            floor=success_rate_floor,
+        )
 
         system_snapshot = {
             "n_samples": run_cfg.get("n_samples"),
             "use_timestamp": run_cfg.get("use_timestamp"),
+            "initial_corner_ratio": initial_corner_ratio,
             "initial_probe_multiplier": probe_multiplier,
             "plan_filter_safety": filter_safety,
             "plan_filter_r_floor": filter_r_floor,
             "constraint_r_hat": r_hat,
+            "success_rate_floor": success_rate_floor,
+            "success_count": n_success,
+            "success_ratio": success_ratio,
         }
         out = _save_doe_results(
             results=results,
@@ -583,7 +742,7 @@ def run_doe_orchestrator(
         total_budget=total_budget,
         init_ratio=cfg["init_ratio"],
         exec_ratio=cfg["exec_ratio"],
-        global_random_ratio=cfg["global_random_ratio"],
+        initial_corner_ratio=cfg.get("initial_corner_ratio", initial_corner_ratio),
         global_boundary_ratio=cfg.get("global_boundary_ratio", 0.1),
         global_margin_ratio=cfg.get("global_margin_ratio", 0.2),
         global_top_ratio=cfg.get("global_top_ratio", 0.2),
@@ -594,6 +753,7 @@ def run_doe_orchestrator(
         phase1_global_ratio=cfg["phase1_global_ratio"],
         phase2_global_ratio=cfg["phase2_global_ratio"],
         min_additional_rounds=cfg["min_additional_rounds"],
+        phase2_min_usable_np_ratio=cfg.get("phase2_min_usable_np_ratio", 15.0),
         stop_span_ratio_threshold=cfg["stop_span_ratio_threshold"],
         stop_anchor_spread_streak=cfg["stop_anchor_spread_streak"],
         stop_min_usable_np_ratio=cfg.get("stop_min_usable_np_ratio", 20.0),
@@ -606,6 +766,7 @@ def run_doe_orchestrator(
         initial_probe_multiplier=cfg.get("initial_probe_multiplier", 2.0),
         plan_filter_safety=cfg.get("plan_filter_safety", 1.2),
         plan_filter_r_floor=cfg.get("plan_filter_r_floor", 0.02),
+        success_rate_floor=cfg.get("success_rate_floor", success_rate_floor),
         max_additional_stages=cfg.get("max_additional_stages", 10),
         local_anchor_max_base=cfg.get("local_anchor_max_base", 8),
         local_anchor_max_decay=cfg.get("local_anchor_max_decay", 0.9),
@@ -678,6 +839,10 @@ def run_doe_orchestrator(
             "post_feasible_rate_hat": diagnostics.get("post_feasible_rate_hat"),
             "post_lambda": diagnostics.get("post_lambda"),
             "post_model_active": diagnostics.get("post_model_active"),
+            "success_rate_floor": diagnostics.get("success_rate_floor"),
+            "success_count": diagnostics.get("success_count"),
+            "success_total": diagnostics.get("success_total"),
+            "success_ratio": diagnostics.get("success_ratio"),
         },
         extra_metadata={
             "failure_reason": diagnostics.get("failure_reason"),
@@ -685,6 +850,10 @@ def run_doe_orchestrator(
             "post_feasible_rate_hat": diagnostics.get("post_feasible_rate_hat"),
             "post_lambda": diagnostics.get("post_lambda"),
             "post_model_active": diagnostics.get("post_model_active"),
+            "success_rate_floor": diagnostics.get("success_rate_floor"),
+            "success_count": diagnostics.get("success_count"),
+            "success_total": diagnostics.get("success_total"),
+            "success_ratio": diagnostics.get("success_ratio"),
         },
         constraint_defs=constraint_defs,
         debug_level=str(run_cfg.get("debug_level", "off")),

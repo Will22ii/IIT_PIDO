@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 .env
 result/
+.ipynb_checkpoints/
+*.log
+*.tmp
+*.pyo
+*.pyd
+*.DS_Store

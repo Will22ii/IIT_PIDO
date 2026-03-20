@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from Modeler.config import ModelerSystemConfig
+from utils.bool_mask import to_bool_mask
 
 
 @dataclass
@@ -90,18 +91,6 @@ def _align_df_schema(
     return df[ordered]
 
 
-def _to_bool_mask(series: pd.Series) -> np.ndarray:
-    if series.dtype == bool:
-        return series.fillna(False).to_numpy(dtype=bool)
-    return (
-        series.astype(str)
-        .str.strip()
-        .str.lower()
-        .isin({"true", "1", "y", "yes", "t"})
-        .to_numpy(dtype=bool)
-    )
-
-
 def _resolve_cv_policy(
     *,
     n_samples: int,
@@ -160,6 +149,27 @@ def _resolve_cv_policy(
         "warn_valid": bool(warn_valid),
         "dynamic": True,
     }
+
+
+def resolve_cv_policy_for_subset(
+    *,
+    n_samples: int,
+    n_features: int,
+    system_cfg: ModelerSystemConfig,
+) -> tuple[dict, int, int]:
+    policy = _resolve_cv_policy(
+        n_samples=int(n_samples),
+        n_features=int(n_features),
+        system_cfg=system_cfg,
+    )
+    k = int(policy["kfold_splits"])
+    r = int(policy["kfold_repeats"])
+    if int(n_samples) < k:
+        raise RuntimeError(
+            f"학습 데이터가 부족합니다: rows={int(n_samples)} < kfold_splits={k}. "
+            "DOE n_samples를 늘려주세요."
+        )
+    return policy, k, r
 
 
 def _build_elite_mask(
@@ -265,7 +275,11 @@ def prepare_modeler_data_policy(
         raise RuntimeError(f"Target column not found: {target_col}")
 
     if "success" in df.columns:
-        success_mask = _to_bool_mask(df["success"])
+        success_mask = to_bool_mask(
+            df["success"],
+            column_name="success",
+            warn_prefix="[Modeler][BoolParse]",
+        )
         n_before = int(len(df))
         df = df.loc[success_mask].reset_index(drop=True)
         n_after = int(len(df))
@@ -275,7 +289,11 @@ def prepare_modeler_data_policy(
 
     # post/pre 제약이 도입된 경우 최종 feasible만 학습에 사용
     if "feasible" in df.columns:
-        feas_mask = _to_bool_mask(df["feasible"])
+        feas_mask = to_bool_mask(
+            df["feasible"],
+            column_name="feasible",
+            warn_prefix="[Modeler][BoolParse]",
+        )
         n_before = int(len(df))
         df = df.loc[feas_mask].reset_index(drop=True)
         n_after = int(len(df))
@@ -373,6 +391,10 @@ def prepare_modeler_data_policy(
             float(system_cfg.fi_weight_perm),
             w_drop_raw,
         )
+        elite_mode = str(getattr(system_cfg, "fi_elite_mode", "bonus")).strip().lower()
+        if elite_mode not in {"blend", "bonus", "off"}:
+            elite_mode = "bonus"
+        elite_bonus_beta = float(np.clip(float(getattr(system_cfg, "fi_elite_bonus_beta", 0.3)), 0.0, 1.0))
         if bool(cv_policy["low_data"]) or int(n_elite) < int(system_cfg.fi_elite_small_threshold):
             w_global = float(system_cfg.fi_weight_global_low)
         elif int(n_elite) >= int(system_cfg.fi_elite_rich_threshold):
@@ -388,6 +410,11 @@ def prepare_modeler_data_policy(
             f"tau={system_cfg.fi_final_score_threshold:.3f} "
             f"global_floor={system_cfg.fi_global_score_floor:.3f} "
             f"top_ratio={fi_top_ratio:.2f}"
+        )
+        print(
+            "[Modeler][FI-ELITE] "
+            f"mode={elite_mode} "
+            f"bonus_beta={elite_bonus_beta:.2f}"
         )
         print(
             "[Modeler][FI-WEIGHT] "

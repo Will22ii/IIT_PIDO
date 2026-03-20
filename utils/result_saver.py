@@ -78,6 +78,7 @@ class ResultSaver:
         inputs: dict,
         resolved_params: dict,
         results: dict,
+        run_tag: str | None = None,
         public_artifacts: dict | None = None,
         meta_artifacts: dict | None = None,
         debug_artifacts: dict | None = None,
@@ -92,7 +93,17 @@ class ResultSaver:
         os.makedirs(meta_dir, exist_ok=True)
         os.makedirs(debug_dir, exist_ok=True)
 
-        csv_name = f"{task_key.lower()}_results.csv"
+        safe_tag = ""
+        if run_tag is not None:
+            safe_tag = "".join(
+                ch if ch.isalnum() or ch in ("-", "_") else "_"
+                for ch in str(run_tag).strip()
+            ).strip("_")
+        csv_name = (
+            f"{task_key.lower()}_results_{safe_tag}.csv"
+            if safe_tag
+            else f"{task_key.lower()}_results.csv"
+        )
         csv_path = os.path.join(public_dir, csv_name)
         df.to_csv(csv_path, index=False)
 
@@ -126,7 +137,8 @@ class ResultSaver:
             "artifacts": artifacts,
         }
 
-        meta_path = os.path.join(task_dir, "metadata.json")
+        meta_name = f"metadata_{safe_tag}.json" if safe_tag else "metadata.json"
+        meta_path = os.path.join(task_dir, meta_name)
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
 

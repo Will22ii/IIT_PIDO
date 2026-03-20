@@ -7,9 +7,10 @@ from Explorer.executor.explorer_orchestrator import ExplorerOrchestrator
 from Modeler.run_Modeler import run_modeler
 from pipeline.config import PipelineConfig, PipelineTasks
 from pipeline.run_context import create_run_context
+from pipeline.run_context import get_task_metadata_path
 
 
-def run_pipeline(*, config: PipelineConfig) -> None:
+def run_pipeline(*, config: PipelineConfig) -> dict:
     cae_out = run_cae(config=config.cae)
     design_bounds = {
         v["name"]: [v["lb"], v["ub"]] for v in cae_out["variables"]
@@ -50,6 +51,14 @@ def run_pipeline(*, config: PipelineConfig) -> None:
     if config.tasks.run_explorer and config.explorer is not None:
         config.explorer.cae = config.cae
         ExplorerOrchestrator(config.explorer, run_context=run_context).run()
+
+    return {
+        "run_context": run_context,
+        "cae_metadata": get_task_metadata_path(run_context, "CAE"),
+        "doe_metadata": get_task_metadata_path(run_context, "DOE"),
+        "modeler_metadata": get_task_metadata_path(run_context, "Modeler"),
+        "explorer_metadata": get_task_metadata_path(run_context, "Explorer"),
+    }
 
 
 if __name__ == "__main__":
