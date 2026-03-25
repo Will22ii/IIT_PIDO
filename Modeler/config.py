@@ -70,8 +70,8 @@ class ModelerSystemConfig:
     fi_weight_perm: float = 0.80
     fi_weight_drop: float = 0.20
     # low_data 전용 채널 가중치 (low_data=True일 때 fi_weight_perm/drop 대신 사용)
-    fi_weight_perm_low_data: float = 0.90
-    fi_weight_drop_low_data: float = 0.10
+    fi_weight_perm_low_data: float = 0.85
+    fi_weight_drop_low_data: float = 0.15
 
     # -----------------------------
     # 4) FI 스케일 결합(global / elite)
@@ -92,6 +92,10 @@ class ModelerSystemConfig:
     fi_elite_mode: str = "bonus"
     # elite bonus 계수(beta), [0, 1]로 내부 clip
     fi_elite_bonus_beta: float = 0.35
+    # elite variance penalty: fold별 vote 분산이 높은 feature에 패널티
+    fi_elite_var_penalty_enabled: bool = True
+    fi_elite_var_threshold: float = 0.25
+    fi_elite_var_penalty_scale: float = 0.15
 
     # -----------------------------
     # 5) FI 최종 선택 가드
@@ -114,7 +118,7 @@ class ModelerSystemConfig:
     # normal_data  : low_data=False → and rule, 엄격한 임계값
     fi_stability_very_low_data_n_threshold: int = 50
     fi_stability_rule_very_low_data: str = "or"
-    fi_stability_perm_min_rate_very_low_data: float = 0.55
+    fi_stability_perm_min_rate_very_low_data: float = 0.50
     fi_stability_drop_min_rate_very_low_data: float = 0.35
     fi_stability_rule_low_data: str = "and"
     fi_stability_perm_min_rate_low_data: float = 0.60
@@ -137,15 +141,18 @@ class ModelerSystemConfig:
     # null 모드: soft | hard | off (권장: soft)
     fi_null_mode: str = "soft"
     # null 비교 분위수(예: 0.90 = null90)
-    fi_null_quantile: float = 0.90
+    fi_null_quantile: float = 0.85
     # null 셔플 반복 수(low-data / normal)
-    fi_null_shuffle_runs_low_data: int = 40
+    fi_null_shuffle_runs_low_data: int = 50
     fi_null_shuffle_runs_normal: int = 30
     # soft penalty 강도(low-data / normal)
-    fi_null_alpha_low_data: float = 0.22
+    fi_null_alpha_low_data: float = 0.30
     fi_null_alpha_normal: float = 0.12
-    # null 기준 점수 축: global_score | final_score
-    fi_null_apply_to: str = "global_score"
+    # null 기준 점수 축: global_score | final_score | both
+    # both: global_score에 pre-elite penalty 적용 + 이후 final_score에도 적용
+    fi_null_apply_to: str = "both"
+    # both 모드 시 pre-elite penalty 비율 (alpha의 이 비율만큼 pre-elite에 적용)
+    fi_null_pre_elite_ratio: float = 0.5
 
     # -----------------------------
     # 8) FI Elite subset 정책

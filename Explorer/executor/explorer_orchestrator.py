@@ -17,6 +17,7 @@ from utils.bool_mask import to_bool_mask
 from DOE.doe_algorithm.lhs import latin_hypercube_sampling
 from DOE.executor.anchor_refiner import (
     AcquisitionOptimizer,
+    fit_gp_with_fallback,
     kernel_common_best,
     kernel_stable_conservative,
 )
@@ -254,38 +255,7 @@ def _fit_gp_like_additional(
     y: np.ndarray,
     seed: int,
 ) -> tuple[GaussianProcessRegressor | None, bool]:
-    X = np.asarray(X, dtype=float)
-    y = np.asarray(y, dtype=float).reshape(-1)
-    if X.ndim != 2 or y.size != X.shape[0] or X.shape[0] < 2:
-        return None, False
-    dim = int(X.shape[1])
-    try:
-        gp = GaussianProcessRegressor(
-            kernel=kernel_common_best(dim, include_white=False),
-            alpha=1e-6,
-            normalize_y=True,
-            n_restarts_optimizer=1,
-            random_state=int(seed),
-        )
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=ConvergenceWarning)
-            gp.fit(X, y)
-        return gp, False
-    except Exception:
-        try:
-            gp = GaussianProcessRegressor(
-                kernel=kernel_stable_conservative(dim, include_white=False),
-                alpha=1e-5,
-                normalize_y=False,
-                n_restarts_optimizer=1,
-                random_state=int(seed),
-            )
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=ConvergenceWarning)
-                gp.fit(X, y)
-            return gp, True
-        except Exception:
-            return None, True
+    return fit_gp_with_fallback(X=X, y=y, include_white=False, random_state=int(seed))
 
 
 def _dedup_rows(X: np.ndarray, decimals: int = 12) -> np.ndarray:

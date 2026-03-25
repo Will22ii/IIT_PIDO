@@ -252,9 +252,11 @@ class LocalSampler:
         k = max(1, int(round(n * self.local_top_p)))
         k = max(k, self.local_top_k_min)
 
+        predictions = []
         per_model = []
         for m in models:
             y = np.asarray(m.predict(X_candidate), dtype=float).reshape(-1)
+            predictions.append(y)
             if objective_sense == "min":
                 order = np.argsort(y)
             else:
@@ -272,7 +274,7 @@ class LocalSampler:
             idx = np.array([], dtype=int)
 
         # Return proxy scores for selected candidates (mean prediction across models).
-        Yhat = np.vstack([np.asarray(m.predict(X_candidate), dtype=float).reshape(-1) for m in models])
+        Yhat = np.vstack(predictions)
         y_mean = np.mean(Yhat, axis=0)
         return idx, y_mean[idx]
 

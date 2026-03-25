@@ -75,6 +75,48 @@ def kernel_stable_conservative(
     return base + WhiteKernel(noise_level=safe_noise, noise_level_bounds=(1e-6, 1e-1))
 
 
+def fit_gp_with_fallback(
+    *,
+    X: np.ndarray,
+    y: np.ndarray,
+    include_white: bool = False,
+    random_state: int = 0,
+) -> tuple[GaussianProcessRegressor | None, bool]:
+    """GP 학습: kernel_common_best 시도 → 실패 시 kernel_stable_conservative fallback."""
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float).reshape(-1)
+    if X.ndim != 2 or X.shape[0] < 2 or X.shape[0] != y.shape[0]:
+        return None, False
+    dim = X.shape[1]
+    try:
+        gp = GaussianProcessRegressor(
+            kernel=kernel_common_best(dim, include_white=include_white),
+            alpha=1e-6,
+            normalize_y=True,
+            n_restarts_optimizer=1,
+            random_state=random_state,
+        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=ConvergenceWarning)
+            gp.fit(X, y)
+        return gp, False
+    except Exception:
+        try:
+            gp = GaussianProcessRegressor(
+                kernel=kernel_stable_conservative(dim, include_white=include_white),
+                alpha=1e-5,
+                normalize_y=False,
+                n_restarts_optimizer=1,
+                random_state=random_state,
+            )
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                gp.fit(X, y)
+            return gp, True
+        except Exception:
+            return None, True
+
+
 class AcquisitionOptimizer:
     def __init__(self):
         pass
@@ -297,44 +339,11 @@ class GPAnchorRefiner:
         return y >= thr
 
     def _fit_gp(self, *, X: np.ndarray, y: np.ndarray) -> tuple[GaussianProcessRegressor | None, bool]:
-        X = np.asarray(X, dtype=float)
-        y = np.asarray(y, dtype=float).reshape(-1)
-        if X.shape[0] < 2:
-            return None, False
-        kernel = kernel_common_best(
-            X.shape[1],
+        return fit_gp_with_fallback(
+            X=X, y=y,
             include_white=self.use_white_kernel,
+            random_state=self.random_seed,
         )
-        try:
-            gp_model = GaussianProcessRegressor(
-                kernel=kernel,
-                alpha=1e-6,
-                normalize_y=True,
-                n_restarts_optimizer=1,
-                random_state=self.random_seed,
-            )
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=ConvergenceWarning)
-                gp_model.fit(X, y)
-            return gp_model, False
-        except Exception:
-            try:
-                gp_model = GaussianProcessRegressor(
-                    kernel=kernel_stable_conservative(
-                        X.shape[1],
-                        include_white=self.use_white_kernel,
-                    ),
-                    alpha=1e-5,
-                    normalize_y=False,
-                    n_restarts_optimizer=1,
-                    random_state=self.random_seed,
-                )
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", category=ConvergenceWarning)
-                    gp_model.fit(X, y)
-                return gp_model, True
-            except Exception:
-                return None, True
 
     def _build_multistarts(
         self,

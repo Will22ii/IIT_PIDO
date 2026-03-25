@@ -34,6 +34,10 @@ class FeatureSelectionConfig:
     elite_rich_threshold: int = 80
     elite_mode: str = "bonus"
     elite_bonus_beta: float = 0.30
+    # elite variance penalty
+    elite_var_penalty_enabled: bool = True
+    elite_var_threshold: float = 0.25
+    elite_var_penalty_scale: float = 0.15
     # decision guards
     final_score_threshold: float = 0.6
     global_score_floor: float = 0.2
@@ -63,7 +67,8 @@ class FeatureSelectionConfig:
     null_shuffle_runs_normal: int = 30
     null_alpha_low_data: float = 0.15
     null_alpha_normal: float = 0.12
-    null_apply_to: str = "global_score"
+    null_apply_to: str = "both"
+    null_pre_elite_ratio: float = 0.5
     # quantile policy
     quantile_top_ratio_default: float = 0.30
     quantile_top_ratio_p_le_6: float = 0.50
@@ -198,6 +203,8 @@ class FeatureSelector:
             elite_df=score_e,
             perm_processed_global=perm_proc_g,
             drop_processed_global=drop_proc_g,
+            perm_processed_elite=perm_proc_e,
+            drop_processed_elite=drop_proc_e,
             n_elite=(int(n_elite) if n_elite is not None else 0),
             low_data=bool(low_data),
             n_samples=(int(n_samples) if n_samples is not None else 0),
@@ -565,7 +572,7 @@ class FeatureSelector:
     @staticmethod
     def _normalize_null_apply_to(target: str) -> str:
         t = str(target).strip().lower()
-        if t not in {"global_score", "final_score"}:
+        if t not in {"global_score", "final_score", "both"}:
             return "global_score"
         return t
 
@@ -684,6 +691,8 @@ class FeatureSelector:
         elite_df: pd.DataFrame,
         perm_processed_global: pd.DataFrame,
         drop_processed_global: pd.DataFrame,
+        perm_processed_elite: pd.DataFrame | None = None,
+        drop_processed_elite: pd.DataFrame | None = None,
         n_elite: int,
         low_data: bool,
         n_samples: int = 0,
@@ -730,6 +739,46 @@ class FeatureSelector:
 
         global_score = pd.to_numeric(out["global_score"], errors="coerce").fillna(0.0)
         elite_score = pd.to_numeric(out["elite_score"], errors="coerce").fillna(0.0)
+
+        # --- Pre-elite null penalty ("both" 모드) ---
+        # null_apply_to="both"일 때 global_score에 pre-penalty를 적용하여
+        # dummy feature가 elite bonus를 받지 못하게 사전 억제
+        _null_pre_enabled, _null_pre_mode, _null_pre_q, _null_pre_runs, _null_pre_alpha, _null_pre_apply = \
+            self._resolve_null_policy(low_data=bool(low_data))
+        _pre_elite_ratio = float(np.clip(getattr(self.config, "null_pre_elite_ratio", 0.5), 0.0, 1.0))
+        _null_q_cache = None
+        out["null_pre_elite_penalty"] = 0.0
+
+        if bool(_null_pre_enabled) and str(_null_pre_apply) == "both":
+            feature_order = out["feature"].astype(str).tolist()
+            _null_q_cache = self._compute_null_q_series(
+                features=feature_order,
+                perm_processed_global=perm_processed_global,
+                drop_processed_global=drop_processed_global,
+                n_shuffle=int(_null_pre_runs),
+                q=float(_null_pre_q),
+            )
+            _perm_vote_pre = pd.to_numeric(out["perm_vote_score_global"], errors="coerce").fillna(0.0)
+            _drop_vote_pre = pd.to_numeric(out["drop_vote_score_global"], errors="coerce").fillna(0.0)
+            _perm_margin_pre = _perm_vote_pre - out["feature"].astype(str).map(_null_q_cache["perm"]).astype(float)
+            _drop_margin_pre = _drop_vote_pre - out["feature"].astype(str).map(_null_q_cache["drop"]).astype(float)
+
+            _w_perm = float(getattr(self.config, "weight_perm", 0.80))
+            _w_drop = float(getattr(self.config, "weight_drop", 0.20)) if bool(
+                getattr(self.config, "use_score_drop", True)
+            ) else 0.0
+            _w_d = _w_perm + _w_drop
+            _wp, _wd = (_w_perm / _w_d, _w_drop / _w_d) if _w_d > 0 else (1.0, 0.0)
+
+            _pre_alpha = float(_null_pre_alpha) * _pre_elite_ratio
+            _pre_perm_pen = _pre_alpha * np.clip(-_perm_margin_pre, 0.0, None)
+            _pre_drop_pen = _pre_alpha * np.clip(-_drop_margin_pre, 0.0, None)
+            _pre_penalty = (_wp * _pre_perm_pen + _wd * _pre_drop_pen)
+            out["null_pre_elite_penalty"] = _pre_penalty
+
+            global_score = (global_score - _pre_penalty).clip(lower=0.0)
+            out["global_score_adj_pre"] = global_score
+
         elite_mode = self._normalize_elite_mode(self.config.elite_mode)
         out["elite_mode"] = str(elite_mode)
 
@@ -754,6 +803,28 @@ class FeatureSelector:
             out["elite_bonus_beta"] = 0.0
             out["elite_bonus"] = 0.0
             out["final_score"] = global_score
+
+        # --- Elite Variance Penalty ---
+        evp_enabled = bool(getattr(self.config, "elite_var_penalty_enabled", False))
+        if evp_enabled and perm_processed_elite is not None and not perm_processed_elite.empty:
+            evp_thr = float(np.clip(getattr(self.config, "elite_var_threshold", 0.25), 0.0, 1.0))
+            evp_scale = float(np.clip(getattr(self.config, "elite_var_penalty_scale", 0.15), 0.0, 1.0))
+            elite_vote_std = (
+                perm_processed_elite.groupby("feature")["vote"]
+                .std(ddof=1)
+                .fillna(0.0)
+                .rename("elite_vote_std")
+            )
+            out = out.merge(elite_vote_std, on="feature", how="left")
+            out["elite_vote_std"] = pd.to_numeric(out["elite_vote_std"], errors="coerce").fillna(0.0)
+            evp_penalty = (out["elite_vote_std"] - evp_thr).clip(lower=0.0) * evp_scale
+            out["elite_var_penalty"] = evp_penalty
+            out["final_score"] = (
+                pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0) - evp_penalty
+            ).clip(lower=0.0)
+        else:
+            out["elite_vote_std"] = 0.0
+            out["elite_var_penalty"] = 0.0
 
         # Backward-compatible columns expected by downstream and debug plots.
         out["perm_selection_rate"] = pd.to_numeric(out["perm_vote_score_global"], errors="coerce").fillna(0.0)
@@ -786,13 +857,17 @@ class FeatureSelector:
 
         if bool(null_enabled):
             feature_order = out["feature"].astype(str).tolist()
-            null_q_result = self._compute_null_q_series(
-                features=feature_order,
-                perm_processed_global=perm_processed_global,
-                drop_processed_global=drop_processed_global,
-                n_shuffle=int(null_runs),
-                q=float(null_q),
-            )
+            # "both" 모드에서 이미 계산된 null_q_cache 재사용
+            if _null_q_cache is not None:
+                null_q_result = _null_q_cache
+            else:
+                null_q_result = self._compute_null_q_series(
+                    features=feature_order,
+                    perm_processed_global=perm_processed_global,
+                    drop_processed_global=drop_processed_global,
+                    n_shuffle=int(null_runs),
+                    q=float(null_q),
+                )
             null_q_combined = null_q_result["combined"]
             null_q_perm = null_q_result["perm"]
             null_q_drop = null_q_result["drop"]
@@ -825,16 +900,20 @@ class FeatureSelector:
                 perm_ch_penalty = np.where(perm_null_margin >= 0.0, 0.0, 1e6)
                 drop_ch_penalty = np.where(drop_null_margin >= 0.0, 0.0, 1e6)
             else:
-                perm_ch_penalty = float(null_alpha) * np.clip(-perm_null_margin, 0.0, None)
-                drop_ch_penalty = float(null_alpha) * np.clip(-drop_null_margin, 0.0, None)
+                # "both" 모드: pre-elite에서 이미 ratio 만큼 적용했으므로 나머지만 적용
+                post_alpha = float(null_alpha)
+                if str(null_apply_to) == "both":
+                    post_alpha = float(null_alpha) * (1.0 - _pre_elite_ratio)
+                perm_ch_penalty = post_alpha * np.clip(-perm_null_margin, 0.0, None)
+                drop_ch_penalty = post_alpha * np.clip(-drop_null_margin, 0.0, None)
 
             channel_penalty = (float(w_perm_n) * perm_ch_penalty) + (float(w_drop_n) * drop_ch_penalty)
 
             # 기존 결합 null과의 호환: 결합 margin/pass도 기록
-            if str(null_apply_to) == "final_score":
+            if str(null_apply_to) in ("final_score",):
                 null_target_score = pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0)
             else:
-                null_target_score = global_score
+                null_target_score = pd.to_numeric(out.get("global_score_adj_pre", out["global_score"]), errors="coerce").fillna(0.0)
             out["null_margin"] = null_target_score - out["null_q"]
             out["null_pass"] = (perm_null_margin >= 0.0) | (drop_null_margin >= 0.0)
 

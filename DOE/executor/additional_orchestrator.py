@@ -14,6 +14,7 @@ from utils.boundary_sampling import sample_boundary_corners, sample_boundary_cor
 from utils.bounds_utils import compute_spans_lbs, clamp_to_bounds
 from DOE.executor.anchor_refiner import (
     AcquisitionOptimizer,
+    fit_gp_with_fallback,
     kernel_common_best,
     kernel_stable_conservative,
 )
@@ -328,43 +329,11 @@ class AdditionalDOEOrchestrator:
         X: np.ndarray,
         y: np.ndarray,
     ) -> tuple[GaussianProcessRegressor | None, bool]:
-        X = np.asarray(X, dtype=float)
-        y = np.asarray(y, dtype=float).reshape(-1)
-        if X.ndim != 2 or X.shape[0] < 2 or X.shape[0] != y.shape[0]:
-            return None, False
-        try:
-            gp = GaussianProcessRegressor(
-                kernel=kernel_common_best(
-                    X.shape[1],
-                    include_white=self.local_gp_use_white_kernel,
-                ),
-                alpha=1e-6,
-                normalize_y=True,
-                n_restarts_optimizer=1,
-                random_state=self.local_gp_seed,
-            )
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=ConvergenceWarning)
-                gp.fit(X, y)
-            return gp, False
-        except Exception:
-            try:
-                gp = GaussianProcessRegressor(
-                    kernel=kernel_stable_conservative(
-                        X.shape[1],
-                        include_white=self.local_gp_use_white_kernel,
-                    ),
-                    alpha=1e-5,
-                    normalize_y=False,
-                    n_restarts_optimizer=1,
-                    random_state=self.local_gp_seed,
-                )
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", category=ConvergenceWarning)
-                    gp.fit(X, y)
-                return gp, True
-            except Exception:
-                return None, True
+        return fit_gp_with_fallback(
+            X=X, y=y,
+            include_white=self.local_gp_use_white_kernel,
+            random_state=self.local_gp_seed,
+        )
 
     def _dedup_candidates_norm(
         self,
@@ -722,58 +691,47 @@ class AdditionalDOEOrchestrator:
 
         return [_PenaltyWrappedModel(m) for m in models]
 
-    def _dedup_mask_against_history_norm(
-        self,
-        *,
-        X_new: np.ndarray,
-        X_old: np.ndarray,
-        spans: np.ndarray,
-        dedup_tol: float,
-    ) -> np.ndarray:
-        if X_new.size == 0:
-            return np.empty((0,), dtype=bool)
-        if X_old.size == 0:
-            return np.ones((X_new.shape[0],), dtype=bool)
-        mask = np.ones((X_new.shape[0],), dtype=bool)
-        for i, x in enumerate(X_new):
-            dists = np.linalg.norm((X_old - x) / spans, axis=1)
-            mask[i] = bool(np.all(dists > dedup_tol))
-        return mask
-
-    def _dedup_mask_against_history_raw(
-        self,
-        *,
-        X_new: np.ndarray,
-        X_old: np.ndarray,
-        dedup_tol: float,
-    ) -> np.ndarray:
-        if X_new.size == 0:
-            return np.empty((0,), dtype=bool)
-        if X_old.size == 0:
-            return np.ones((X_new.shape[0],), dtype=bool)
-        mask = np.ones((X_new.shape[0],), dtype=bool)
-        for i, x in enumerate(X_new):
-            dists = np.linalg.norm(X_old - x, axis=1)
-            mask[i] = bool(np.all(dists > dedup_tol))
-        return mask
-
-    def _dedup_mask_against_other_norm(
+    # ------------------------------------------------------------------
+    # Unified dedup: spans=None → raw distance, spans 제공 → 정규화 거리
+    # ------------------------------------------------------------------
+    def _dedup_mask(
         self,
         *,
         X_new: np.ndarray,
         X_ref: np.ndarray,
-        spans: np.ndarray,
         dedup_tol: float,
+        spans: np.ndarray | None = None,
     ) -> np.ndarray:
         if X_new.size == 0:
             return np.empty((0,), dtype=bool)
         if X_ref.size == 0:
             return np.ones((X_new.shape[0],), dtype=bool)
-        mask = np.ones((X_new.shape[0],), dtype=bool)
-        for i, x in enumerate(X_new):
-            dists = np.linalg.norm((X_ref - x) / spans, axis=1)
-            mask[i] = bool(np.all(dists > dedup_tol))
+        from scipy.spatial import cKDTree
+
+        if spans is not None:
+            safe_spans = np.where(spans > 1e-12, spans, 1.0)
+            X_new_n = X_new / safe_spans
+            X_ref_n = X_ref / safe_spans
+        else:
+            X_new_n = np.asarray(X_new, dtype=float)
+            X_ref_n = np.asarray(X_ref, dtype=float)
+
+        tree = cKDTree(X_ref_n)
+        mask = np.ones(X_new_n.shape[0], dtype=bool)
+        for i in range(X_new_n.shape[0]):
+            if tree.query_ball_point(X_new_n[i], r=float(dedup_tol)):
+                mask[i] = False
         return mask
+
+    # backward-compatible wrappers
+    def _dedup_mask_against_history_norm(self, *, X_new, X_old, spans, dedup_tol):
+        return self._dedup_mask(X_new=X_new, X_ref=X_old, dedup_tol=dedup_tol, spans=spans)
+
+    def _dedup_mask_against_history_raw(self, *, X_new, X_old, dedup_tol):
+        return self._dedup_mask(X_new=X_new, X_ref=X_old, dedup_tol=dedup_tol, spans=None)
+
+    def _dedup_mask_against_other_norm(self, *, X_new, X_ref, spans, dedup_tol):
+        return self._dedup_mask(X_new=X_new, X_ref=X_ref, dedup_tol=dedup_tol, spans=spans)
 
     # -------------------------------------------------
     # Main entry
@@ -806,7 +764,7 @@ class AdditionalDOEOrchestrator:
         if self.has_pre_constraints:
             if n_regular_target > 0:
                 probe_size = max(1, int(np.ceil(n_regular_target * self.initial_probe_multiplier)))
-                max_attempts = max(2, int(np.ceil(1.0 / max(self.plan_filter_r_floor, 1e-6))))
+                max_attempts = min(max(2, int(np.ceil(1.0 / max(self.plan_filter_r_floor, 1e-6)))), 50)
                 pool_X: list[np.ndarray] = []
                 pool_constraints: list[dict] = []
                 pool_margins: list[float] = []
