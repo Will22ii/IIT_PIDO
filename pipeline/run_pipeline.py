@@ -37,16 +37,19 @@ def run_pipeline(*, config: PipelineConfig) -> dict:
         use_timestamp=bool(config.cae.system.use_timestamp),
     )
 
+    doe_df = None
     if config.tasks.run_doe and config.doe is not None:
         config.doe.cae_output = cae_out
         config.doe.cae_user = config.cae.user
         config.doe.cae = config.cae
-        run_doe(config=config.doe, run_context=run_context)
+        doe_out = run_doe(config=config.doe, run_context=run_context)
+        if isinstance(doe_out, dict):
+            doe_df = doe_out.get("df")
 
     if config.tasks.run_modeler and config.modeler is not None:
         config.modeler.cae_user = config.cae.user
         config.modeler.cae = config.cae
-        run_modeler(config=config.modeler, run_context=run_context)
+        run_modeler(config=config.modeler, run_context=run_context, doe_dataframe=doe_df)
 
     if config.tasks.run_explorer and config.explorer is not None:
         config.explorer.cae = config.cae

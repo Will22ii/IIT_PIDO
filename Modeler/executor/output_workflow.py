@@ -37,8 +37,9 @@ def save_modeler_outputs(
     feas_model_kind: str,
     feas_model_stats: dict,
     hpo_params_used: bool,
-    hpo_signature: str | None,
-    data_hash: str | None,
+    hpo_mode: str,
+    hpo_n_trials_effective: int | None,
+    hpo_lambda_std_effective: float | None,
     best_params: dict | None,
     model_path: str,
     selected_path: str,
@@ -77,8 +78,13 @@ def save_modeler_outputs(
     resolved_params = {
         "model_name": model_name,
         "hpo_used": hpo_params_used,
-        "hpo_signature": hpo_signature,
-        "data_hash": data_hash if hpo_signature else None,
+        "hpo_mode": str(hpo_mode),
+        "hpo_n_trials_effective": (
+            int(hpo_n_trials_effective) if hpo_n_trials_effective is not None else None
+        ),
+        "hpo_lambda_std_effective": (
+            float(hpo_lambda_std_effective) if hpo_lambda_std_effective is not None else None
+        ),
         "selected_features": selected_features,
         "kfold_splits": int(kfold_splits),
         "kfold_repeats": int(kfold_repeats),

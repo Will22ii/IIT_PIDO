@@ -122,6 +122,7 @@ def resolve_modeler_input(
     *,
     config: ModelerConfig,
     run_context: RunContext | None,
+    doe_dataframe: "pd.DataFrame | None" = None,
 ) -> ModelerInputResult:
     loader = ResultLoader()
     cae_meta_path = _resolve_existing_cae_metadata_path(config=config, run_context=run_context)
@@ -140,11 +141,11 @@ def resolve_modeler_input(
             f"config={configured_problem}, cae_metadata={cae_problem_name}"
         )
 
-    doe_meta = {}
     csv_path = None
     used_input_paths = bool(config.doe_metadata_path or config.doe_csv_path)
 
     if used_input_paths:
+        # 1순위: 유저가 경로를 직접 지정 (standalone / skip 모드)
         if config.doe_metadata_path:
             print(f"- DOE metadata path provided: {config.doe_metadata_path}")
             doe_result = loader.load_task(
@@ -153,7 +154,6 @@ def resolve_modeler_input(
                 csv_path=config.doe_csv_path,
                 allow_latest_fallback=False,
             )
-            doe_meta = doe_result.metadata or {}
             csv_path = doe_result.csv_path
             df = doe_result.df
         elif config.doe_csv_path:
@@ -164,7 +164,12 @@ def resolve_modeler_input(
             df = pd.read_csv(csv_path)
         else:
             raise RuntimeError("Modeler input CSV path not resolved.")
+    elif doe_dataframe is not None and not doe_dataframe.empty:
+        # 2순위: pipeline sequential에서 DataFrame 직접 전달
+        df = doe_dataframe
+        print("- DOE DataFrame received in-memory (pipeline mode)")
     elif run_context:
+        # 3순위: run_context index.json에서 DOE CSV 경로 탐색 (방어)
         doe_meta_path = get_task_metadata_path(run_context, "DOE")
         if not doe_meta_path:
             raise RuntimeError("DOE metadata not found in run context.")
@@ -173,7 +178,6 @@ def resolve_modeler_input(
             metadata_path=doe_meta_path,
             allow_latest_fallback=False,
         )
-        doe_meta = doe_result.metadata or {}
         csv_path = doe_result.csv_path
         df = doe_result.df
     else:
@@ -182,14 +186,9 @@ def resolve_modeler_input(
             "Provide doe_metadata_path/doe_csv_path or run via pipeline run_context."
         )
 
-    problem_name = doe_meta.get("problem") or cae_problem_name or config.cae.user.problem_name
+    problem_name = cae_problem_name or config.cae.user.problem_name
     if not problem_name:
-        raise RuntimeError("DOE metadata에 problem 정보가 없습니다.")
-    if doe_meta.get("problem") and str(doe_meta.get("problem")).strip() != str(cae_problem_name).strip():
-        raise RuntimeError(
-            "Problem mismatch between DOE metadata and CAE metadata: "
-            f"doe={doe_meta.get('problem')}, cae={cae_problem_name}"
-        )
+        raise RuntimeError("CAE metadata에 problem 정보가 없습니다.")
 
     base_seed = int(cae_seed)
 
@@ -200,7 +199,7 @@ def resolve_modeler_input(
 
     return ModelerInputResult(
         df=df,
-        doe_meta=doe_meta,
+        doe_meta={},
         csv_path=csv_path,
         problem_name=str(problem_name),
         base_seed=int(base_seed),

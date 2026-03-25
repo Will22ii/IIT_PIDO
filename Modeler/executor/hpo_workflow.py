@@ -1,11 +1,7 @@
 from dataclasses import dataclass
-import hashlib
-import json
-import os
-import sqlite3
+from typing import Any
 
 import numpy as np
-import pandas as pd
 
 from Modeler.executor.hpo_runner import HPORunner
 
@@ -23,112 +19,108 @@ XGB_PARAM_TYPES = {
     "gamma": float,
 }
 
+DEFAULT_HPO_N_TRIALS = 20
+DEFAULT_HPO_LAMBDA_STD = 0.5
+DEFAULT_LOW_DATA_HPO_N_TRIALS = 10
+DEFAULT_LOW_DATA_XGB_SEARCH_SPACE: dict[str, tuple[float, float]] = {
+    "n_estimators": (250, 600),
+    "learning_rate": (0.02, 0.08),
+    "max_depth": (3, 5),
+    "min_child_weight": (4, 10),
+    "subsample": (0.7, 0.9),
+    "colsample_bytree": (0.6, 0.9),
+    "gamma": (0.05, 0.3),
+}
+
 
 @dataclass
 class HPOResolveResult:
     best_params: dict | None
     hpo_params_used: bool
-    hpo_signature: str | None
-    data_hash: str | None
+    hpo_mode: str
+    hpo_n_trials_effective: int | None
+    hpo_lambda_std_effective: float | None
 
 
-def _file_sha256(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _build_hpo_signature(
-    *,
-    problem_name: str,
-    objective_sense: str,
-    model_name: str,
-    target_col: str,
-    data_hash: str,
-) -> str:
-    payload = {
-        "problem_name": problem_name,
-        "objective_sense": objective_sense,
-        "model_name": model_name,
-        "target_col": target_col,
-        "data_hash": data_hash,
-    }
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
-
-
-def _load_hpo_params_by_signature(
-    *,
-    signature: str,
-    project_root: str,
-) -> dict | None:
-    db_path = os.path.join(project_root, "result", "hpo_cache.sqlite3")
-    if not os.path.exists(db_path):
-        return None
+def _safe_int(value: Any, *, default: int, min_value: int = 1) -> int:
     try:
-        with sqlite3.connect(db_path) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS hpo_cache (
-                    signature TEXT PRIMARY KEY,
-                    params_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    metadata_ref TEXT
-                )
-                """
-            )
-            row = cur.execute(
-                "SELECT params_json FROM hpo_cache WHERE signature = ?",
-                (signature,),
-            ).fetchone()
-            if not row:
-                return None
-            payload = json.loads(row[0])
-            return {
-                k: XGB_PARAM_TYPES[k](v) if k in XGB_PARAM_TYPES else v
-                for k, v in payload.items()
-            }
-    except (sqlite3.Error, json.JSONDecodeError, OSError):
+        out = int(value)
+    except (TypeError, ValueError):
+        out = int(default)
+    return max(out, int(min_value))
+
+
+def _safe_float(value: Any, *, default: float, min_value: float | None = None) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        out = float(default)
+    if min_value is not None:
+        out = max(out, float(min_value))
+    return out
+
+
+def _canonical_search_space(space: Any) -> dict[str, list[float]] | None:
+    if not isinstance(space, dict):
         return None
+    out: dict[str, list[float]] = {}
+    for key, value in space.items():
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            low_raw, high_raw = value
+        elif isinstance(value, dict):
+            low_raw = value.get("low")
+            high_raw = value.get("high")
+        else:
+            continue
+        try:
+            low = float(low_raw)
+            high = float(high_raw)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(low) or not np.isfinite(high):
+            continue
+        if high < low:
+            low, high = high, low
+        out[str(key)] = [float(low), float(high)]
+    return out if out else None
 
 
-def update_hpo_cache(
+def _resolve_hpo_policy(
     *,
-    project_root: str,
-    signature: str,
-    params: dict,
-    metadata_ref: str | None = None,
-) -> None:
-    result_root = os.path.join(project_root, "result")
-    os.makedirs(result_root, exist_ok=True)
-    db_path = os.path.join(result_root, "hpo_cache.sqlite3")
-    now = pd.Timestamp.utcnow().isoformat()
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS hpo_cache (
-                signature TEXT PRIMARY KEY,
-                params_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                metadata_ref TEXT
-            )
-            """
+    hpo_config: dict | None,
+    low_data: bool,
+) -> tuple[str, int, float, dict[str, list[float]] | None]:
+    cfg = hpo_config or {}
+    constrained_enabled = bool(cfg.get("low_data_constrained_enabled", True))
+    if bool(low_data) and constrained_enabled:
+        mode = "low_data_constrained"
+        n_trials = _safe_int(
+            cfg.get("low_data_n_trials", DEFAULT_LOW_DATA_HPO_N_TRIALS),
+            default=DEFAULT_LOW_DATA_HPO_N_TRIALS,
+            min_value=1,
         )
-        cur.execute(
-            """
-            INSERT INTO hpo_cache(signature, params_json, created_at, metadata_ref)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(signature) DO UPDATE SET
-                params_json=excluded.params_json,
-                created_at=excluded.created_at,
-                metadata_ref=excluded.metadata_ref
-            """,
-            (signature, json.dumps(params, sort_keys=True), now, metadata_ref),
+        lambda_std = _safe_float(
+            cfg.get("low_data_lambda_std", cfg.get("lambda_std", DEFAULT_HPO_LAMBDA_STD)),
+            default=DEFAULT_HPO_LAMBDA_STD,
+            min_value=0.0,
         )
-        conn.commit()
+        search_space = _canonical_search_space(cfg.get("low_data_search_space"))
+        if search_space is None:
+            search_space = _canonical_search_space(DEFAULT_LOW_DATA_XGB_SEARCH_SPACE)
+    else:
+        mode = "default"
+        n_trials = _safe_int(
+            cfg.get("n_trials", DEFAULT_HPO_N_TRIALS),
+            default=DEFAULT_HPO_N_TRIALS,
+            min_value=1,
+        )
+        lambda_std = _safe_float(
+            cfg.get("lambda_std", DEFAULT_HPO_LAMBDA_STD),
+            default=DEFAULT_HPO_LAMBDA_STD,
+            min_value=0.0,
+        )
+        search_space = _canonical_search_space(cfg.get("search_space"))
+    return mode, int(n_trials), float(lambda_std), search_space
 
 
 def resolve_hpo_params(
@@ -141,87 +133,65 @@ def resolve_hpo_params(
     problem_name: str,
     objective_sense: str,
     target_col: str,
-    csv_path: str | None,
     X: np.ndarray,
     y: np.ndarray,
     base_seed: int,
     kfold_splits: int,
+    low_data: bool,
 ) -> HPOResolveResult:
     best_params = None
     hpo_params_used = False
-    hpo_signature = None
-    data_hash = None
+    hpo_mode = "disabled"
+    hpo_n_trials_effective: int | None = None
+    hpo_lambda_std_effective: float | None = None
+
+    if model_name == "xgb":
+        (
+            hpo_mode,
+            hpo_n_trials_effective,
+            hpo_lambda_std_effective,
+            hpo_search_space,
+        ) = _resolve_hpo_policy(
+            hpo_config=hpo_config,
+            low_data=bool(low_data),
+        )
+    else:
+        hpo_search_space = None
 
     if use_hpo:
-        if not csv_path:
-            raise RuntimeError("HPO requires resolved csv_path for data hash/signature.")
-        data_hash = _file_sha256(csv_path)
-        hpo_signature = _build_hpo_signature(
+        hpo_runner = HPORunner(
+            n_trials=int(hpo_n_trials_effective or DEFAULT_HPO_N_TRIALS),
+            lambda_std=float(hpo_lambda_std_effective or DEFAULT_HPO_LAMBDA_STD),
+            use_timestamp=use_timestamp,
+            search_space=hpo_search_space,
+            hpo_mode=hpo_mode,
+        )
+        print(
+            "- HPO policy: "
+            f"mode={hpo_mode} "
+            f"n_trials={hpo_n_trials_effective} "
+            f"lambda_std={hpo_lambda_std_effective}"
+        )
+
+        hpo_result = hpo_runner.run_xgb(
+            X=X,
+            y=y,
+            base_random_seed=base_seed,
             problem_name=problem_name,
-            objective_sense=objective_sense,
-            model_name=model_name,
-            target_col=target_col,
-            data_hash=data_hash,
+            kfold_splits=kfold_splits,
         )
-        reuse_hpo = True
-        if hpo_config is not None:
-            reuse_hpo = bool(hpo_config.get("reuse_if_same_config", True))
-        if reuse_hpo:
-            reused = _load_hpo_params_by_signature(
-                signature=hpo_signature,
-                project_root=project_root,
-            )
-            if reused:
-                best_params = reused
-                hpo_params_used = True
-                print("- Reusing HPO params (signature match)")
 
-        if best_params is None:
-            cfg = hpo_config or {}
-            hpo_runner = HPORunner(
-                n_trials=cfg.get("n_trials", 20),
-                lambda_std=cfg.get("lambda_std", 0.5),
-                use_timestamp=use_timestamp,
-            )
+        best_params = hpo_result["best_params"]
+        hpo_params_used = True
+        print("- HPO executed")
 
-            hpo_result = hpo_runner.run_xgb(
-                X=X,
-                y=y,
-                base_random_seed=base_seed,
-                problem_name=problem_name,
-                kfold_splits=kfold_splits,
-            )
-
-            best_params = hpo_result["best_params"]
-            hpo_params_used = True
-            print("- HPO executed")
-
-    elif model_name == "xgb":
-        if not csv_path:
-            raise RuntimeError("XGB cache reuse requires resolved csv_path for signature.")
-        data_hash = _file_sha256(csv_path)
-        hpo_signature = _build_hpo_signature(
-            problem_name=problem_name,
-            objective_sense=objective_sense,
-            model_name=model_name,
-            target_col=target_col,
-            data_hash=data_hash,
-        )
-        reused = _load_hpo_params_by_signature(
-            signature=hpo_signature,
-            project_root=project_root,
-        )
-        if reused:
-            best_params = reused
-            hpo_params_used = True
-            print("- Using cached HPO params (signature match)")
-    else:
-        best_params = None
-        hpo_params_used = False
+    elif model_name != "xgb":
+        hpo_mode = "disabled_non_xgb"
 
     return HPOResolveResult(
         best_params=best_params,
         hpo_params_used=hpo_params_used,
-        hpo_signature=hpo_signature,
-        data_hash=data_hash,
+        hpo_mode=hpo_mode,
+        hpo_n_trials_effective=hpo_n_trials_effective,
+        hpo_lambda_std_effective=hpo_lambda_std_effective,
     )

@@ -111,7 +111,7 @@ def _extract_cae_inputs(cae_meta: dict) -> tuple[str, list[dict], list[dict], st
     return problem_name, variables, constraint_defs, objective_sense
 
 
-def run_doe(*, config: DOEConfig, run_context: RunContext | None = None) -> list[dict]:
+def run_doe(*, config: DOEConfig, run_context: RunContext | None = None) -> dict:
     print("===================================")
     print(" DOE 실행 시작")
     print("===================================")

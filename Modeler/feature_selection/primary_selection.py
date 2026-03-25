@@ -12,6 +12,9 @@ class FeatureSelectionConfig:
     drop_metric: str = "drop_sq"
     drop_min_pass_rate: float = 0.6
     drop_epsilon: float = 0.06
+    # very_low_data 전용 drop 채널 임계값
+    drop_min_pass_rate_very_low_data: float = 0.35
+    drop_epsilon_very_low_data: float = 0.02
     # fold vote weights
     weight_abs: float = 0.75
     weight_quantile: float = 0.15
@@ -19,6 +22,9 @@ class FeatureSelectionConfig:
     # channel merge weights
     weight_perm: float = 0.75
     weight_drop: float = 0.25
+    # low_data 전용 채널 가중치 (low_data=True일 때 weight_perm/weight_drop 대신 사용)
+    weight_perm_low_data: float = 0.90
+    weight_drop_low_data: float = 0.10
     # scale merge default weights
     weight_global_default: float = 0.6
     # scale merge adaptive settings
@@ -31,6 +37,33 @@ class FeatureSelectionConfig:
     # decision guards
     final_score_threshold: float = 0.6
     global_score_floor: float = 0.2
+    # stability gate
+    stability_enabled: bool = True
+    stability_rule: str = "or"   # legacy fallback
+    # 3단계 stability 분기
+    stability_very_low_data_n_threshold: int = 50
+    stability_rule_very_low_data: str = "or"
+    stability_perm_min_rate_very_low_data: float = 0.55
+    stability_drop_min_rate_very_low_data: float = 0.35
+    stability_rule_low_data: str = "and"
+    stability_perm_min_rate_low_data: float = 0.60
+    stability_drop_min_rate_low_data: float = 0.44
+    stability_rule_normal: str = "or"
+    stability_perm_min_rate_normal: float = 0.80
+    stability_drop_min_rate_normal: float = 0.60
+    # disagreement penalty
+    disagreement_penalty_enabled: bool = True
+    disagreement_threshold: float = 0.25
+    disagreement_penalty_scale: float = 0.40
+    # null-importance soft gate
+    null_enabled: bool = True
+    null_mode: str = "soft"
+    null_quantile: float = 0.95
+    null_shuffle_runs_low_data: int = 25
+    null_shuffle_runs_normal: int = 30
+    null_alpha_low_data: float = 0.15
+    null_alpha_normal: float = 0.12
+    null_apply_to: str = "global_score"
     # quantile policy
     quantile_top_ratio_default: float = 0.30
     quantile_top_ratio_p_le_6: float = 0.50
@@ -45,29 +78,53 @@ class FeatureSelector:
     def run(
         self,
         *,
-        perm_effect_path: str,
+        perm_effect_path: str | None = None,
         problem_name: str,
         score_drop_path: str | None = None,
         perm_effect_elite_path: str | None = None,
         score_drop_elite_path: str | None = None,
+        perm_effect_df: pd.DataFrame | None = None,
+        perm_effect_elite_df: pd.DataFrame | None = None,
+        score_drop_df: pd.DataFrame | None = None,
+        score_drop_elite_df: pd.DataFrame | None = None,
         low_data: bool = False,
         n_features: int | None = None,
         n_elite: int | None = None,
+        n_samples: int | None = None,
     ) -> Dict[str, pd.DataFrame]:
         _ = problem_name
-        perm_global_raw = pd.read_csv(perm_effect_path)
-        perm_elite_raw = (
-            pd.read_csv(perm_effect_elite_path)
-            if perm_effect_elite_path and self._has_rows(perm_effect_elite_path)
-            else pd.DataFrame()
-        )
 
+        # perm global: DataFrame 우선, 없으면 path에서 읽기
+        if perm_effect_df is not None and not perm_effect_df.empty:
+            perm_global_raw = perm_effect_df
+        elif perm_effect_path:
+            perm_global_raw = pd.read_csv(perm_effect_path)
+        else:
+            perm_global_raw = pd.DataFrame()
+
+        # perm elite
+        if perm_effect_elite_df is not None and not perm_effect_elite_df.empty:
+            perm_elite_raw = perm_effect_elite_df
+        elif perm_effect_elite_path and self._has_rows(perm_effect_elite_path):
+            perm_elite_raw = pd.read_csv(perm_effect_elite_path)
+        else:
+            perm_elite_raw = pd.DataFrame()
+
+        # drop global
         drop_global_raw = pd.DataFrame()
+        if self.config.use_score_drop:
+            if score_drop_df is not None and not score_drop_df.empty:
+                drop_global_raw = score_drop_df
+            elif score_drop_path and self._has_rows(score_drop_path):
+                drop_global_raw = pd.read_csv(score_drop_path)
+
+        # drop elite
         drop_elite_raw = pd.DataFrame()
-        if self.config.use_score_drop and score_drop_path and self._has_rows(score_drop_path):
-            drop_global_raw = pd.read_csv(score_drop_path)
-        if self.config.use_score_drop and score_drop_elite_path and self._has_rows(score_drop_elite_path):
-            drop_elite_raw = pd.read_csv(score_drop_elite_path)
+        if self.config.use_score_drop:
+            if score_drop_elite_df is not None and not score_drop_elite_df.empty:
+                drop_elite_raw = score_drop_elite_df
+            elif score_drop_elite_path and self._has_rows(score_drop_elite_path):
+                drop_elite_raw = pd.read_csv(score_drop_elite_path)
 
         p_dim = int(n_features) if n_features is not None else self._infer_n_features(
             perm_global_raw=perm_global_raw,
@@ -76,6 +133,17 @@ class FeatureSelector:
         top_ratio = self._resolve_top_ratio(
             low_data=bool(low_data),
             p_dim=max(p_dim, 1),
+        )
+
+        very_low_n_thr = int(getattr(self.config, "stability_very_low_data_n_threshold", 50))
+        is_very_low_data = bool(low_data) and int(n_samples or 0) < very_low_n_thr
+        eff_drop_epsilon = (
+            float(getattr(self.config, "drop_epsilon_very_low_data", self.config.drop_epsilon))
+            if is_very_low_data else float(self.config.drop_epsilon)
+        )
+        eff_drop_min_pass_rate = (
+            float(getattr(self.config, "drop_min_pass_rate_very_low_data", self.config.drop_min_pass_rate))
+            if is_very_low_data else float(self.config.drop_min_pass_rate)
         )
 
         perm_proc_g, perm_sum_g = self._score_channel(
@@ -99,15 +167,15 @@ class FeatureSelector:
 
         drop_proc_g, drop_sum_g = self._score_drop_channel(
             raw=drop_global_raw,
-            epsilon=float(self.config.drop_epsilon),
-            min_pass_rate=float(self.config.drop_min_pass_rate),
+            epsilon=eff_drop_epsilon,
+            min_pass_rate=eff_drop_min_pass_rate,
             top_ratio=float(top_ratio),
             scale_label="global",
         )
         drop_proc_e, drop_sum_e = self._score_drop_channel(
             raw=drop_elite_raw,
-            epsilon=float(self.config.drop_epsilon),
-            min_pass_rate=float(self.config.drop_min_pass_rate),
+            epsilon=eff_drop_epsilon,
+            min_pass_rate=eff_drop_min_pass_rate,
             top_ratio=float(top_ratio),
             scale_label="elite",
         )
@@ -116,18 +184,23 @@ class FeatureSelector:
             perm_summary=perm_sum_g,
             drop_summary=drop_sum_g,
             scale_label="global",
+            low_data=bool(low_data),
         )
         score_e = self._merge_scale_scores(
             perm_summary=perm_sum_e,
             drop_summary=drop_sum_e,
             scale_label="elite",
+            low_data=bool(low_data),
         )
 
         selected = self._finalize_selection(
             global_df=score_g,
             elite_df=score_e,
+            perm_processed_global=perm_proc_g,
+            drop_processed_global=drop_proc_g,
             n_elite=(int(n_elite) if n_elite is not None else 0),
             low_data=bool(low_data),
+            n_samples=(int(n_samples) if n_samples is not None else 0),
         )
 
         perm_processed = pd.concat([perm_proc_g, perm_proc_e], ignore_index=True)
@@ -366,6 +439,7 @@ class FeatureSelector:
         perm_summary: pd.DataFrame,
         drop_summary: pd.DataFrame,
         scale_label: str,
+        low_data: bool = False,
     ) -> pd.DataFrame:
         if perm_summary is None or perm_summary.empty:
             return pd.DataFrame()
@@ -439,8 +513,12 @@ class FeatureSelector:
             out["drop_selected"] = not bool(self.config.use_score_drop)
             out["drop_reason"] = "drop_disabled"
 
-        w_perm = float(self.config.weight_perm)
-        w_drop = float(self.config.weight_drop) if bool(self.config.use_score_drop) else 0.0
+        if bool(low_data):
+            w_perm = float(getattr(self.config, "weight_perm_low_data", self.config.weight_perm))
+            w_drop = float(getattr(self.config, "weight_drop_low_data", self.config.weight_drop)) if bool(self.config.use_score_drop) else 0.0
+        else:
+            w_perm = float(self.config.weight_perm)
+            w_drop = float(self.config.weight_drop) if bool(self.config.use_score_drop) else 0.0
         denom = w_perm + w_drop
         if denom <= 0.0:
             w_perm_n, w_drop_n = 1.0, 0.0
@@ -470,13 +548,145 @@ class FeatureSelector:
             return "bonus"
         return mode_norm
 
+    @staticmethod
+    def _normalize_stability_rule(rule: str) -> str:
+        rule_norm = str(rule).strip().lower()
+        if rule_norm not in {"or", "and"}:
+            return "or"
+        return rule_norm
+
+    @staticmethod
+    def _normalize_null_mode(mode: str) -> str:
+        mode_norm = str(mode).strip().lower()
+        if mode_norm not in {"soft", "hard", "off"}:
+            return "soft"
+        return mode_norm
+
+    @staticmethod
+    def _normalize_null_apply_to(target: str) -> str:
+        t = str(target).strip().lower()
+        if t not in {"global_score", "final_score"}:
+            return "global_score"
+        return t
+
+    def _resolve_null_policy(
+        self,
+        *,
+        low_data: bool,
+    ) -> tuple[bool, str, float, int, float, str]:
+        enabled = bool(getattr(self.config, "null_enabled", False))
+        mode = self._normalize_null_mode(getattr(self.config, "null_mode", "soft"))
+        if mode == "off":
+            enabled = False
+        q = float(np.clip(float(getattr(self.config, "null_quantile", 0.90)), 0.50, 0.999))
+        if bool(low_data):
+            n_shuffle = int(max(int(getattr(self.config, "null_shuffle_runs_low_data", 15)), 1))
+            alpha = float(np.clip(float(getattr(self.config, "null_alpha_low_data", 0.08)), 0.0, 1.0))
+        else:
+            n_shuffle = int(max(int(getattr(self.config, "null_shuffle_runs_normal", 30)), 1))
+            alpha = float(np.clip(float(getattr(self.config, "null_alpha_normal", 0.12)), 0.0, 1.0))
+        apply_to = self._normalize_null_apply_to(getattr(self.config, "null_apply_to", "global_score"))
+        return bool(enabled), str(mode), float(q), int(n_shuffle), float(alpha), str(apply_to)
+
+    def _compute_null_q_series(
+        self,
+        *,
+        features: list[str],
+        perm_processed_global: pd.DataFrame,
+        drop_processed_global: pd.DataFrame,
+        n_shuffle: int,
+        q: float,
+    ) -> dict[str, pd.Series]:
+        """채널별 독립 null quantile과 결합 null quantile을 함께 반환한다.
+
+        Returns
+        -------
+        dict with keys: "combined", "perm", "drop"
+            각각 feature-indexed pd.Series.
+        """
+        p = len(features)
+        _zero = pd.Series(np.zeros(p), index=features, dtype=float)
+        if p == 0:
+            empty = pd.Series(dtype=float)
+            return {"combined": empty, "perm": empty, "drop": empty}
+
+        def _vote_matrix(df: pd.DataFrame) -> np.ndarray:
+            if df is None or df.empty or ("fold" not in df.columns) or ("feature" not in df.columns):
+                return np.empty((0, p), dtype=float)
+            work = df.copy()
+            work["vote"] = pd.to_numeric(work.get("vote", 0.0), errors="coerce").fillna(0.0)
+            pv = (
+                work.pivot_table(index="fold", columns="feature", values="vote", aggfunc="mean")
+                .reindex(columns=features)
+                .fillna(0.0)
+            )
+            if pv.empty:
+                return np.empty((0, p), dtype=float)
+            return pv.to_numpy(dtype=float)
+
+        perm_mat = _vote_matrix(perm_processed_global)
+        drop_mat = _vote_matrix(drop_processed_global)
+
+        w_perm = float(self.config.weight_perm)
+        w_drop = float(self.config.weight_drop) if bool(self.config.use_score_drop) else 0.0
+        denom = w_perm + w_drop
+        if denom <= 0.0:
+            w_perm_n, w_drop_n = 1.0, 0.0
+        else:
+            w_perm_n, w_drop_n = w_perm / denom, w_drop / denom
+
+        null_samples = np.zeros((int(n_shuffle), p), dtype=float)
+        perm_null_samples = np.zeros((int(n_shuffle), p), dtype=float)
+        drop_null_samples = np.zeros((int(n_shuffle), p), dtype=float)
+        rng = np.random.default_rng(20260324)
+
+        n_perm_folds = perm_mat.shape[0]
+        n_drop_folds = drop_mat.shape[0]
+        total_perms_per_iter = n_perm_folds + n_drop_folds
+        if total_perms_per_iter == 0:
+            return {"combined": _zero, "perm": _zero, "drop": _zero}
+
+        # 모든 shuffle iteration에 필요한 permutation index를 일괄 생성
+        # RNG 소비 순서 보존: 각 iteration b에서 perm_folds 먼저, drop_folds 이후
+        all_orders = np.empty((int(n_shuffle) * total_perms_per_iter, p), dtype=np.intp)
+        for k in range(int(n_shuffle) * total_perms_per_iter):
+            all_orders[k] = rng.permutation(p)
+
+        for b in range(int(n_shuffle)):
+            base = b * total_perms_per_iter
+            perm_null = np.zeros((p,), dtype=float)
+            drop_null = np.zeros((p,), dtype=float)
+            if n_perm_folds > 0:
+                orders_b = all_orders[base:base + n_perm_folds]
+                shuffled = perm_mat[np.arange(n_perm_folds)[:, None], orders_b]
+                perm_null = shuffled.mean(axis=0)
+            if n_drop_folds > 0:
+                orders_b = all_orders[base + n_perm_folds:base + total_perms_per_iter]
+                shuffled = drop_mat[np.arange(n_drop_folds)[:, None], orders_b]
+                drop_null = shuffled.mean(axis=0)
+            perm_null_samples[b, :] = perm_null
+            drop_null_samples[b, :] = drop_null
+            null_samples[b, :] = (float(w_perm_n) * perm_null) + (float(w_drop_n) * drop_null)
+
+        q_vals = np.quantile(null_samples, float(q), axis=0)
+        q_perm = np.quantile(perm_null_samples, float(q), axis=0) if n_perm_folds > 0 else np.zeros(p)
+        q_drop = np.quantile(drop_null_samples, float(q), axis=0) if n_drop_folds > 0 else np.zeros(p)
+        return {
+            "combined": pd.Series(q_vals, index=features, dtype=float),
+            "perm": pd.Series(q_perm, index=features, dtype=float),
+            "drop": pd.Series(q_drop, index=features, dtype=float),
+        }
+
     def _finalize_selection(
         self,
         *,
         global_df: pd.DataFrame,
         elite_df: pd.DataFrame,
+        perm_processed_global: pd.DataFrame,
+        drop_processed_global: pd.DataFrame,
         n_elite: int,
         low_data: bool,
+        n_samples: int = 0,
     ) -> pd.DataFrame:
         if global_df is None or global_df.empty:
             return pd.DataFrame(columns=["feature", "selected"])
@@ -545,21 +755,157 @@ class FeatureSelector:
             out["elite_bonus"] = 0.0
             out["final_score"] = global_score
 
-        tau = float(self.config.final_score_threshold)
-        g_floor = float(self.config.global_score_floor)
-        out["selected"] = (
-            (pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0) >= tau)
-            & (global_score >= g_floor)
-        )
-        out["reason"] = np.where(out["selected"], "weighted_vote_pass", "weighted_vote_fail")
-        out["forced_by_constraint"] = False
-
         # Backward-compatible columns expected by downstream and debug plots.
         out["perm_selection_rate"] = pd.to_numeric(out["perm_vote_score_global"], errors="coerce").fillna(0.0)
         out["drop_selection_rate"] = pd.to_numeric(out["drop_vote_score_global"], errors="coerce").fillna(0.0)
+        out["forced_by_constraint"] = False
+
+        # 채널 불일치 패널티: perm/drop 불일치가 클수록 final_score 감산
+        dp_enabled = bool(getattr(self.config, "disagreement_penalty_enabled", False))
+        if dp_enabled:
+            dp_thr = float(getattr(self.config, "disagreement_threshold", 0.25))
+            dp_scale = float(getattr(self.config, "disagreement_penalty_scale", 0.5))
+            disagreement = (out["perm_selection_rate"] - out["drop_selection_rate"]).abs()
+            dp_penalty = (disagreement - dp_thr).clip(lower=0.0) * dp_scale
+            out["disagreement"] = disagreement
+            out["disagreement_penalty"] = dp_penalty
+            out["final_score"] = (pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0) - dp_penalty).clip(lower=0.0)
+        else:
+            out["disagreement"] = (out["perm_selection_rate"] - out["drop_selection_rate"]).abs()
+            out["disagreement_penalty"] = 0.0
+
+        null_enabled, null_mode, null_q, null_runs, null_alpha, null_apply_to = self._resolve_null_policy(
+            low_data=bool(low_data),
+        )
+        out["null_enabled"] = bool(null_enabled)
+        out["null_mode"] = str(null_mode)
+        out["null_quantile"] = float(null_q)
+        out["null_shuffle_runs"] = int(null_runs)
+        out["null_alpha"] = float(null_alpha)
+        out["null_apply_to"] = str(null_apply_to)
+
+        if bool(null_enabled):
+            feature_order = out["feature"].astype(str).tolist()
+            null_q_result = self._compute_null_q_series(
+                features=feature_order,
+                perm_processed_global=perm_processed_global,
+                drop_processed_global=drop_processed_global,
+                n_shuffle=int(null_runs),
+                q=float(null_q),
+            )
+            null_q_combined = null_q_result["combined"]
+            null_q_perm = null_q_result["perm"]
+            null_q_drop = null_q_result["drop"]
+
+            out["null_q"] = out["feature"].astype(str).map(null_q_combined).astype(float)
+            out["null_q_perm"] = out["feature"].astype(str).map(null_q_perm).astype(float)
+            out["null_q_drop"] = out["feature"].astype(str).map(null_q_drop).astype(float)
+
+            # --- 채널별 독립 null penalty ---
+            perm_vote = pd.to_numeric(out["perm_vote_score_global"], errors="coerce").fillna(0.0)
+            drop_vote = pd.to_numeric(out["drop_vote_score_global"], errors="coerce").fillna(0.0)
+
+            perm_null_margin = perm_vote - out["null_q_perm"]
+            drop_null_margin = drop_vote - out["null_q_drop"]
+            out["null_margin_perm"] = perm_null_margin
+            out["null_margin_drop"] = drop_null_margin
+
+            # 채널 가중치 (global_score 결합 시 사용한 것과 동일)
+            w_perm = float(getattr(self.config, "weight_perm", 0.80))
+            w_drop = float(getattr(self.config, "weight_drop", 0.20)) if bool(
+                getattr(self.config, "use_score_drop", True)
+            ) else 0.0
+            w_denom = w_perm + w_drop
+            if w_denom <= 0.0:
+                w_perm_n, w_drop_n = 1.0, 0.0
+            else:
+                w_perm_n, w_drop_n = w_perm / w_denom, w_drop / w_denom
+
+            if str(null_mode) == "hard":
+                perm_ch_penalty = np.where(perm_null_margin >= 0.0, 0.0, 1e6)
+                drop_ch_penalty = np.where(drop_null_margin >= 0.0, 0.0, 1e6)
+            else:
+                perm_ch_penalty = float(null_alpha) * np.clip(-perm_null_margin, 0.0, None)
+                drop_ch_penalty = float(null_alpha) * np.clip(-drop_null_margin, 0.0, None)
+
+            channel_penalty = (float(w_perm_n) * perm_ch_penalty) + (float(w_drop_n) * drop_ch_penalty)
+
+            # 기존 결합 null과의 호환: 결합 margin/pass도 기록
+            if str(null_apply_to) == "final_score":
+                null_target_score = pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0)
+            else:
+                null_target_score = global_score
+            out["null_margin"] = null_target_score - out["null_q"]
+            out["null_pass"] = (perm_null_margin >= 0.0) | (drop_null_margin >= 0.0)
+
+            out["null_penalty"] = channel_penalty
+            out["final_score_adj"] = pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0) - pd.to_numeric(
+                out["null_penalty"], errors="coerce"
+            ).fillna(0.0)
+        else:
+            out["null_q"] = np.nan
+            out["null_q_perm"] = np.nan
+            out["null_q_drop"] = np.nan
+            out["null_margin"] = np.nan
+            out["null_margin_perm"] = np.nan
+            out["null_margin_drop"] = np.nan
+            out["null_pass"] = True
+            out["null_penalty"] = 0.0
+            out["final_score_adj"] = pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0)
+
+        tau = float(self.config.final_score_threshold)
+        g_floor = float(self.config.global_score_floor)
+        base_selected = (
+            (pd.to_numeric(out["final_score_adj"], errors="coerce").fillna(0.0) >= tau)
+            & (global_score >= g_floor)
+        )
+
+        stability_enabled = bool(getattr(self.config, "stability_enabled", True))
+        very_low_n_thr = int(getattr(self.config, "stability_very_low_data_n_threshold", 50))
+        if bool(low_data) and int(n_samples) < very_low_n_thr:
+            stability_rule = self._normalize_stability_rule(getattr(self.config, "stability_rule_very_low_data", "or"))
+            perm_thr = float(getattr(self.config, "stability_perm_min_rate_very_low_data", 0.55))
+            drop_thr = float(getattr(self.config, "stability_drop_min_rate_very_low_data", 0.35))
+        elif bool(low_data):
+            stability_rule = self._normalize_stability_rule(getattr(self.config, "stability_rule_low_data", "and"))
+            perm_thr = float(getattr(self.config, "stability_perm_min_rate_low_data", 0.60))
+            drop_thr = float(getattr(self.config, "stability_drop_min_rate_low_data", 0.44))
+        else:
+            stability_rule = self._normalize_stability_rule(getattr(self.config, "stability_rule_normal", "and"))
+            perm_thr = float(getattr(self.config, "stability_perm_min_rate_normal", 0.70))
+            drop_thr = float(getattr(self.config, "stability_drop_min_rate_normal", 0.60))
+
+        perm_thr = float(np.clip(perm_thr, 0.0, 1.0))
+        drop_thr = float(np.clip(drop_thr, 0.0, 1.0))
+        perm_pass = out["perm_selection_rate"] >= perm_thr
+        drop_pass = out["drop_selection_rate"] >= drop_thr
+
+        if stability_rule == "and":
+            stability_pass = perm_pass & drop_pass
+        else:
+            stability_pass = perm_pass | drop_pass
+
+        out["stability_enabled"] = bool(stability_enabled)
+        out["stability_rule"] = str(stability_rule)
+        out["stability_perm_threshold"] = float(perm_thr)
+        out["stability_drop_threshold"] = float(drop_thr)
+        out["stability_perm_pass"] = perm_pass.astype(bool)
+        out["stability_drop_pass"] = drop_pass.astype(bool)
+        out["stability_pass"] = stability_pass.astype(bool)
+
+        if bool(stability_enabled):
+            out["selected"] = base_selected & out["stability_pass"]
+            out["reason"] = np.where(
+                out["selected"],
+                "weighted_vote_pass",
+                np.where(base_selected, "stability_gate_fail", "weighted_vote_fail"),
+            )
+        else:
+            out["selected"] = base_selected
+            out["reason"] = np.where(out["selected"], "weighted_vote_pass", "weighted_vote_fail")
 
         out = out.sort_values(
-            by=["selected", "final_score", "global_score", "delta_mean_norm"],
-            ascending=[False, False, False, False],
+            by=["selected", "final_score_adj", "final_score", "global_score", "delta_mean_norm"],
+            ascending=[False, False, False, False, False],
         ).reset_index(drop=True)
         return out

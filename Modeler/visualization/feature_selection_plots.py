@@ -156,6 +156,52 @@ def plot_perm_drop_compare(
     plt.bar(x - w / 2, perm_vals, width=w, color="#1f77b4", alpha=0.9, label="perm_delta_norm")
     plt.bar(x + w / 2, drop_norm, width=w, color="#2ca02c", alpha=0.9, label="drop_metric_norm")
 
+    # Overlay FI score axis signals when available (null baseline and adjusted score).
+    if "global_score" in df.columns:
+        global_vals = pd.to_numeric(df["global_score"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        plt.plot(
+            x,
+            global_vals,
+            color="#ff7f0e",
+            marker="o",
+            linewidth=1.4,
+            markersize=3.5,
+            alpha=0.9,
+            label="global_score",
+        )
+    if "final_score_adj" in df.columns:
+        final_adj_vals = pd.to_numeric(df["final_score_adj"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        plt.plot(
+            x,
+            final_adj_vals,
+            color="#9467bd",
+            marker="D",
+            linewidth=1.2,
+            markersize=3.0,
+            alpha=0.85,
+            linestyle="--",
+            label="final_score_adj",
+        )
+    if "null_q" in df.columns:
+        null_vals = pd.to_numeric(df["null_q"], errors="coerce").to_numpy(dtype=float)
+        if np.isfinite(null_vals).any():
+            label = "null_q"
+            if "null_quantile" in df.columns:
+                q_vals = pd.to_numeric(df["null_quantile"], errors="coerce")
+                q_valid = q_vals[np.isfinite(q_vals)]
+                if len(q_valid) > 0:
+                    label = f"null_q{int(round(float(q_valid.iloc[0]) * 100.0))}"
+            plt.plot(
+                x,
+                null_vals,
+                color="#7f7f7f",
+                marker="s",
+                linewidth=1.2,
+                markersize=3.0,
+                alpha=0.9,
+                label=label,
+            )
+
     selected_mask = df["selected"].astype(bool).to_numpy()
     if np.any(selected_mask):
         sel_x = x[selected_mask]

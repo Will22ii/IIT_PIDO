@@ -9,8 +9,9 @@ class ImportanceAnalyzer:
     Generate permutation effect deltas from trained models.
     """
 
-    def __init__(self, *, perm_sample_size: int | None = None):
+    def __init__(self, *, perm_sample_size: int | None = None, perm_repeats: int = 1):
         self.perm_sample_size = perm_sample_size
+        self.perm_repeats = max(int(perm_repeats), 1)
 
     # =================================================
     # Public API
@@ -68,10 +69,19 @@ class ImportanceAnalyzer:
             pred_base = np.asarray(model.predict(base), dtype=float).reshape(-1)
 
             for idx, col in enumerate(columns):
-                X_perm = base.copy()
-                X_perm[:, idx] = rng.permutation(X_perm[:, idx])
-                pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
-                delta = np.mean((pred_base - pred_perm) ** 2)
+                if self.perm_repeats <= 1:
+                    X_perm = base.copy()
+                    X_perm[:, idx] = rng.permutation(X_perm[:, idx])
+                    pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
+                    delta = float(np.mean((pred_base - pred_perm) ** 2))
+                else:
+                    deltas_k = []
+                    for _ in range(self.perm_repeats):
+                        X_perm = base.copy()
+                        X_perm[:, idx] = rng.permutation(X_perm[:, idx])
+                        pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
+                        deltas_k.append(float(np.mean((pred_base - pred_perm) ** 2)))
+                    delta = float(np.mean(deltas_k))
                 rows.append(
                     {
                         "problem": problem_name,
@@ -79,7 +89,7 @@ class ImportanceAnalyzer:
                         "method": "PERM",
                         "fold": run_id,
                         "feature": col,
-                        "delta": float(delta),
+                        "delta": delta,
                     }
                 )
 
@@ -152,14 +162,32 @@ class ImportanceAnalyzer:
             base_arr = X_valid.to_numpy()
             columns = list(X_valid.columns)
             for idx, col in enumerate(columns):
-                X_perm = base_arr.copy()
-                X_perm[:, idx] = rng.permutation(X_perm[:, idx])
-                pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
-                try:
-                    r2_perm = float(r2_score(y_valid, pred_perm))
-                except Exception:
-                    continue
-                drop = float(r2_base - r2_perm)
+                if self.perm_repeats <= 1:
+                    X_perm = base_arr.copy()
+                    X_perm[:, idx] = rng.permutation(X_perm[:, idx])
+                    pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
+                    try:
+                        r2_perm = float(r2_score(y_valid, pred_perm))
+                    except Exception:
+                        continue
+                    drop = float(r2_base - r2_perm)
+                else:
+                    drops_k = []
+                    r2_perms_k = []
+                    for _ in range(self.perm_repeats):
+                        X_perm = base_arr.copy()
+                        X_perm[:, idx] = rng.permutation(X_perm[:, idx])
+                        pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
+                        try:
+                            r2_k = float(r2_score(y_valid, pred_perm))
+                        except Exception:
+                            continue
+                        drops_k.append(float(r2_base - r2_k))
+                        r2_perms_k.append(r2_k)
+                    if not drops_k:
+                        continue
+                    drop = float(np.mean(drops_k))
+                    r2_perm = float(np.mean(r2_perms_k))
                 drop_pos = float(max(drop, 0.0))
                 rows.append(
                     {

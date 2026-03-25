@@ -63,7 +63,7 @@ class DOESystemConfig:
     # 5) Local Planner: 앵커/클러스터
     # =========================
     # 앵커 총량은 stage별 max_base/decay로 관리
-    local_anchor_max_base: int = 8  # 단계별 앵커 최대값 시작점
+    local_anchor_max_base: int = 6  # 단계별 앵커 최대값 시작점
     local_anchor_max_decay: float = 0.9  # 단계별 앵커 최대값 감소율
     local_anchor_best_ratio: float = 0.35  # 상위 앵커 비율
     local_anchor_small_ratio: float = 0.2  # 소규모 군집 앵커 비율
@@ -75,9 +75,9 @@ class DOESystemConfig:
     # =========================
     # 6) Local Planner: 샘플 스케일
     # =========================
-    local_radius_ratio_phase1: float = 0.3  # 1단계 로컬 반경 비율
-    local_radius_ratio_phase2: float = 0.2  # 2단계 로컬 반경 비율
-    local_min_radius_ratio: float = 0.1  # 로컬 최소 반경 비율 (전역 span 기준)
+    local_radius_ratio_phase1: float = 0.25  # 1단계 로컬 반경 비율
+    local_radius_ratio_phase2: float = 0.18  # 2단계 로컬 반경 비율
+    local_min_radius_ratio: float = 0.08  # 로컬 최소 반경 비율 (전역 span 기준)
     local_tol_ratio: float = 0.3  # 로컬 중복 제거 허용치 비율 (반경 평균 대비)
 
     # =========================
@@ -117,10 +117,10 @@ class DOESystemConfig:
     # =========================
     phase1_global_ratio: float = 0.8  # 1단계 전역 비율
     phase2_global_ratio: float = 0.35  # 2단계 전역 비율
-    min_additional_rounds: int = 3  # 최소 추가 스테이지 횟수
-    phase2_min_usable_np_ratio: float = 15.0  # phase1->2 전환 최소 usable N/p 비율 (strictly greater)
-    stop_span_ratio_threshold: float = 0.3  # 수렴 종료 기준: span_ratio_mean
-    stop_anchor_spread_streak: int = 3  # 수렴 종료 기준: anchor_spread_mean==0 연속 횟수
+    min_additional_rounds: int = 6  # 최소 추가 스테이지 횟수
+    phase2_min_usable_np_ratio: float = 10.0  # phase1->2 전환 최소 usable N/p 비율 (strictly greater)
+    stop_span_ratio_threshold: float = 0.20  # 수렴 종료 기준: span_ratio_mean
+    stop_anchor_spread_streak: int = 5  # 수렴 종료 기준: anchor_spread_mean==0 연속 횟수
     stop_min_usable_np_ratio: float = 20.0  # 종료 허용 최소 usable N/p 비율 (usable: success && feasible)
 
     # =========================

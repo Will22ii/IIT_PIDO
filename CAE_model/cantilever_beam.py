@@ -21,7 +21,7 @@ def get_problem_spec():
     dummy_vars = [
         {
             "name": f"d{i+1}",
-            "default_lb": 0.1,
+            "default_lb": 0.0,
             "default_ub": 1.0,
             "default_baseline": 0.5,
         }

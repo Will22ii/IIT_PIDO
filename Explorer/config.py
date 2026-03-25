@@ -22,12 +22,12 @@ class ExplorerSystemConfig:
     # 경계 샘플 비율 (0~1)
     boundary_ratio: float = 0.1
     # 경계 샘플 중 코너 조합 비율 (0~1)
-    boundary_corner_ratio: float = 0.4
+    boundary_corner_ratio: float = 0.5
 
     # 선택 경계 마진 기본 계수 (adaptive: m = base * (0.25 - raw_v) / 0.25, raw_v>=0.25면 off)
     bounds_margin_ratio: float = 0.03
     # 선택 경계 최소 부피비(역마진 floor). raw/final volume이 이 값보다 작으면 확장 시도
-    bounds_min_volume_ratio: float = 0.20
+    bounds_min_volume_ratio: float = 0.25
 
     # 상위/하위 분위수 기준
     quantile_threshold: float = 0.90

@@ -12,7 +12,6 @@ from Modeler.executor.data_workflow import (
 )
 from Modeler.executor.hpo_workflow import (
     resolve_hpo_params,
-    update_hpo_cache,
 )
 from Modeler.executor.input_workflow import (
     ensure_modeler_run_context,
@@ -45,7 +44,12 @@ def _normalize_debug_level(value: str | None) -> str:
     return level
 
 
-def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None) -> None:
+def run_modeler(
+    *,
+    config: ModelerConfig,
+    run_context: RunContext | None = None,
+    doe_dataframe: "pd.DataFrame | None" = None,
+) -> None:
     print("===================================")
     print(" MODELER 실행 시작")
     print("===================================")
@@ -53,6 +57,7 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
     input_result = resolve_modeler_input(
         config=config,
         run_context=run_context,
+        doe_dataframe=doe_dataframe,
     )
     df = input_result.df
     doe_meta = input_result.doe_meta
@@ -82,11 +87,15 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
         "drop_metric": config.system.fi_drop_metric,
         "drop_min_pass_rate": config.system.fi_drop_min_pass_rate,
         "drop_epsilon": config.system.fi_drop_epsilon,
+        "drop_min_pass_rate_very_low_data": config.system.fi_drop_min_pass_rate_very_low_data,
+        "drop_epsilon_very_low_data": config.system.fi_drop_epsilon_very_low_data,
         "weight_abs": config.system.fi_weight_abs,
         "weight_quantile": config.system.fi_weight_quantile,
         "weight_rank": config.system.fi_weight_rank,
         "weight_perm": config.system.fi_weight_perm,
         "weight_drop": config.system.fi_weight_drop,
+        "weight_perm_low_data": config.system.fi_weight_perm_low_data,
+        "weight_drop_low_data": config.system.fi_weight_drop_low_data,
         "weight_global_default": config.system.fi_weight_global_default,
         "weight_global_low": config.system.fi_weight_global_low,
         "weight_global_rich": config.system.fi_weight_global_rich,
@@ -96,12 +105,36 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
         "elite_bonus_beta": config.system.fi_elite_bonus_beta,
         "final_score_threshold": config.system.fi_final_score_threshold,
         "global_score_floor": config.system.fi_global_score_floor,
+        "stability_enabled": config.system.fi_stability_enabled,
+        "stability_rule": config.system.fi_stability_rule,
+        "stability_very_low_data_n_threshold": config.system.fi_stability_very_low_data_n_threshold,
+        "stability_rule_very_low_data": config.system.fi_stability_rule_very_low_data,
+        "stability_perm_min_rate_very_low_data": config.system.fi_stability_perm_min_rate_very_low_data,
+        "stability_drop_min_rate_very_low_data": config.system.fi_stability_drop_min_rate_very_low_data,
+        "stability_rule_low_data": config.system.fi_stability_rule_low_data,
+        "stability_perm_min_rate_low_data": config.system.fi_stability_perm_min_rate_low_data,
+        "stability_drop_min_rate_low_data": config.system.fi_stability_drop_min_rate_low_data,
+        "stability_rule_normal": config.system.fi_stability_rule_normal,
+        "stability_perm_min_rate_normal": config.system.fi_stability_perm_min_rate_normal,
+        "stability_drop_min_rate_normal": config.system.fi_stability_drop_min_rate_normal,
+        "disagreement_penalty_enabled": config.system.fi_disagreement_penalty_enabled,
+        "disagreement_threshold": config.system.fi_disagreement_threshold,
+        "disagreement_penalty_scale": config.system.fi_disagreement_penalty_scale,
+        "null_enabled": config.system.fi_null_enabled,
+        "null_mode": config.system.fi_null_mode,
+        "null_quantile": config.system.fi_null_quantile,
+        "null_shuffle_runs_low_data": config.system.fi_null_shuffle_runs_low_data,
+        "null_shuffle_runs_normal": config.system.fi_null_shuffle_runs_normal,
+        "null_alpha_low_data": config.system.fi_null_alpha_low_data,
+        "null_alpha_normal": config.system.fi_null_alpha_normal,
+        "null_apply_to": config.system.fi_null_apply_to,
         "quantile_top_ratio_default": config.system.fi_quantile_top_ratio_default,
         "quantile_top_ratio_p_le_6": config.system.fi_quantile_top_ratio_p_le_6,
         "quantile_top_ratio_p_le_12": config.system.fi_quantile_top_ratio_p_le_12,
         "quantile_top_ratio_p_gt_12": config.system.fi_quantile_top_ratio_p_gt_12,
     }
     perm_sample_size = config.system.perm_sample_size
+    perm_repeats = config.system.perm_repeats
     debug_level = _normalize_debug_level(config.system.debug_level)
     keep_debug = debug_level == "full"
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -157,16 +190,17 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
         problem_name=problem_name,
         objective_sense=objective_sense,
         target_col=target_col,
-        csv_path=csv_path,
         X=X,
         y=y,
         base_seed=int(base_seed),
         kfold_splits=int(kfold_splits),
+        low_data=bool(cv_policy["low_data"]),
     )
     best_params = hpo_result.best_params
     hpo_params_used = hpo_result.hpo_params_used
-    hpo_signature = hpo_result.hpo_signature
-    data_hash = hpo_result.data_hash
+    hpo_mode = hpo_result.hpo_mode
+    hpo_n_trials_effective = hpo_result.hpo_n_trials_effective
+    hpo_lambda_std_effective = hpo_result.hpo_lambda_std_effective
 
     trainer = ModelTrainer(
         base_random_seed=base_seed,
@@ -202,11 +236,13 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
         problem_name=problem_name,
         base_seed=base_seed,
         perm_sample_size=perm_sample_size,
+        perm_repeats=int(perm_repeats),
         feature_selection_cfg=feature_selection_cfg,
         use_score_drop=bool(config.system.fi_use_score_drop),
         low_data=bool(cv_policy["low_data"]),
         n_features=len(feature_cols),
         n_elite=int(n_elite),
+        n_samples=len(X),
         keep_debug=keep_debug,
         debug_dir=debug_dir,
         meta_dir=meta_dir,
@@ -341,8 +377,9 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
         feas_model_kind=feas_model_kind,
         feas_model_stats=feas_model_stats,
         hpo_params_used=bool(hpo_params_used),
-        hpo_signature=hpo_signature,
-        data_hash=data_hash,
+        hpo_mode=hpo_mode,
+        hpo_n_trials_effective=hpo_n_trials_effective,
+        hpo_lambda_std_effective=hpo_lambda_std_effective,
         best_params=best_params,
         model_path=model_path,
         selected_path=selected_path,
@@ -362,14 +399,6 @@ def run_modeler(*, config: ModelerConfig, run_context: RunContext | None = None)
         compare_plot_path=compare_plot_path,
         secondary_plot_path=secondary_plot_path,
     )
-
-    if hpo_signature and best_params:
-        update_hpo_cache(
-            project_root=project_root,
-            signature=hpo_signature,
-            params=best_params,
-            metadata_ref=os.path.relpath(save_result.metadata_path, project_root),
-        )
 
     print("===================================")
     print(" MODELER 실행 완료")

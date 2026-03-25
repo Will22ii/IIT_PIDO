@@ -658,7 +658,7 @@ def run_doe_orchestrator(
             "success_count": n_success,
             "success_ratio": success_ratio,
         }
-        out = _save_doe_results(
+        save_out = _save_doe_results(
             results=results,
             variables=variables,
             problem_name=problem_spec["name"],
@@ -677,7 +677,7 @@ def run_doe_orchestrator(
         print("\n===================================")
         print(" DOE 실행 완료")
         print("===================================")
-        return results
+        return {"results": results, "df": save_out["df"]}
 
     # -------------------------------------------------
     # Additional DOE branch
@@ -821,7 +821,7 @@ def run_doe_orchestrator(
         "use_timestamp": run_cfg.get("use_timestamp"),
         "additional_cfg": cfg,
     }
-    out = _save_doe_results(
+    save_out = _save_doe_results(
         results=results,
         variables=variables,
         problem_name=problem_spec["name"],
@@ -862,4 +862,4 @@ def run_doe_orchestrator(
     print("\n===================================")
     print(" DOE + ADDITIONAL DOE 실행 완료")
     print("===================================")
-    return results
+    return {"results": results, "df": save_out["df"]}

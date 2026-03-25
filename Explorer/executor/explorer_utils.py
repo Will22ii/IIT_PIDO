@@ -7,46 +7,25 @@ import pandas as pd
 
 def resolve_selected_features(
     *,
-    modeler_meta: dict | None,
-    modeler_task_dir: str | None,
-    modeler_df: pd.DataFrame | None,
     feature_cols: list[str] | None,
-    doe_df: pd.DataFrame | None,
+    doe_df: pd.DataFrame | None = None,
 ) -> list[str]:
-    selected_features: list[str] = []
-    if modeler_meta and modeler_meta.get("selected_features"):
-        selected_features = list(modeler_meta["selected_features"])
-    elif modeler_task_dir and modeler_meta and modeler_meta.get("artifacts", {}).get("selected_features"):
-        selected_path = modeler_meta["artifacts"]["selected_features"]
-        selected_df = pd.read_csv(
-            os.path.join(modeler_task_dir, selected_path)
-        )
-        if {"feature", "selected"}.issubset(selected_df.columns):
-            selected_features = (
-                selected_df[selected_df["selected"]]["feature"].tolist()
-            )
-    elif feature_cols:
-        selected_features = list(feature_cols)
-    elif modeler_df is not None and {"feature", "selected"}.issubset(modeler_df.columns):
-        selected_features = (
-            modeler_df[modeler_df["selected"]]["feature"].tolist()
-        )
+    # pkl에서 추출한 feature_cols가 곧 selected_features
+    if feature_cols:
+        return list(feature_cols)
 
-    if not selected_features:
-        if feature_cols:
-            print("[Explorer] No selected features flagged; fallback to all feature_cols.")
-            selected_features = list(feature_cols)
-        elif doe_df is not None:
-            ignore_cols = {"id", "objective", "constraints", "feasible", "success", "source", "round", "exec_scope"}
-            selected_features = [c for c in doe_df.columns if c not in ignore_cols]
-            if selected_features:
-                print("[Explorer] No selected features flagged; fallback to DOE columns.")
-            else:
-                raise RuntimeError("Selected features not found.")
-        else:
-            raise RuntimeError("Selected features not found.")
+    # fallback: DOE DataFrame 컬럼에서 추출
+    if doe_df is not None:
+        ignore_cols = {"id", "objective", "constraints", "feasible", "success", "source", "round", "exec_scope"}
+        selected_features = [
+            c for c in doe_df.columns
+            if c not in ignore_cols and not str(c).startswith("constraint_")
+        ]
+        if selected_features:
+            print("[Explorer] No feature_cols from model; fallback to DOE columns.")
+            return selected_features
 
-    return selected_features
+    raise RuntimeError("Selected features not found. Provide model pkl or DOE data.")
 
 
 def resolve_bounds(

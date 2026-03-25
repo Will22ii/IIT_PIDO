@@ -135,6 +135,9 @@ def _bounds_from_points(
 ) -> list[tuple[float, float]] | None:
     if X.ndim != 2 or X.shape[0] == 0:
         return None
+    X = X[np.isfinite(X).all(axis=1)]
+    if X.shape[0] == 0:
+        return None
     out: list[tuple[float, float]] = []
     use_q = (
         q_low is not None
@@ -677,9 +680,6 @@ class ExplorerOrchestrator:
         models, feature_cols = _load_models(modeler_pkl_path)
 
         selected_features = resolve_selected_features(
-            modeler_meta=modeler_meta,
-            modeler_task_dir=modeler_task_dir,
-            modeler_df=modeler_df,
             feature_cols=feature_cols,
             doe_df=doe_df,
         )
@@ -1611,7 +1611,7 @@ class ExplorerOrchestrator:
             if source_mode == "dual":
                 selected_points = _safe_stack([ref_pred, ref_obj, X_pred_sel, X_obj_sel], n_dim=len(selected_features))
             elif source_mode == "pred":
-                selected_points = _safe_stack([ref_pred, pred_starts], n_dim=len(selected_features))
+                selected_points = _safe_stack([ref_pred, X_pred_sel], n_dim=len(selected_features))
             else:
                 selected_points = _safe_stack([ref_obj, X_obj_sel], n_dim=len(selected_features))
             if selected_points.shape[0] == 0:

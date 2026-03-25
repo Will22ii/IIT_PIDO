@@ -1,4 +1,5 @@
 import ast
+import math
 import os
 from dataclasses import dataclass
 import pandas as pd
@@ -9,6 +10,50 @@ class SelectionFinalizeResult:
     selected_df: pd.DataFrame
     selected_features: list[str]
     selected_path: str
+
+
+def _fallback_topk_half_features(
+    *,
+    selected_df: pd.DataFrame,
+    feature_cols: list[str],
+    min_k: int = 2,
+) -> list[str]:
+    if not feature_cols:
+        return []
+    k = max(int(math.ceil(float(len(feature_cols)) * 0.5)), int(min_k))
+    k = min(k, len(feature_cols))
+
+    if selected_df is None or selected_df.empty or "feature" not in selected_df.columns:
+        return [str(f) for f in feature_cols[:k]]
+
+    work = selected_df.copy()
+    sort_cols = [c for c in ["final_score", "global_score", "delta_mean_norm"] if c in work.columns]
+    if sort_cols:
+        asc = [False] * len(sort_cols)
+        work = work.sort_values(by=sort_cols, ascending=asc)
+
+    allowed = {str(f) for f in feature_cols}
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for val in work["feature"].tolist():
+        feat = str(val)
+        if feat not in allowed or feat in seen:
+            continue
+        ordered.append(feat)
+        seen.add(feat)
+        if len(ordered) >= k:
+            break
+
+    if len(ordered) < k:
+        for feat in feature_cols:
+            name = str(feat)
+            if name in seen:
+                continue
+            ordered.append(name)
+            seen.add(name)
+            if len(ordered) >= k:
+                break
+    return ordered
 
 
 def _extract_constraint_feature_vars(
@@ -65,8 +110,22 @@ def finalize_selected_features(
 ) -> SelectionFinalizeResult:
     selected_features = selected_df[selected_df["selected"]]["feature"].tolist()
     if not selected_features:
-        selected_features = feature_cols
-        print("- No selected features found; fallback to all features")
+        selected_features = _fallback_topk_half_features(
+            selected_df=selected_df,
+            feature_cols=feature_cols,
+            min_k=2,
+        )
+        print(
+            "- No selected features found; fallback to topk_half "
+            f"(k={len(selected_features)})"
+        )
+
+    if "feature" in selected_df.columns:
+        selected_df = selected_df.copy()
+        if "selected" not in selected_df.columns:
+            selected_df["selected"] = False
+        selected_set = {str(f) for f in selected_features}
+        selected_df["selected"] = selected_df["feature"].astype(str).isin(selected_set)
 
     forced_constraint_features = _extract_constraint_feature_vars(
         constraint_defs=constraint_defs,

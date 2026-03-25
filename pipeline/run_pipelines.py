@@ -30,6 +30,7 @@ class ProblemCase:
     known_optimum: Any
     n_samples: int
     objective_sense: str = "min"
+    repeats: int | None = None
 
 
 @dataclass(frozen=True)
@@ -43,16 +44,20 @@ PROBLEM_SUITE: list[ProblemCase] = [
         problem_name="rosenbrock",
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
         n_samples=450,
+        repeats=10,
     ),
     ProblemCase(
         problem_name="cantilever_beam",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
-        n_samples=63,
+        n_samples=90,
+        repeats=25,
+
     ),
     ProblemCase(
         problem_name="goldstein_price",
         known_optimum={"x1": 0.0, "x2": -1.0},
         n_samples=150,
+        repeats=50,
     ),
     ProblemCase(
         problem_name="six_hump_camel",
@@ -60,7 +65,8 @@ PROBLEM_SUITE: list[ProblemCase] = [
             {"x1": 0.0898, "x2": -0.7126},
             {"x1": -0.0898, "x2": 0.7126},
         ],
-        n_samples=35,
+        n_samples=50,
+        repeats=25,
     ),
 ]
 
@@ -95,6 +101,12 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
 
 def _strategy_map() -> dict[str, ExplorerStrategy]:
     return {s.strategy_id: s for s in EXPLORER_STRATEGIES}
+
+
+def _resolve_case_repeats(*, case: ProblemCase, default_repeats: int) -> int:
+    if case.repeats is None:
+        return int(max(int(default_repeats), 1))
+    return int(max(int(case.repeats), 1))
 
 
 def _case_real_variables(case: ProblemCase) -> list[str]:
@@ -415,6 +427,77 @@ def _save_explorer_stats_csv(
     return detail_path, summary_path
 
 
+def _save_fi_stats_csv(
+    *,
+    detail_rows: list[dict[str, Any]],
+) -> tuple[str, str]:
+    stats_root = os.path.join(PROJECT_ROOT, "result", "explorer_strategy_stats")
+    os.makedirs(stats_root, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    detail_df = pd.DataFrame(detail_rows)
+    if detail_df.empty:
+        detail_df = pd.DataFrame(
+            columns=[
+                "run",
+                "repeat",
+                "problem",
+                "seed",
+                "selected_feature_count",
+                "modeler_selected_features",
+                "modeler_selected_real_count",
+                "modeler_selected_dummy_count",
+                "modeler_real_coverage_pct",
+                "fi_all_real_included",
+                "fi_real_only_success",
+                "modeler_metadata",
+                "run_root",
+            ]
+        )
+
+    detail_path = os.path.join(stats_root, f"fi_primary_try_stats_{ts}.csv")
+    detail_df.to_csv(detail_path, index=False, encoding="utf-8-sig")
+
+    summary_df = detail_df.copy()
+    if not summary_df.empty:
+        summary_df["fi_all_real_included_num"] = summary_df["fi_all_real_included"].astype(bool).astype(int)
+        summary_df["fi_real_only_success_num"] = summary_df["fi_real_only_success"].astype(bool).astype(int)
+        grouped = (
+            summary_df
+            .groupby(["problem"], as_index=False)
+            .agg(
+                tries=("problem", "count"),
+                fi_all_real_included_pct=("fi_all_real_included_num", "mean"),
+                fi_real_only_success_pct=("fi_real_only_success_num", "mean"),
+                modeler_real_coverage_pct_mean=("modeler_real_coverage_pct", "mean"),
+                modeler_real_coverage_pct_std=("modeler_real_coverage_pct", "std"),
+                selected_feature_count_mean=("selected_feature_count", "mean"),
+                selected_feature_count_std=("selected_feature_count", "std"),
+                modeler_selected_dummy_count_mean=("modeler_selected_dummy_count", "mean"),
+            )
+        )
+        grouped["fi_all_real_included_pct"] = grouped["fi_all_real_included_pct"] * 100.0
+        grouped["fi_real_only_success_pct"] = grouped["fi_real_only_success_pct"] * 100.0
+    else:
+        grouped = pd.DataFrame(
+            columns=[
+                "problem",
+                "tries",
+                "fi_all_real_included_pct",
+                "fi_real_only_success_pct",
+                "modeler_real_coverage_pct_mean",
+                "modeler_real_coverage_pct_std",
+                "selected_feature_count_mean",
+                "selected_feature_count_std",
+                "modeler_selected_dummy_count_mean",
+            ]
+        )
+
+    summary_path = os.path.join(stats_root, f"fi_primary_problem_summary_{ts}.csv")
+    grouped.to_csv(summary_path, index=False, encoding="utf-8-sig")
+    return detail_path, summary_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Batch runner: execute multiple problems with repeated pipeline runs.",
@@ -459,11 +542,15 @@ def main() -> None:
     use_timestamp = not bool(args.no_timestamp)
     explorer_strategies = _resolve_requested_strategies(args.explorer_strategies)
 
-    total_runs = repeats * len(PROBLEM_SUITE)
+    total_runs = sum(
+        _resolve_case_repeats(case=case, default_repeats=repeats)
+        for case in PROBLEM_SUITE
+    )
     run_counter = 0
     failures: list[dict[str, Any]] = []
     explorer_failures: list[dict[str, Any]] = []
     explorer_detail_rows: list[dict[str, Any]] = []
+    fi_detail_rows: list[dict[str, Any]] = []
 
     print("===================================")
     print(" Batch Pipeline 실행 시작")
@@ -472,16 +559,26 @@ def main() -> None:
         f"- repeats={repeats} total_runs={total_runs} "
         f"tasks(doe/modeler/explorer)={run_doe}/{run_modeler}/{run_explorer}"
     )
+    print(
+        "- problem_repeats="
+        + ",".join(
+            [
+                f"{case.problem_name}:{_resolve_case_repeats(case=case, default_repeats=repeats)}"
+                for case in PROBLEM_SUITE
+            ]
+        )
+    )
     if run_explorer:
         print(f"- explorer_strategies={','.join([s.strategy_id for s in explorer_strategies])}")
 
-    for rep in range(repeats):
-        for idx, case in enumerate(PROBLEM_SUITE):
+    for idx, case in enumerate(PROBLEM_SUITE):
+        case_repeats = _resolve_case_repeats(case=case, default_repeats=repeats)
+        for rep in range(case_repeats):
             run_counter += 1
             seed = base_seed + rep * repeat_seed_step + idx
             print(
                 "[Batch] "
-                f"run={run_counter}/{total_runs} repeat={rep + 1}/{repeats} "
+                f"run={run_counter}/{total_runs} repeat={rep + 1}/{case_repeats} "
                 f"problem={case.problem_name} seed={seed} n_samples={case.n_samples}"
             )
 
@@ -512,6 +609,27 @@ def main() -> None:
                 )
                 # strict success: selected features exactly match real variables
                 modeler_all_real_only = bool(selected_set == real_variables and len(real_variables) > 0)
+                modeler_all_real_included = bool(
+                    len(real_variables) > 0 and real_variables.issubset(selected_set)
+                )
+
+                fi_detail_rows.append(
+                    {
+                        "run": run_counter,
+                        "repeat": rep + 1,
+                        "problem": case.problem_name,
+                        "seed": seed,
+                        "selected_feature_count": selected_feature_count,
+                        "modeler_selected_features": json.dumps(modeler_selected_features, ensure_ascii=False),
+                        "modeler_selected_real_count": modeler_selected_real_count,
+                        "modeler_selected_dummy_count": modeler_selected_dummy_count,
+                        "modeler_real_coverage_pct": modeler_real_coverage_pct,
+                        "fi_all_real_included": bool(modeler_all_real_included),
+                        "fi_real_only_success": bool(modeler_all_real_only),
+                        "modeler_metadata": modeler_metadata_path,
+                        "run_root": run_context.run_root,
+                    }
+                )
 
                 if run_explorer and cfg.explorer is not None:
                     if selected_feature_count <= 0:
@@ -624,6 +742,7 @@ def main() -> None:
                 if not continue_on_error:
                     raise
 
+    fi_detail_csv, fi_summary_csv = _save_fi_stats_csv(detail_rows=fi_detail_rows)
     detail_csv, summary_csv = _save_explorer_stats_csv(detail_rows=explorer_detail_rows)
 
     print("===================================")
@@ -633,6 +752,8 @@ def main() -> None:
     print(f"- success_runs={total_runs - len(failures)}")
     print(f"- failed_runs={len(failures)}")
     print(f"- explorer_strategy_failed_runs={len(explorer_failures)}")
+    print(f"- fi_primary_try_stats_csv={fi_detail_csv}")
+    print(f"- fi_primary_problem_summary_csv={fi_summary_csv}")
     print(f"- explorer_try_stats_csv={detail_csv}")
     print(f"- explorer_problem_summary_csv={summary_csv}")
     if failures:

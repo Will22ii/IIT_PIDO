@@ -50,17 +50,20 @@ def run_fi_selection_workflow(
     problem_name: str,
     base_seed: int,
     perm_sample_size: int,
+    perm_repeats: int = 1,
     feature_selection_cfg: dict[str, Any],
     use_score_drop: bool,
     low_data: bool,
     n_features: int,
     n_elite: int,
+    n_samples: int,
     keep_debug: bool,
     debug_dir: str,
     meta_dir: str,
 ) -> FIWorkflowResult:
     analyzer = ImportanceAnalyzer(
         perm_sample_size=perm_sample_size,
+        perm_repeats=int(perm_repeats),
     )
     elite_mode = _normalize_elite_mode(feature_selection_cfg.get("elite_mode", "bonus"))
     use_elite_scale = elite_mode != "off"
@@ -155,13 +158,13 @@ def run_fi_selection_workflow(
         perm_path = os.path.join(debug_dir, "perm_effect_raw.csv")
         perm_global_path = os.path.join(debug_dir, "perm_effect_raw_global.csv")
         perm_elite_path = os.path.join(debug_dir, "perm_effect_raw_elite.csv")
+        perm_imp_df.to_csv(perm_path, index=False)
+        perm_global_df.to_csv(perm_global_path, index=False)
+        perm_elite_df.to_csv(perm_elite_path, index=False)
     else:
         perm_path = os.path.join(meta_dir, "_perm_effect_tmp.csv")
         perm_global_path = os.path.join(meta_dir, "_perm_effect_global_tmp.csv")
         perm_elite_path = os.path.join(meta_dir, "_perm_effect_elite_tmp.csv")
-    perm_imp_df.to_csv(perm_path, index=False)
-    perm_global_df.to_csv(perm_global_path, index=False)
-    perm_elite_df.to_csv(perm_elite_path, index=False)
 
     if keep_debug:
         drop_path = os.path.join(debug_dir, "score_drop_raw.csv")
@@ -172,23 +175,29 @@ def run_fi_selection_workflow(
         drop_global_path = os.path.join(meta_dir, "_score_drop_global_tmp.csv")
         drop_elite_path = os.path.join(meta_dir, "_score_drop_elite_tmp.csv")
     if bool(use_score_drop):
-        drop_imp_df.to_csv(drop_path, index=False)
-        drop_global_df.to_csv(drop_global_path, index=False)
-        drop_elite_df.to_csv(drop_elite_path, index=False)
+        if keep_debug:
+            drop_imp_df.to_csv(drop_path, index=False)
+            drop_global_df.to_csv(drop_global_path, index=False)
+            drop_elite_df.to_csv(drop_elite_path, index=False)
     else:
         drop_path = None
         drop_global_path = None
         drop_elite_path = None
 
     selection_result = selector.run(
-        perm_effect_path=perm_global_path,
-        score_drop_path=drop_global_path,
-        perm_effect_elite_path=perm_elite_path,
-        score_drop_elite_path=drop_elite_path,
+        perm_effect_df=perm_global_df,
+        perm_effect_elite_df=perm_elite_df,
+        score_drop_df=drop_global_df if bool(use_score_drop) else None,
+        score_drop_elite_df=drop_elite_df if bool(use_score_drop) else None,
+        perm_effect_path=perm_global_path if keep_debug else None,
+        score_drop_path=drop_global_path if (keep_debug and bool(use_score_drop)) else None,
+        perm_effect_elite_path=perm_elite_path if keep_debug else None,
+        score_drop_elite_path=drop_elite_path if (keep_debug and bool(use_score_drop)) else None,
         problem_name=problem_name,
         low_data=bool(low_data),
         n_features=int(n_features),
         n_elite=int(n_elite),
+        n_samples=int(n_samples),
     )
     processed_df = selection_result["importance_processed_pred"]
     processed_drop_df = selection_result.get("importance_processed_drop", pd.DataFrame())
