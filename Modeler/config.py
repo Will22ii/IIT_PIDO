@@ -46,7 +46,7 @@ class ModelerSystemConfig:
     # permutation importance 평가 샘플 수(각 fold valid에서 최대)
     perm_sample_size: int = 1000
     # permutation 반복 횟수(fold당). 높을수록 importance 추정이 안정적. very_low_data에서 효과적.
-    perm_repeats: int = 5
+    perm_repeats: int = 10
     # perm 채널 통과 기준
     perm_min_pass_rate: float = 0.6
     perm_epsilon: float = 0.05
@@ -116,10 +116,10 @@ class ModelerSystemConfig:
     # very_low_data: n_samples < threshold → or rule, 느슨한 임계값 (six_hump 류)
     # low_data     : low_data=True AND n_samples >= threshold → and rule, 중간 임계값 (cantilever 류)
     # normal_data  : low_data=False → and rule, 엄격한 임계값
-    fi_stability_very_low_data_n_threshold: int = 50
+    fi_stability_very_low_data_n_threshold: int = 55
     fi_stability_rule_very_low_data: str = "or"
-    fi_stability_perm_min_rate_very_low_data: float = 0.50
-    fi_stability_drop_min_rate_very_low_data: float = 0.35
+    fi_stability_perm_min_rate_very_low_data: float = 0.65
+    fi_stability_drop_min_rate_very_low_data: float = 0.25
     fi_stability_rule_low_data: str = "and"
     fi_stability_perm_min_rate_low_data: float = 0.60
     fi_stability_drop_min_rate_low_data: float = 0.44
@@ -131,7 +131,13 @@ class ModelerSystemConfig:
     # perm/drop 불일치가 클수록 final_score 감산
     fi_disagreement_penalty_enabled: bool = True
     fi_disagreement_threshold: float = 0.25   # 이 이상 불일치면 패널티 시작
-    fi_disagreement_penalty_scale: float = 0.40  # 패널티 강도
+    fi_disagreement_penalty_scale: float = 0.55  # 패널티 강도
+    # very_low_data drop veto: drop_rate가 극도로 낮은 feature를 perm 점수와 무관하게 기각
+    fi_drop_veto_enabled: bool = True
+    fi_drop_veto_threshold: float = 0.03  # 이 미만이면 veto (very_low_data에서만 동작)
+    # very_low_data perm vote variance penalty: fold간 perm vote 분산이 높은 feature에 패널티
+    fi_perm_var_penalty_very_low_data_enabled: bool = True
+    fi_perm_var_penalty_very_low_data_scale: float = 0.20
 
     # -----------------------------
     # 7) FI Null(soft) Gate
@@ -141,12 +147,12 @@ class ModelerSystemConfig:
     # null 모드: soft | hard | off (권장: soft)
     fi_null_mode: str = "soft"
     # null 비교 분위수(예: 0.90 = null90)
-    fi_null_quantile: float = 0.85
+    fi_null_quantile: float = 0.90
     # null 셔플 반복 수(low-data / normal)
     fi_null_shuffle_runs_low_data: int = 50
     fi_null_shuffle_runs_normal: int = 30
     # soft penalty 강도(low-data / normal)
-    fi_null_alpha_low_data: float = 0.30
+    fi_null_alpha_low_data: float = 0.40
     fi_null_alpha_normal: float = 0.12
     # null 기준 점수 축: global_score | final_score | both
     # both: global_score에 pre-elite penalty 적용 + 이후 final_score에도 적용

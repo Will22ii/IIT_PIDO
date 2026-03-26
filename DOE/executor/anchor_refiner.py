@@ -86,6 +86,8 @@ def fit_gp_with_fallback(
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float).reshape(-1)
     if X.ndim != 2 or X.shape[0] < 2 or X.shape[0] != y.shape[0]:
+        if X.ndim == 2 and X.shape[0] < 2:
+            print(f"[GP] skipped: n_samples={X.shape[0]} < 2 (dim={X.shape[1] if X.ndim == 2 else '?'})")
         return None, False
     dim = X.shape[1]
     try:
@@ -100,7 +102,8 @@ def fit_gp_with_fallback(
             warnings.filterwarnings("ignore", category=ConvergenceWarning)
             gp.fit(X, y)
         return gp, False
-    except Exception:
+    except Exception as e:
+        print(f"[GP] fallback to conservative kernel: {e}")
         try:
             gp = GaussianProcessRegressor(
                 kernel=kernel_stable_conservative(dim, include_white=include_white),
@@ -113,7 +116,8 @@ def fit_gp_with_fallback(
                 warnings.filterwarnings("ignore", category=ConvergenceWarning)
                 gp.fit(X, y)
             return gp, True
-        except Exception:
+        except Exception as e2:
+            print(f"[GP] all kernels failed: {e2}")
             return None, True
 
 

@@ -377,11 +377,25 @@ def _save_explorer_stats_csv(
                 "modeler_all_real_only",
                 "volume_ratio",
                 "volume_ratio_pct",
+                "volume_cap_pass",
+                "joint_pass",
+                "fail_type",
                 "explorer_metadata",
                 "selected_bounds_path",
                 "run_root",
             ]
         )
+
+    # --- derive DSE metrics per row ---
+    if not detail_df.empty:
+        _opt = detail_df["optimum_included"].astype(bool)
+        _vr = pd.to_numeric(detail_df["volume_ratio"], errors="coerce").fillna(1.0)
+        detail_df["volume_cap_pass"] = (_vr <= 0.25).astype(int)
+        detail_df["joint_pass"] = (_opt & (_vr <= 0.25)).astype(int)
+        detail_df["fail_type"] = "both_fail"
+        detail_df.loc[_opt & (_vr <= 0.25), "fail_type"] = "pass"
+        detail_df.loc[~_opt & (_vr <= 0.25), "fail_type"] = "over_shrink"
+        detail_df.loc[_opt & (_vr > 0.25), "fail_type"] = "over_wide"
 
     detail_path = os.path.join(stats_root, f"explorer_strategy_try_stats_{ts}.csv")
     detail_df.to_csv(detail_path, index=False, encoding="utf-8-sig")
@@ -390,6 +404,9 @@ def _save_explorer_stats_csv(
     if not summary_df.empty:
         summary_df["optimum_included_num"] = summary_df["optimum_included"].astype(bool).astype(int)
         summary_df["modeler_all_real_only_num"] = summary_df["modeler_all_real_only"].astype(bool).astype(int)
+        summary_df["over_shrink"] = (summary_df["fail_type"] == "over_shrink").astype(int)
+        summary_df["over_wide"] = (summary_df["fail_type"] == "over_wide").astype(int)
+        summary_df["both_fail"] = (summary_df["fail_type"] == "both_fail").astype(int)
         grouped = (
             summary_df
             .groupby(["strategy", "problem"], as_index=False)
@@ -402,10 +419,21 @@ def _save_explorer_stats_csv(
                 volume_ratio_pct_std=("volume_ratio_pct", "std"),
                 volume_ratio_pct_min=("volume_ratio_pct", "min"),
                 volume_ratio_pct_max=("volume_ratio_pct", "max"),
+                joint_pass_pct=("joint_pass", "mean"),
+                joint_pass_std=("joint_pass", "std"),
+                volume_cap_pass_pct=("volume_cap_pass", "mean"),
+                over_shrink_pct=("over_shrink", "mean"),
+                over_wide_pct=("over_wide", "mean"),
+                both_fail_pct=("both_fail", "mean"),
             )
         )
         grouped["optimum_included_pct"] = grouped["optimum_included_pct"] * 100.0
         grouped["modeler_all_real_only_pct"] = grouped["modeler_all_real_only_pct"] * 100.0
+        grouped["joint_pass_pct"] = grouped["joint_pass_pct"] * 100.0
+        grouped["volume_cap_pass_pct"] = grouped["volume_cap_pass_pct"] * 100.0
+        grouped["over_shrink_pct"] = grouped["over_shrink_pct"] * 100.0
+        grouped["over_wide_pct"] = grouped["over_wide_pct"] * 100.0
+        grouped["both_fail_pct"] = grouped["both_fail_pct"] * 100.0
     else:
         grouped = pd.DataFrame(
             columns=[
@@ -419,6 +447,12 @@ def _save_explorer_stats_csv(
                 "volume_ratio_pct_std",
                 "volume_ratio_pct_min",
                 "volume_ratio_pct_max",
+                "joint_pass_pct",
+                "joint_pass_std",
+                "volume_cap_pass_pct",
+                "over_shrink_pct",
+                "over_wide_pct",
+                "both_fail_pct",
             ]
         )
 

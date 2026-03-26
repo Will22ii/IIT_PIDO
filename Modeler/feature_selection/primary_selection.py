@@ -47,7 +47,7 @@ class FeatureSelectionConfig:
     # 3단계 stability 분기
     stability_very_low_data_n_threshold: int = 50
     stability_rule_very_low_data: str = "or"
-    stability_perm_min_rate_very_low_data: float = 0.55
+    stability_perm_min_rate_very_low_data: float = 0.65
     stability_drop_min_rate_very_low_data: float = 0.35
     stability_rule_low_data: str = "and"
     stability_perm_min_rate_low_data: float = 0.60
@@ -58,14 +58,20 @@ class FeatureSelectionConfig:
     # disagreement penalty
     disagreement_penalty_enabled: bool = True
     disagreement_threshold: float = 0.25
-    disagreement_penalty_scale: float = 0.40
+    disagreement_penalty_scale: float = 0.55
+    # very_low_data drop veto
+    drop_veto_enabled: bool = True
+    drop_veto_threshold: float = 0.03
+    # very_low_data perm vote variance penalty
+    perm_var_penalty_very_low_data_enabled: bool = True
+    perm_var_penalty_very_low_data_scale: float = 0.20
     # null-importance soft gate
     null_enabled: bool = True
     null_mode: str = "soft"
-    null_quantile: float = 0.95
+    null_quantile: float = 0.90
     null_shuffle_runs_low_data: int = 25
     null_shuffle_runs_normal: int = 30
-    null_alpha_low_data: float = 0.15
+    null_alpha_low_data: float = 0.40
     null_alpha_normal: float = 0.12
     null_apply_to: str = "both"
     null_pre_elite_ratio: float = 0.5
@@ -255,6 +261,21 @@ class FeatureSelector:
         if total <= 0.0:
             return 1.0, 0.0, 0.0
         return w_abs / total, w_q / total, w_r / total
+
+    def _resolve_channel_weights(self, *, low_data: bool) -> tuple[float, float]:
+        """perm/drop 채널 가중치를 정규화하여 반환. low_data일 때 전용 가중치 사용."""
+        if bool(low_data):
+            w_perm = float(getattr(self.config, "weight_perm_low_data", self.config.weight_perm))
+            w_drop = float(getattr(self.config, "weight_drop_low_data", self.config.weight_drop)) if bool(
+                self.config.use_score_drop
+            ) else 0.0
+        else:
+            w_perm = float(self.config.weight_perm)
+            w_drop = float(self.config.weight_drop) if bool(self.config.use_score_drop) else 0.0
+        denom = w_perm + w_drop
+        if denom <= 0.0:
+            return 1.0, 0.0
+        return w_perm / denom, w_drop / denom
 
     @staticmethod
     def _add_fold_norm_and_ranking(
@@ -520,17 +541,7 @@ class FeatureSelector:
             out["drop_selected"] = not bool(self.config.use_score_drop)
             out["drop_reason"] = "drop_disabled"
 
-        if bool(low_data):
-            w_perm = float(getattr(self.config, "weight_perm_low_data", self.config.weight_perm))
-            w_drop = float(getattr(self.config, "weight_drop_low_data", self.config.weight_drop)) if bool(self.config.use_score_drop) else 0.0
-        else:
-            w_perm = float(self.config.weight_perm)
-            w_drop = float(self.config.weight_drop) if bool(self.config.use_score_drop) else 0.0
-        denom = w_perm + w_drop
-        if denom <= 0.0:
-            w_perm_n, w_drop_n = 1.0, 0.0
-        else:
-            w_perm_n, w_drop_n = w_perm / denom, w_drop / denom
+        w_perm_n, w_drop_n = self._resolve_channel_weights(low_data=bool(low_data))
         out["scale_score"] = (
             w_perm_n * pd.to_numeric(out["perm_vote_score"], errors="coerce").fillna(0.0)
             + w_drop_n * pd.to_numeric(out["drop_vote_score"], errors="coerce").fillna(0.0)
@@ -603,6 +614,7 @@ class FeatureSelector:
         drop_processed_global: pd.DataFrame,
         n_shuffle: int,
         q: float,
+        low_data: bool = False,
     ) -> dict[str, pd.Series]:
         """채널별 독립 null quantile과 결합 null quantile을 함께 반환한다.
 
@@ -634,13 +646,7 @@ class FeatureSelector:
         perm_mat = _vote_matrix(perm_processed_global)
         drop_mat = _vote_matrix(drop_processed_global)
 
-        w_perm = float(self.config.weight_perm)
-        w_drop = float(self.config.weight_drop) if bool(self.config.use_score_drop) else 0.0
-        denom = w_perm + w_drop
-        if denom <= 0.0:
-            w_perm_n, w_drop_n = 1.0, 0.0
-        else:
-            w_perm_n, w_drop_n = w_perm / denom, w_drop / denom
+        w_perm_n, w_drop_n = self._resolve_channel_weights(low_data=bool(low_data))
 
         null_samples = np.zeros((int(n_shuffle), p), dtype=float)
         perm_null_samples = np.zeros((int(n_shuffle), p), dtype=float)
@@ -757,18 +763,14 @@ class FeatureSelector:
                 drop_processed_global=drop_processed_global,
                 n_shuffle=int(_null_pre_runs),
                 q=float(_null_pre_q),
+                low_data=bool(low_data),
             )
             _perm_vote_pre = pd.to_numeric(out["perm_vote_score_global"], errors="coerce").fillna(0.0)
             _drop_vote_pre = pd.to_numeric(out["drop_vote_score_global"], errors="coerce").fillna(0.0)
             _perm_margin_pre = _perm_vote_pre - out["feature"].astype(str).map(_null_q_cache["perm"]).astype(float)
             _drop_margin_pre = _drop_vote_pre - out["feature"].astype(str).map(_null_q_cache["drop"]).astype(float)
 
-            _w_perm = float(getattr(self.config, "weight_perm", 0.80))
-            _w_drop = float(getattr(self.config, "weight_drop", 0.20)) if bool(
-                getattr(self.config, "use_score_drop", True)
-            ) else 0.0
-            _w_d = _w_perm + _w_drop
-            _wp, _wd = (_w_perm / _w_d, _w_drop / _w_d) if _w_d > 0 else (1.0, 0.0)
+            _wp, _wd = self._resolve_channel_weights(low_data=bool(low_data))
 
             _pre_alpha = float(_null_pre_alpha) * _pre_elite_ratio
             _pre_perm_pen = _pre_alpha * np.clip(-_perm_margin_pre, 0.0, None)
@@ -867,6 +869,7 @@ class FeatureSelector:
                     drop_processed_global=drop_processed_global,
                     n_shuffle=int(null_runs),
                     q=float(null_q),
+                    low_data=bool(low_data),
                 )
             null_q_combined = null_q_result["combined"]
             null_q_perm = null_q_result["perm"]
@@ -885,16 +888,7 @@ class FeatureSelector:
             out["null_margin_perm"] = perm_null_margin
             out["null_margin_drop"] = drop_null_margin
 
-            # 채널 가중치 (global_score 결합 시 사용한 것과 동일)
-            w_perm = float(getattr(self.config, "weight_perm", 0.80))
-            w_drop = float(getattr(self.config, "weight_drop", 0.20)) if bool(
-                getattr(self.config, "use_score_drop", True)
-            ) else 0.0
-            w_denom = w_perm + w_drop
-            if w_denom <= 0.0:
-                w_perm_n, w_drop_n = 1.0, 0.0
-            else:
-                w_perm_n, w_drop_n = w_perm / w_denom, w_drop / w_denom
+            w_perm_n, w_drop_n = self._resolve_channel_weights(low_data=bool(low_data))
 
             if str(null_mode) == "hard":
                 perm_ch_penalty = np.where(perm_null_margin >= 0.0, 0.0, 1e6)
@@ -932,15 +926,49 @@ class FeatureSelector:
             out["null_penalty"] = 0.0
             out["final_score_adj"] = pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0)
 
+        # --- Perm Vote Variance Penalty (very_low_data 전용, 제안1) ---
+        # fold간 perm vote 분산이 높은 feature는 spurious spike 가능성이 높으므로 final_score 감산
+        very_low_n_thr = int(getattr(self.config, "stability_very_low_data_n_threshold", 50))
+        is_very_low_data = bool(low_data) and int(n_samples) < very_low_n_thr
+        pvp_enabled = bool(getattr(self.config, "perm_var_penalty_very_low_data_enabled", False))
+        if pvp_enabled and is_very_low_data and perm_processed_global is not None and not perm_processed_global.empty:
+            pvp_scale = float(np.clip(getattr(self.config, "perm_var_penalty_very_low_data_scale", 0.20), 0.0, 1.0))
+            perm_vote_std = (
+                perm_processed_global.groupby("feature")["vote"]
+                .std(ddof=1)
+                .fillna(0.0)
+                .rename("perm_vote_std_global")
+            )
+            out = out.merge(perm_vote_std, on="feature", how="left")
+            out["perm_vote_std_global"] = pd.to_numeric(out["perm_vote_std_global"], errors="coerce").fillna(0.0)
+            pvp_penalty = out["perm_vote_std_global"] * pvp_scale
+            out["perm_var_penalty"] = pvp_penalty
+            out["final_score_adj"] = (
+                pd.to_numeric(out["final_score_adj"], errors="coerce").fillna(0.0) - pvp_penalty
+            ).clip(lower=0.0)
+        else:
+            out["perm_vote_std_global"] = 0.0
+            out["perm_var_penalty"] = 0.0
+
+        # --- Drop Veto (very_low_data 전용, 제안2) ---
+        # drop_selection_rate가 극도로 낮은 feature는 perm 점수와 무관하게 강제 기각
+        drop_veto_enabled = bool(getattr(self.config, "drop_veto_enabled", False))
+        drop_veto_thr = float(getattr(self.config, "drop_veto_threshold", 0.03))
+        if drop_veto_enabled and is_very_low_data and bool(self.config.use_score_drop):
+            drop_rate = pd.to_numeric(out.get("drop_selection_rate", out.get("drop_vote_score_global", 0.0)), errors="coerce").fillna(0.0)
+            out["drop_veto"] = drop_rate < drop_veto_thr
+        else:
+            out["drop_veto"] = False
+
         tau = float(self.config.final_score_threshold)
         g_floor = float(self.config.global_score_floor)
         base_selected = (
             (pd.to_numeric(out["final_score_adj"], errors="coerce").fillna(0.0) >= tau)
             & (global_score >= g_floor)
+            & (~out["drop_veto"])
         )
 
         stability_enabled = bool(getattr(self.config, "stability_enabled", True))
-        very_low_n_thr = int(getattr(self.config, "stability_very_low_data_n_threshold", 50))
         if bool(low_data) and int(n_samples) < very_low_n_thr:
             stability_rule = self._normalize_stability_rule(getattr(self.config, "stability_rule_very_low_data", "or"))
             perm_thr = float(getattr(self.config, "stability_perm_min_rate_very_low_data", 0.55))
