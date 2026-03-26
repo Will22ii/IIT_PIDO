@@ -235,6 +235,7 @@ def run_modeler(
     os.makedirs(meta_dir, exist_ok=True)
     os.makedirs(debug_dir, exist_ok=True)
 
+    _np_ratio = float(cv_policy.get("np_ratio", float(len(X)) / max(len(feature_cols), 1)))
     fi_result = run_fi_selection_workflow(
         models=models,
         fold_predictions=train_result["fold_predictions"],
@@ -254,6 +255,22 @@ def run_modeler(
         keep_debug=keep_debug,
         debug_dir=debug_dir,
         meta_dir=meta_dir,
+        # Bootstrap Stability Selection
+        bootstrap_enabled=bool(config.system.fi_bootstrap_enabled),
+        bootstrap_np_ratio=_np_ratio,
+        bootstrap_np_threshold=float(config.system.fi_bootstrap_np_threshold),
+        bootstrap_rounds=int(config.system.fi_bootstrap_rounds),
+        bootstrap_sample_ratio=float(config.system.fi_bootstrap_sample_ratio),
+        bootstrap_min_freq=float(config.system.fi_bootstrap_min_freq),
+        bootstrap_df=df,
+        bootstrap_target_col=target_col,
+        bootstrap_model_name=model_name,
+        bootstrap_model_params=best_params,
+        bootstrap_kfold_splits=int(kfold_splits),
+        bootstrap_kfold_repeats=int(kfold_repeats),
+        bootstrap_objective_sense=objective_sense,
+        bootstrap_elite_ratio_base=float(config.system.fi_elite_ratio_base),
+        bootstrap_elite_min_samples=int(config.system.fi_elite_min_samples),
     )
     selected_df = fi_result.selected_df
     processed_df = fi_result.processed_df

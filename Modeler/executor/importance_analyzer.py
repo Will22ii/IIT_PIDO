@@ -81,12 +81,7 @@ class ImportanceAnalyzer:
                         X_perm[:, idx] = rng.permutation(X_perm[:, idx])
                         pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
                         deltas_k.append(float(np.mean((pred_base - pred_perm) ** 2)))
-                    if len(deltas_k) > 2:
-                        arr = np.sort(deltas_k)
-                        trim_n = max(1, int(len(arr) * 0.1))
-                        delta = float(np.mean(arr[trim_n:-trim_n]))
-                    else:
-                        delta = float(np.mean(deltas_k))
+                    delta = float(np.mean(deltas_k))
                 rows.append(
                     {
                         "problem": problem_name,
@@ -191,15 +186,8 @@ class ImportanceAnalyzer:
                         r2_perms_k.append(r2_k)
                     if not drops_k:
                         continue
-                    if len(drops_k) > 2:
-                        order = np.argsort(drops_k)
-                        trim_n = max(1, int(len(drops_k) * 0.1))
-                        keep = order[trim_n:-trim_n]
-                        drop = float(np.mean([drops_k[i] for i in keep]))
-                        r2_perm = float(np.mean([r2_perms_k[i] for i in keep]))
-                    else:
-                        drop = float(np.mean(drops_k))
-                        r2_perm = float(np.mean(r2_perms_k))
+                    drop = float(np.mean(drops_k))
+                    r2_perm = float(np.mean(r2_perms_k))
                 drop_pos = float(max(drop, 0.0))
                 rows.append(
                     {

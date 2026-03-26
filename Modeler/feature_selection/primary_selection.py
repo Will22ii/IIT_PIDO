@@ -46,9 +46,9 @@ class FeatureSelectionConfig:
     stability_rule: str = "or"   # legacy fallback
     # 3단계 stability 분기
     stability_very_low_data_n_threshold: int = 50
-    stability_rule_very_low_data: str = "or"
-    stability_perm_min_rate_very_low_data: float = 0.65
-    stability_drop_min_rate_very_low_data: float = 0.35
+    stability_rule_very_low_data: str = "and"
+    stability_perm_min_rate_very_low_data: float = 0.60
+    stability_drop_min_rate_very_low_data: float = 0.30
     stability_rule_low_data: str = "and"
     stability_perm_min_rate_low_data: float = 0.60
     stability_drop_min_rate_low_data: float = 0.44
@@ -68,10 +68,10 @@ class FeatureSelectionConfig:
     # null-importance soft gate
     null_enabled: bool = True
     null_mode: str = "soft"
-    null_quantile: float = 0.90
+    null_quantile: float = 0.85
     null_shuffle_runs_low_data: int = 25
     null_shuffle_runs_normal: int = 30
-    null_alpha_low_data: float = 0.40
+    null_alpha_low_data: float = 0.30
     null_alpha_normal: float = 0.12
     null_apply_to: str = "both"
     null_pre_elite_ratio: float = 0.5

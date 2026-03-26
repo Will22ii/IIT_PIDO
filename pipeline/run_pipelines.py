@@ -365,7 +365,7 @@ def _save_explorer_stats_csv(
                 "executed_strategy",
                 "fallback_from",
                 "fallback_applied",
-                "optimum_included",
+                "survivor_optimum_included",
                 "optimum_hit_count",
                 "optimum_total_count",
                 "selected_feature_count",
@@ -388,31 +388,31 @@ def _save_explorer_stats_csv(
 
     # --- derive DSE metrics per row ---
     if not detail_df.empty:
-        _opt = detail_df["optimum_included"].astype(bool)
+        _opt = detail_df["survivor_optimum_included"].astype(bool)
         _vr = pd.to_numeric(detail_df["volume_ratio"], errors="coerce").fillna(1.0)
         detail_df["volume_cap_pass"] = (_vr <= 0.25).astype(int)
         detail_df["joint_pass"] = (_opt & (_vr <= 0.25)).astype(int)
         detail_df["fail_type"] = "both_fail"
         detail_df.loc[_opt & (_vr <= 0.25), "fail_type"] = "pass"
-        detail_df.loc[~_opt & (_vr <= 0.25), "fail_type"] = "over_shrink"
-        detail_df.loc[_opt & (_vr > 0.25), "fail_type"] = "over_wide"
+        detail_df.loc[~_opt & (_vr <= 0.25), "fail_type"] = "over_shrink_fail"
+        detail_df.loc[_opt & (_vr > 0.25), "fail_type"] = "over_wide_fail"
 
     detail_path = os.path.join(stats_root, f"explorer_strategy_try_stats_{ts}.csv")
     detail_df.to_csv(detail_path, index=False, encoding="utf-8-sig")
 
     summary_df = detail_df.copy()
     if not summary_df.empty:
-        summary_df["optimum_included_num"] = summary_df["optimum_included"].astype(bool).astype(int)
+        summary_df["optimum_included_num"] = summary_df["survivor_optimum_included"].astype(bool).astype(int)
         summary_df["modeler_all_real_only_num"] = summary_df["modeler_all_real_only"].astype(bool).astype(int)
-        summary_df["over_shrink"] = (summary_df["fail_type"] == "over_shrink").astype(int)
-        summary_df["over_wide"] = (summary_df["fail_type"] == "over_wide").astype(int)
+        summary_df["over_shrink_fail"] = (summary_df["fail_type"] == "over_shrink_fail").astype(int)
+        summary_df["over_wide_fail"] = (summary_df["fail_type"] == "over_wide_fail").astype(int)
         summary_df["both_fail"] = (summary_df["fail_type"] == "both_fail").astype(int)
         grouped = (
             summary_df
             .groupby(["strategy", "problem"], as_index=False)
             .agg(
                 tries=("strategy", "count"),
-                optimum_included_pct=("optimum_included_num", "mean"),
+                survivor_optimum_included_pct=("optimum_included_num", "mean"),
                 modeler_all_real_only_pct=("modeler_all_real_only_num", "mean"),
                 modeler_real_coverage_pct_mean=("modeler_real_coverage_pct", "mean"),
                 volume_ratio_pct_mean=("volume_ratio_pct", "mean"),
@@ -422,17 +422,17 @@ def _save_explorer_stats_csv(
                 joint_pass_pct=("joint_pass", "mean"),
                 joint_pass_std=("joint_pass", "std"),
                 volume_cap_pass_pct=("volume_cap_pass", "mean"),
-                over_shrink_pct=("over_shrink", "mean"),
-                over_wide_pct=("over_wide", "mean"),
+                over_shrink_fail_pct=("over_shrink_fail", "mean"),
+                over_wide_fail_pct=("over_wide_fail", "mean"),
                 both_fail_pct=("both_fail", "mean"),
             )
         )
-        grouped["optimum_included_pct"] = grouped["optimum_included_pct"] * 100.0
+        grouped["survivor_optimum_included_pct"] = grouped["survivor_optimum_included_pct"] * 100.0
         grouped["modeler_all_real_only_pct"] = grouped["modeler_all_real_only_pct"] * 100.0
         grouped["joint_pass_pct"] = grouped["joint_pass_pct"] * 100.0
         grouped["volume_cap_pass_pct"] = grouped["volume_cap_pass_pct"] * 100.0
-        grouped["over_shrink_pct"] = grouped["over_shrink_pct"] * 100.0
-        grouped["over_wide_pct"] = grouped["over_wide_pct"] * 100.0
+        grouped["over_shrink_fail_pct"] = grouped["over_shrink_fail_pct"] * 100.0
+        grouped["over_wide_fail_pct"] = grouped["over_wide_fail_pct"] * 100.0
         grouped["both_fail_pct"] = grouped["both_fail_pct"] * 100.0
     else:
         grouped = pd.DataFrame(
@@ -440,7 +440,7 @@ def _save_explorer_stats_csv(
                 "strategy",
                 "problem",
                 "tries",
-                "optimum_included_pct",
+                "survivor_optimum_included_pct",
                 "modeler_all_real_only_pct",
                 "modeler_real_coverage_pct_mean",
                 "volume_ratio_pct_mean",
@@ -450,8 +450,8 @@ def _save_explorer_stats_csv(
                 "joint_pass_pct",
                 "joint_pass_std",
                 "volume_cap_pass_pct",
-                "over_shrink_pct",
-                "over_wide_pct",
+                "over_shrink_fail_pct",
+                "over_wide_fail_pct",
                 "both_fail_pct",
             ]
         )
@@ -725,7 +725,7 @@ def main() -> None:
                                     "executed_strategy": strategy.strategy_id,
                                     "fallback_from": None,
                                     "fallback_applied": False,
-                                    "optimum_included": bool(included),
+                                    "survivor_optimum_included": bool(included),
                                     "optimum_hit_count": int(hit_count),
                                     "optimum_total_count": int(total_count),
                                     "selected_feature_count": selected_feature_count,
