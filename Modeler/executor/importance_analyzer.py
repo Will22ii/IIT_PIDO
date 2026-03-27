@@ -226,13 +226,6 @@ class ImportanceAnalyzer:
     # Internal helpers
     # =================================================
 
-    def _subsample(self, X: pd.DataFrame) -> pd.DataFrame:
-        if self.perm_sample_size is None:
-            return X
-        if len(X) <= self.perm_sample_size:
-            return X
-        return X.sample(self.perm_sample_size, random_state=42)
-
     def _prepare_input(self, model, X: pd.DataFrame) -> pd.DataFrame:
         # keep only the features used by the model (and in correct order)
         missing = [f for f in model.feature_names if f not in X.columns]

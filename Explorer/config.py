@@ -46,7 +46,7 @@ class ExplorerSystemConfig:
     # 출력 디버그 레벨: off | full
     debug_level: str = "off"
     # Explorer 전략 ID (배치 실험 구분용)
-    strategy_id: str = "S0_baseline_dual_union"
+    strategy_id: str = "S4_dual"
     # Probe 기반 전략 시작점 개수(미사용 전략에서도 메타 기록용)
     probe_multistart: int = 20
     # 전략별 추가 파라미터 메타(실험 추적용)

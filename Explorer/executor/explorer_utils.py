@@ -115,17 +115,62 @@ def compute_selected_bounds(
     return selected_bounds, pred_bounds, obj_bounds
 
 
+def compute_gp_boundary_uncertainty(
+    *,
+    gp_models: list,
+    selected_bounds: list[Tuple[float, float]],
+) -> np.ndarray | None:
+    """GP 모델의 경계 불확실성(σ)을 차원별로 측정하여 확장 가중치를 반환한다.
+
+    selected_bounds 각 차원의 lb/ub에서 GP σ를 측정하고,
+    σ가 높은 차원에 더 큰 가중치를 부여한다.
+    반환값은 합이 d인 가중치 배열 (균등이면 전부 1.0).
+    """
+    valid_gps = [gp for gp in gp_models if gp is not None]
+    if not valid_gps or not selected_bounds:
+        return None
+
+    d = len(selected_bounds)
+    center = np.array([(lb + ub) * 0.5 for lb, ub in selected_bounds], dtype=float)
+    sigmas = np.zeros(d, dtype=float)
+
+    for j in range(d):
+        point_lb = center.copy()
+        point_lb[j] = selected_bounds[j][0]
+        point_ub = center.copy()
+        point_ub[j] = selected_bounds[j][1]
+
+        pts = np.vstack([point_lb.reshape(1, -1), point_ub.reshape(1, -1)])
+        gp_sigmas = []
+        for gp in valid_gps:
+            try:
+                _, std = gp.predict(pts, return_std=True)
+                gp_sigmas.append(float(np.mean(std)))
+            except Exception:
+                continue
+        if gp_sigmas:
+            sigmas[j] = float(np.mean(gp_sigmas))
+
+    if sigmas.sum() <= 0.0 or not np.all(np.isfinite(sigmas)):
+        return None
+
+    weights = sigmas / sigmas.mean()
+    weights = np.clip(weights, 0.3, 3.0)
+    weights = weights * (float(d) / weights.sum())
+    return weights
+
+
 def apply_bounds_margin(
     *,
     selected_bounds: list[Tuple[float, float]],
     bounds: list[Tuple[float, float]],
     margin_ratio: float,
     min_volume_ratio: float = 0.20,
+    dim_weights: np.ndarray | None = None,
 ) -> list[Tuple[float, float]]:
     if not selected_bounds or not bounds or len(selected_bounds) != len(bounds):
         return selected_bounds
 
-    v_cap = 0.25
     min_v = float(np.clip(min_volume_ratio, 0.0, 1.0))
 
     def _volume_ratio(
@@ -244,14 +289,14 @@ def apply_bounds_margin(
     raw_v = _volume_ratio(sel_bounds=selected_bounds)
     if not np.isfinite(raw_v):
         return selected_bounds
-    if raw_v >= v_cap and raw_v >= min_v:
+    if raw_v >= min_v:
         return selected_bounds
 
     expanded = list(selected_bounds)
     base_margin = float(margin_ratio)
 
-    if raw_v < v_cap and base_margin > 0.0:
-        m = base_margin * max(v_cap - raw_v, 0.0) / v_cap
+    if raw_v < min_v and base_margin > 0.0:
+        m = base_margin * max(min_v - raw_v, 0.0) / min_v
         if m > 0.0:
             expanded_try = []
             for (s_lb, s_ub), (g_lb, g_ub) in zip(expanded, bounds):
@@ -285,7 +330,15 @@ def apply_bounds_margin(
         return expanded
 
     ratios_cur, _ = _current_ratios(expanded)
-    target_ratios = [min(1.0, max(0.0, float(r) * max(alpha, 1.0))) for r in ratios_cur]
+    if dim_weights is not None and len(dim_weights) == d:
+        # uncertainty-aware: σ가 높은 차원에 alpha를 더 크게 적용
+        w = np.asarray(dim_weights, dtype=float)
+        target_ratios = [
+            min(1.0, max(0.0, float(r) * max(float(alpha ** w[j]), 1.0)))
+            for j, r in enumerate(ratios_cur)
+        ]
+    else:
+        target_ratios = [min(1.0, max(0.0, float(r) * max(alpha, 1.0))) for r in ratios_cur]
     expanded = _widen_to_ratios(base_bounds=expanded, target_ratios=target_ratios)
 
     cur_v = _volume_ratio(sel_bounds=expanded)
@@ -294,20 +347,28 @@ def apply_bounds_margin(
     if cur_v >= min_v:
         return expanded
 
-    # Additional floor booster: move each per-dimension ratio toward 1.0 with a shared beta
-    # and solve the smallest beta that satisfies target volume.
+    # Floor booster: move each per-dimension ratio toward 1.0 with a shared beta.
+    # uncertainty-aware: σ가 높은 차원이 1.0에 더 빨리 접근하도록 가중.
     ratios_cur, _ = _current_ratios(expanded)
     lo_beta = 0.0
     hi_beta = 1.0
     for _ in range(40):
         mid = 0.5 * (lo_beta + hi_beta)
-        mid_ratios = [float(r + mid * (1.0 - r)) for r in ratios_cur]
+        if dim_weights is not None and len(dim_weights) == d:
+            w = np.asarray(dim_weights, dtype=float)
+            mid_ratios = [float(r + mid * w[j] / w.mean() * (1.0 - r)) for j, r in enumerate(ratios_cur)]
+        else:
+            mid_ratios = [float(r + mid * (1.0 - r)) for r in ratios_cur]
         vol_mid = float(np.prod(mid_ratios)) if mid_ratios else 0.0
         if vol_mid >= min_v:
             hi_beta = mid
         else:
             lo_beta = mid
-    final_ratios = [float(r + hi_beta * (1.0 - r)) for r in ratios_cur]
+    if dim_weights is not None and len(dim_weights) == d:
+        w = np.asarray(dim_weights, dtype=float)
+        final_ratios = [float(r + hi_beta * w[j] / w.mean() * (1.0 - r)) for j, r in enumerate(ratios_cur)]
+    else:
+        final_ratios = [float(r + hi_beta * (1.0 - r)) for r in ratios_cur]
     expanded = _widen_to_ratios(base_bounds=expanded, target_ratios=final_ratios)
 
     return expanded

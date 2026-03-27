@@ -29,6 +29,7 @@ from utils.dbscan_utils import auto_dbscan_eps_quantile
 from DOE.executor.constraint_filter import evaluate_constraints_batch, validate_constraint_defs
 from Explorer.executor.explorer_utils import (
     apply_bounds_margin,
+    compute_gp_boundary_uncertainty,
     compute_selected_bounds,
     format_span_rows,
     resolve_bounds,
@@ -108,10 +109,10 @@ def _normalize_debug_level(value: str | None) -> str:
 
 
 def _normalize_strategy_id(value: str | None) -> str:
-    raw = str(value or "S0_baseline_dual_union").strip()
+    raw = str(value or "S4_dual").strip()
     safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in raw)
     safe = safe.strip("_")
-    return safe or "S0_baseline_dual_union"
+    return safe or "S4_dual"
 
 
 def _safe_stack(points: list[np.ndarray], n_dim: int) -> np.ndarray:
@@ -121,6 +122,8 @@ def _safe_stack(points: list[np.ndarray], n_dim: int) -> np.ndarray:
             continue
         a = np.asarray(arr, dtype=float)
         if a.ndim != 2 or a.shape[1] != n_dim or a.shape[0] == 0:
+            if a.shape[0] > 0:
+                print(f"[Explorer] _safe_stack: skipped array shape {a.shape} (expected n_dim={n_dim})")
             continue
         valid.append(a)
     if not valid:
@@ -318,31 +321,22 @@ def _resolve_strategy_alias(strategy_id: str, mode: str) -> str:
         return "s4_pred"
     if sid.startswith("s8_pred"):
         return "s8_pred"
-    if sid.startswith("s0_"):
-        return "s0"
-    if sid.startswith("s2_"):
-        return "s2"
     if sid.startswith("s4_"):
         return "s4"
-    if sid.startswith("s5_"):
-        return "s5"
     if sid.startswith("s8_"):
         return "s8"
 
     m = str(mode).strip().lower()
     mode_map = {
-        "pred_focus": "s2",
-        "ei_focus": "s4",
         "dual_refine_ei": "s4",
         "dual_refine_lcb": "s8",
-        "wide_quantile": "s5",
         "dual_gradient_refine": "s8",
         "pred_refine_ei": "s4_pred",
         "pred_refine_lcb": "s8_pred",
         "obj_refine_ei": "s4_obj",
         "obj_refine_lcb": "s8_obj",
     }
-    return mode_map.get(m, "s0")
+    return mode_map.get(m, "s4")
 
 
 def _resolve_existing_cae_metadata_path(
@@ -1170,16 +1164,7 @@ class ExplorerOrchestrator:
         strategy_mode = str((self.config.system.strategy_params or {}).get("mode", "")).strip().lower()
         strategy_alias = _resolve_strategy_alias(strategy_id=strategy_id, mode=strategy_mode)
 
-        if strategy_alias == "s0":
-            selected_points = _safe_stack([X_pred_sel, X_obj_sel], n_dim=len(selected_features))
-            selected_bounds = base_selected_bounds
-        elif strategy_alias == "s2":
-            selected_points = X_pred_sel
-            selected_bounds = _bounds_from_points(X_pred_sel)
-        elif strategy_alias == "s5":
-            selected_points = _safe_stack([X_pred_sel, X_obj_sel], n_dim=len(selected_features))
-            selected_bounds = base_selected_bounds
-        elif strategy_alias in {"s4", "s8", "s4_pred", "s8_pred", "s4_obj", "s8_obj"}:
+        if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred", "s4_obj", "s8_obj"}:
             source_mode = "dual"
             if strategy_alias in {"s4_pred", "s8_pred"}:
                 source_mode = "pred"
@@ -1590,15 +1575,9 @@ class ExplorerOrchestrator:
                 else:
                     selected_points = _safe_stack([X_pred_sel], n_dim=len(selected_features))
             selected_bounds = _bounds_from_points(selected_points, q_low=0.01, q_high=0.99)
-        else:
-            selected_points = _safe_stack([X_pred_sel, X_obj_sel], n_dim=len(selected_features))
-            selected_bounds = base_selected_bounds
 
         if selected_bounds is None:
-            if strategy_alias in {"s0", "s5"} and base_selected_bounds is not None:
-                selected_bounds = base_selected_bounds
-                selected_points = _safe_stack([selected_points, X_pred_sel, X_obj_sel], n_dim=len(selected_features))
-            elif strategy_alias in {"s2", "s4_pred", "s8_pred"} and pred_bounds is not None:
+            if strategy_alias in {"s4_pred", "s8_pred"} and pred_bounds is not None:
                 selected_bounds = pred_bounds
                 selected_points = _safe_stack([selected_points, X_pred_sel], n_dim=len(selected_features))
             elif strategy_alias in {"s4_obj", "s8_obj"} and obj_bounds is not None:
@@ -1613,11 +1592,21 @@ class ExplorerOrchestrator:
         vol_ratio = None
 
         if selected_bounds is not None:
+            dim_weights = compute_gp_boundary_uncertainty(
+                gp_models=[gp_pred, gp_obj],
+                selected_bounds=selected_bounds,
+            )
+            if dim_weights is not None:
+                parts = ", ".join(
+                    f"{fn}:{w:.2f}" for fn, w in zip(selected_features, dim_weights)
+                )
+                print(f"[Explorer] uncertainty weights: {parts}")
             selected_bounds = apply_bounds_margin(
                 selected_bounds=selected_bounds,
                 bounds=bounds,
                 margin_ratio=float(self.config.system.bounds_margin_ratio),
                 min_volume_ratio=float(self.config.system.bounds_min_volume_ratio),
+                dim_weights=dim_weights,
             )
 
         if selected_bounds is not None:

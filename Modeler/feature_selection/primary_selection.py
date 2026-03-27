@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from typing import Dict
 
 
+def _safe_numeric(series, default=0.0):
+    return pd.to_numeric(series, errors="coerce").fillna(default)
+
+
 @dataclass
 class FeatureSelectionConfig:
     perm_min_pass_rate: float = 0.6
@@ -48,7 +52,7 @@ class FeatureSelectionConfig:
     stability_very_low_data_n_threshold: int = 50
     stability_rule_very_low_data: str = "and"
     stability_perm_min_rate_very_low_data: float = 0.60
-    stability_drop_min_rate_very_low_data: float = 0.30
+    stability_drop_min_rate_very_low_data: float = 0.45
     stability_rule_low_data: str = "and"
     stability_perm_min_rate_low_data: float = 0.60
     stability_drop_min_rate_low_data: float = 0.44
@@ -58,20 +62,31 @@ class FeatureSelectionConfig:
     # disagreement penalty
     disagreement_penalty_enabled: bool = True
     disagreement_threshold: float = 0.25
-    disagreement_penalty_scale: float = 0.55
+    disagreement_penalty_scale: float = 0.40
     # very_low_data drop veto
     drop_veto_enabled: bool = True
     drop_veto_threshold: float = 0.03
     # very_low_data perm vote variance penalty
     perm_var_penalty_very_low_data_enabled: bool = True
     perm_var_penalty_very_low_data_scale: float = 0.20
+    # redundancy-aware disagreement dampening (L1)
+    redundancy_dampening_enabled: bool = True
+    redundancy_perm_floor: float = 0.85
+    redundancy_drop_ceil: float = 0.40
+    redundancy_dampening_factor: float = 0.5
+    # adaptive score gap filter (L2)
+    gap_filter_enabled: bool = True
+    gap_threshold_very_low_data: float = 0.10
+    gap_threshold_normal: float = 0.12
+    gap_global_floor: float = 0.70
+    gap_min_retain: int = 2
     # null-importance soft gate
     null_enabled: bool = True
     null_mode: str = "soft"
     null_quantile: float = 0.85
     null_shuffle_runs_low_data: int = 25
     null_shuffle_runs_normal: int = 30
-    null_alpha_low_data: float = 0.30
+    null_alpha_low_data: float = 0.45
     null_alpha_normal: float = 0.12
     null_apply_to: str = "both"
     null_pre_elite_ratio: float = 0.5
@@ -286,7 +301,7 @@ class FeatureSelector:
         top_ratio: float,
     ) -> pd.DataFrame:
         out = fold_df.copy()
-        out[metric_col] = pd.to_numeric(out[metric_col], errors="coerce").fillna(0.0)
+        out[metric_col] = _safe_numeric(out[metric_col])
         fold_max = out.groupby("fold")[metric_col].transform("max").replace(0.0, np.nan)
         out["metric_norm"] = out[metric_col] / fold_max
         out["metric_norm"] = out["metric_norm"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
@@ -399,7 +414,7 @@ class FeatureSelector:
         fold_df = raw.copy()
         if "scale" not in fold_df.columns:
             fold_df["scale"] = str(scale_label)
-        fold_df["drop_metric"] = pd.to_numeric(fold_df[metric], errors="coerce").fillna(0.0)
+        fold_df["drop_metric"] = _safe_numeric(fold_df[metric])
         fold_df["drop_metric"] = fold_df["drop_metric"].clip(lower=0.0)
 
         out = self._add_fold_norm_and_ranking(
@@ -525,7 +540,7 @@ class FeatureSelector:
                 on="feature",
                 how="left",
             )
-            out["drop_vote_score"] = pd.to_numeric(out["drop_vote_score"], errors="coerce").fillna(0.0)
+            out["drop_vote_score"] = _safe_numeric(out["drop_vote_score"])
         else:
             out = base.copy()
             out["drop_abs_selection_rate"] = 0.0
@@ -543,8 +558,8 @@ class FeatureSelector:
 
         w_perm_n, w_drop_n = self._resolve_channel_weights(low_data=bool(low_data))
         out["scale_score"] = (
-            w_perm_n * pd.to_numeric(out["perm_vote_score"], errors="coerce").fillna(0.0)
-            + w_drop_n * pd.to_numeric(out["drop_vote_score"], errors="coerce").fillna(0.0)
+            w_perm_n * _safe_numeric(out["perm_vote_score"])
+            + w_drop_n * _safe_numeric(out["drop_vote_score"])
         )
         out["scale"] = str(scale_label)
         return out
@@ -633,7 +648,7 @@ class FeatureSelector:
             if df is None or df.empty or ("fold" not in df.columns) or ("feature" not in df.columns):
                 return np.empty((0, p), dtype=float)
             work = df.copy()
-            work["vote"] = pd.to_numeric(work.get("vote", 0.0), errors="coerce").fillna(0.0)
+            work["vote"] = _safe_numeric(work.get("vote", 0.0))
             pv = (
                 work.pivot_table(index="fold", columns="feature", values="vote", aggfunc="mean")
                 .reindex(columns=features)
@@ -731,20 +746,16 @@ class FeatureSelector:
                 }
             )
             out = out.merge(elite, on="feature", how="left")
-            out["elite_score"] = pd.to_numeric(out["elite_score"], errors="coerce").fillna(out["global_score"])
-            out["perm_vote_score_elite"] = pd.to_numeric(out["perm_vote_score_elite"], errors="coerce").fillna(
-                out["perm_vote_score_global"]
-            )
-            out["drop_vote_score_elite"] = pd.to_numeric(out["drop_vote_score_elite"], errors="coerce").fillna(
-                out["drop_vote_score_global"]
-            )
+            out["elite_score"] = _safe_numeric(out["elite_score"], default=out["global_score"])
+            out["perm_vote_score_elite"] = _safe_numeric(out["perm_vote_score_elite"], default=out["perm_vote_score_global"])
+            out["drop_vote_score_elite"] = _safe_numeric(out["drop_vote_score_elite"], default=out["drop_vote_score_global"])
         else:
-            out["elite_score"] = pd.to_numeric(out["global_score"], errors="coerce").fillna(0.0)
-            out["perm_vote_score_elite"] = pd.to_numeric(out["perm_vote_score_global"], errors="coerce").fillna(0.0)
-            out["drop_vote_score_elite"] = pd.to_numeric(out["drop_vote_score_global"], errors="coerce").fillna(0.0)
+            out["elite_score"] = _safe_numeric(out["global_score"])
+            out["perm_vote_score_elite"] = _safe_numeric(out["perm_vote_score_global"])
+            out["drop_vote_score_elite"] = _safe_numeric(out["drop_vote_score_global"])
 
-        global_score = pd.to_numeric(out["global_score"], errors="coerce").fillna(0.0)
-        elite_score = pd.to_numeric(out["elite_score"], errors="coerce").fillna(0.0)
+        global_score = _safe_numeric(out["global_score"])
+        elite_score = _safe_numeric(out["elite_score"])
 
         # --- Pre-elite null penalty ("both" 모드) ---
         # null_apply_to="both"일 때 global_score에 pre-penalty를 적용하여
@@ -765,8 +776,8 @@ class FeatureSelector:
                 q=float(_null_pre_q),
                 low_data=bool(low_data),
             )
-            _perm_vote_pre = pd.to_numeric(out["perm_vote_score_global"], errors="coerce").fillna(0.0)
-            _drop_vote_pre = pd.to_numeric(out["drop_vote_score_global"], errors="coerce").fillna(0.0)
+            _perm_vote_pre = _safe_numeric(out["perm_vote_score_global"])
+            _drop_vote_pre = _safe_numeric(out["drop_vote_score_global"])
             _perm_margin_pre = _perm_vote_pre - out["feature"].astype(str).map(_null_q_cache["perm"]).astype(float)
             _drop_margin_pre = _drop_vote_pre - out["feature"].astype(str).map(_null_q_cache["drop"]).astype(float)
 
@@ -818,19 +829,19 @@ class FeatureSelector:
                 .rename("elite_vote_std")
             )
             out = out.merge(elite_vote_std, on="feature", how="left")
-            out["elite_vote_std"] = pd.to_numeric(out["elite_vote_std"], errors="coerce").fillna(0.0)
+            out["elite_vote_std"] = _safe_numeric(out["elite_vote_std"])
             evp_penalty = (out["elite_vote_std"] - evp_thr).clip(lower=0.0) * evp_scale
             out["elite_var_penalty"] = evp_penalty
             out["final_score"] = (
-                pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0) - evp_penalty
+                _safe_numeric(out["final_score"]) - evp_penalty
             ).clip(lower=0.0)
         else:
             out["elite_vote_std"] = 0.0
             out["elite_var_penalty"] = 0.0
 
         # Backward-compatible columns expected by downstream and debug plots.
-        out["perm_selection_rate"] = pd.to_numeric(out["perm_vote_score_global"], errors="coerce").fillna(0.0)
-        out["drop_selection_rate"] = pd.to_numeric(out["drop_vote_score_global"], errors="coerce").fillna(0.0)
+        out["perm_selection_rate"] = _safe_numeric(out["perm_vote_score_global"])
+        out["drop_selection_rate"] = _safe_numeric(out["drop_vote_score_global"])
         out["forced_by_constraint"] = False
 
         # 채널 불일치 패널티: perm/drop 불일치가 클수록 final_score 감산
@@ -840,9 +851,26 @@ class FeatureSelector:
             dp_scale = float(getattr(self.config, "disagreement_penalty_scale", 0.5))
             disagreement = (out["perm_selection_rate"] - out["drop_selection_rate"]).abs()
             dp_penalty = (disagreement - dp_thr).clip(lower=0.0) * dp_scale
+
+            # L1: Redundancy-aware disagreement dampening
+            # perm이 높지만 drop이 매우 낮은 경우, 변수 간 정보 중복(multicollinearity)으로
+            # drop 테스트가 구조적으로 낮은 점수를 줄 수 있음. 이때 penalty를 감면.
+            rd_enabled = bool(getattr(self.config, "redundancy_dampening_enabled", False))
+            if rd_enabled:
+                rd_perm_floor = float(getattr(self.config, "redundancy_perm_floor", 0.85))
+                rd_drop_ceil = float(getattr(self.config, "redundancy_drop_ceil", 0.40))
+                rd_factor = float(np.clip(getattr(self.config, "redundancy_dampening_factor", 0.5), 0.0, 1.0))
+                redundancy_suspect = (
+                    (out["perm_selection_rate"] >= rd_perm_floor)
+                    & (out["drop_selection_rate"] < rd_drop_ceil)
+                )
+                dampening = np.where(redundancy_suspect, rd_factor, 1.0)
+                dp_penalty = dp_penalty * dampening
+                out["redundancy_suspect"] = redundancy_suspect
+
             out["disagreement"] = disagreement
             out["disagreement_penalty"] = dp_penalty
-            out["final_score"] = (pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0) - dp_penalty).clip(lower=0.0)
+            out["final_score"] = (_safe_numeric(out["final_score"]) - dp_penalty).clip(lower=0.0)
         else:
             out["disagreement"] = (out["perm_selection_rate"] - out["drop_selection_rate"]).abs()
             out["disagreement_penalty"] = 0.0
@@ -880,8 +908,8 @@ class FeatureSelector:
             out["null_q_drop"] = out["feature"].astype(str).map(null_q_drop).astype(float)
 
             # --- 채널별 독립 null penalty ---
-            perm_vote = pd.to_numeric(out["perm_vote_score_global"], errors="coerce").fillna(0.0)
-            drop_vote = pd.to_numeric(out["drop_vote_score_global"], errors="coerce").fillna(0.0)
+            perm_vote = _safe_numeric(out["perm_vote_score_global"])
+            drop_vote = _safe_numeric(out["drop_vote_score_global"])
 
             perm_null_margin = perm_vote - out["null_q_perm"]
             drop_null_margin = drop_vote - out["null_q_drop"]
@@ -905,16 +933,14 @@ class FeatureSelector:
 
             # 기존 결합 null과의 호환: 결합 margin/pass도 기록
             if str(null_apply_to) in ("final_score",):
-                null_target_score = pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0)
+                null_target_score = _safe_numeric(out["final_score"])
             else:
-                null_target_score = pd.to_numeric(out.get("global_score_adj_pre", out["global_score"]), errors="coerce").fillna(0.0)
+                null_target_score = _safe_numeric(out.get("global_score_adj_pre", out["global_score"]))
             out["null_margin"] = null_target_score - out["null_q"]
             out["null_pass"] = (perm_null_margin >= 0.0) | (drop_null_margin >= 0.0)
 
             out["null_penalty"] = channel_penalty
-            out["final_score_adj"] = pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0) - pd.to_numeric(
-                out["null_penalty"], errors="coerce"
-            ).fillna(0.0)
+            out["final_score_adj"] = _safe_numeric(out["final_score"]) - _safe_numeric(out["null_penalty"])
         else:
             out["null_q"] = np.nan
             out["null_q_perm"] = np.nan
@@ -924,7 +950,7 @@ class FeatureSelector:
             out["null_margin_drop"] = np.nan
             out["null_pass"] = True
             out["null_penalty"] = 0.0
-            out["final_score_adj"] = pd.to_numeric(out["final_score"], errors="coerce").fillna(0.0)
+            out["final_score_adj"] = _safe_numeric(out["final_score"])
 
         # --- Perm Vote Variance Penalty (very_low_data 전용, 제안1) ---
         # fold간 perm vote 분산이 높은 feature는 spurious spike 가능성이 높으므로 final_score 감산
@@ -940,11 +966,11 @@ class FeatureSelector:
                 .rename("perm_vote_std_global")
             )
             out = out.merge(perm_vote_std, on="feature", how="left")
-            out["perm_vote_std_global"] = pd.to_numeric(out["perm_vote_std_global"], errors="coerce").fillna(0.0)
+            out["perm_vote_std_global"] = _safe_numeric(out["perm_vote_std_global"])
             pvp_penalty = out["perm_vote_std_global"] * pvp_scale
             out["perm_var_penalty"] = pvp_penalty
             out["final_score_adj"] = (
-                pd.to_numeric(out["final_score_adj"], errors="coerce").fillna(0.0) - pvp_penalty
+                _safe_numeric(out["final_score_adj"]) - pvp_penalty
             ).clip(lower=0.0)
         else:
             out["perm_vote_std_global"] = 0.0
@@ -955,7 +981,7 @@ class FeatureSelector:
         drop_veto_enabled = bool(getattr(self.config, "drop_veto_enabled", False))
         drop_veto_thr = float(getattr(self.config, "drop_veto_threshold", 0.03))
         if drop_veto_enabled and is_very_low_data and bool(self.config.use_score_drop):
-            drop_rate = pd.to_numeric(out.get("drop_selection_rate", out.get("drop_vote_score_global", 0.0)), errors="coerce").fillna(0.0)
+            drop_rate = _safe_numeric(out.get("drop_selection_rate", out.get("drop_vote_score_global", 0.0)))
             out["drop_veto"] = drop_rate < drop_veto_thr
         else:
             out["drop_veto"] = False
@@ -963,7 +989,7 @@ class FeatureSelector:
         tau = float(self.config.final_score_threshold)
         g_floor = float(self.config.global_score_floor)
         base_selected = (
-            (pd.to_numeric(out["final_score_adj"], errors="coerce").fillna(0.0) >= tau)
+            (_safe_numeric(out["final_score_adj"]) >= tau)
             & (global_score >= g_floor)
             & (~out["drop_veto"])
         )
@@ -1010,6 +1036,47 @@ class FeatureSelector:
         else:
             out["selected"] = base_selected
             out["reason"] = np.where(out["selected"], "weighted_vote_pass", "weighted_vote_fail")
+
+        # --- L2: Adaptive Score Gap Filter ---
+        # 선택된 feature 간 final_score_adj의 자연 갭을 탐지하여
+        # 갭 아래의 저점수 feature를 제거 (dummy 과잉 선택 방지)
+        gap_enabled = bool(getattr(self.config, "gap_filter_enabled", False))
+        out["gap_filtered"] = False
+        if gap_enabled:
+            gap_thr = (
+                float(getattr(self.config, "gap_threshold_very_low_data", 0.10))
+                if is_very_low_data
+                else float(getattr(self.config, "gap_threshold_normal", 0.12))
+            )
+            gap_g_floor = float(getattr(self.config, "gap_global_floor", 0.70))
+            gap_min_retain = int(getattr(self.config, "gap_min_retain", 2))
+
+            sel_mask = out["selected"].astype(bool)
+            if sel_mask.sum() > gap_min_retain:
+                sel_rows = out.loc[sel_mask].sort_values("final_score_adj", ascending=False)
+                scores = sel_rows["final_score_adj"].values
+                g_scores = sel_rows["global_score"].values
+                indices = sel_rows.index.tolist()
+
+                # 인접 feature 간 갭 탐색 (내림차순)
+                best_gap_pos = -1
+                best_gap_val = 0.0
+                for i in range(len(scores) - 1):
+                    gap_val = scores[i] - scores[i + 1]
+                    if gap_val > best_gap_val:
+                        best_gap_val = gap_val
+                        best_gap_pos = i
+
+                if best_gap_val >= gap_thr and best_gap_pos >= 0:
+                    # 갭 아래 feature 중 global_score < gap_g_floor인 것만 제거
+                    below_indices = indices[best_gap_pos + 1:]
+                    n_above = best_gap_pos + 1
+                    if n_above >= gap_min_retain:
+                        for idx in below_indices:
+                            if out.loc[idx, "global_score"] < gap_g_floor:
+                                out.loc[idx, "selected"] = False
+                                out.loc[idx, "reason"] = "gap_filter"
+                                out.loc[idx, "gap_filtered"] = True
 
         out = out.sort_values(
             by=["selected", "final_score_adj", "final_score", "global_score", "delta_mean_norm"],

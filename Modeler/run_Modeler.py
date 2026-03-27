@@ -140,6 +140,15 @@ def run_modeler(
         "quantile_top_ratio_p_le_6": config.system.fi_quantile_top_ratio_p_le_6,
         "quantile_top_ratio_p_le_12": config.system.fi_quantile_top_ratio_p_le_12,
         "quantile_top_ratio_p_gt_12": config.system.fi_quantile_top_ratio_p_gt_12,
+        "redundancy_dampening_enabled": config.system.fi_redundancy_dampening_enabled,
+        "redundancy_perm_floor": config.system.fi_redundancy_perm_floor,
+        "redundancy_drop_ceil": config.system.fi_redundancy_drop_ceil,
+        "redundancy_dampening_factor": config.system.fi_redundancy_dampening_factor,
+        "gap_filter_enabled": config.system.fi_gap_filter_enabled,
+        "gap_threshold_very_low_data": config.system.fi_gap_threshold_very_low_data,
+        "gap_threshold_normal": config.system.fi_gap_threshold_normal,
+        "gap_global_floor": config.system.fi_gap_global_floor,
+        "gap_min_retain": config.system.fi_gap_min_retain,
     }
     perm_sample_size = config.system.perm_sample_size
     perm_repeats = config.system.perm_repeats

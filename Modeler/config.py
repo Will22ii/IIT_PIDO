@@ -119,7 +119,7 @@ class ModelerSystemConfig:
     fi_stability_very_low_data_n_threshold: int = 55
     fi_stability_rule_very_low_data: str = "and"
     fi_stability_perm_min_rate_very_low_data: float = 0.60
-    fi_stability_drop_min_rate_very_low_data: float = 0.30
+    fi_stability_drop_min_rate_very_low_data: float = 0.45
     fi_stability_rule_low_data: str = "and"
     fi_stability_perm_min_rate_low_data: float = 0.60
     fi_stability_drop_min_rate_low_data: float = 0.44
@@ -131,7 +131,20 @@ class ModelerSystemConfig:
     # perm/drop 불일치가 클수록 final_score 감산
     fi_disagreement_penalty_enabled: bool = True
     fi_disagreement_threshold: float = 0.25   # 이 이상 불일치면 패널티 시작
-    fi_disagreement_penalty_scale: float = 0.55  # 패널티 강도
+    fi_disagreement_penalty_scale: float = 0.40  # 패널티 강도
+    # Redundancy-aware disagreement dampening (L1)
+    # perm이 높지만 drop이 매우 낮은 경우 (변수 간 정보 중복 의심) disagreement penalty 감면
+    fi_redundancy_dampening_enabled: bool = True
+    fi_redundancy_perm_floor: float = 0.85   # perm_rate >= 이 값
+    fi_redundancy_drop_ceil: float = 0.40    # drop_rate < 이 값
+    fi_redundancy_dampening_factor: float = 0.5  # penalty에 곱할 감면 계수
+    # Adaptive score gap filter (L2)
+    # 선택된 feature 간 점수 갭이 클 때, 갭 아래의 저점수 feature를 제거
+    fi_gap_filter_enabled: bool = True
+    fi_gap_threshold_very_low_data: float = 0.10
+    fi_gap_threshold_normal: float = 0.12
+    fi_gap_global_floor: float = 0.70  # global_score가 이 값 미만인 feature만 제거 대상
+    fi_gap_min_retain: int = 2         # 제거 후 최소 유지 feature 수
     # very_low_data drop veto: drop_rate가 극도로 낮은 feature를 perm 점수와 무관하게 기각
     fi_drop_veto_enabled: bool = True
     fi_drop_veto_threshold: float = 0.03  # 이 미만이면 veto (very_low_data에서만 동작)
@@ -162,7 +175,7 @@ class ModelerSystemConfig:
     fi_null_shuffle_runs_low_data: int = 50
     fi_null_shuffle_runs_normal: int = 30
     # soft penalty 강도(low-data / normal)
-    fi_null_alpha_low_data: float = 0.30
+    fi_null_alpha_low_data: float = 0.45
     fi_null_alpha_normal: float = 0.12
     # null 기준 점수 축: global_score | final_score | both
     # both: global_score에 pre-elite penalty 적용 + 이후 final_score에도 적용
