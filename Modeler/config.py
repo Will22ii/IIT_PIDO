@@ -119,7 +119,7 @@ class ModelerSystemConfig:
     fi_stability_very_low_data_n_threshold: int = 55
     fi_stability_rule_very_low_data: str = "and"
     fi_stability_perm_min_rate_very_low_data: float = 0.60
-    fi_stability_drop_min_rate_very_low_data: float = 0.45
+    fi_stability_drop_min_rate_very_low_data: float = 0.42
     fi_stability_rule_low_data: str = "and"
     fi_stability_perm_min_rate_low_data: float = 0.60
     fi_stability_drop_min_rate_low_data: float = 0.44
@@ -131,7 +131,7 @@ class ModelerSystemConfig:
     # perm/drop 불일치가 클수록 final_score 감산
     fi_disagreement_penalty_enabled: bool = True
     fi_disagreement_threshold: float = 0.25   # 이 이상 불일치면 패널티 시작
-    fi_disagreement_penalty_scale: float = 0.40  # 패널티 강도
+    fi_disagreement_penalty_scale: float = 0.55  # 패널티 강도
     # Redundancy-aware disagreement dampening (L1)
     # perm이 높지만 drop이 매우 낮은 경우 (변수 간 정보 중복 의심) disagreement penalty 감면
     fi_redundancy_dampening_enabled: bool = True
@@ -143,7 +143,7 @@ class ModelerSystemConfig:
     fi_gap_filter_enabled: bool = True
     fi_gap_threshold_very_low_data: float = 0.10
     fi_gap_threshold_normal: float = 0.12
-    fi_gap_global_floor: float = 0.70  # global_score가 이 값 미만인 feature만 제거 대상
+    fi_gap_global_floor: float = 0.65  # global_score가 이 값 미만인 feature만 제거 대상
     fi_gap_min_retain: int = 2         # 제거 후 최소 유지 feature 수
     # very_low_data drop veto: drop_rate가 극도로 낮은 feature를 perm 점수와 무관하게 기각
     fi_drop_veto_enabled: bool = True
@@ -158,9 +158,9 @@ class ModelerSystemConfig:
     # N/p ≤ threshold일 때 bootstrap 서브샘플링으로 feature 선택 안정성 검증
     fi_bootstrap_enabled: bool = True
     fi_bootstrap_np_threshold: float = 10.0   # N/p ≤ 이 값일 때 발동
-    fi_bootstrap_rounds: int = 10             # 반복 횟수
+    fi_bootstrap_rounds: int = 15             # 반복 횟수
     fi_bootstrap_sample_ratio: float = 0.8    # 서브샘플 비율
-    fi_bootstrap_min_freq: float = 0.7        # 최소 선택 빈도 (미만이면 제거)
+    fi_bootstrap_min_freq: float = 0.8        # 최소 선택 빈도 (미만이면 제거)
 
     # -----------------------------
     # 7) FI Null(soft) Gate

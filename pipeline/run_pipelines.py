@@ -74,27 +74,27 @@ PROBLEM_SUITE: list[ProblemCase] = [
 EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
     ExplorerStrategy(
         "S4_dual",
-        {"strategy_params": {"mode": "dual_refine_ei"}},
+        {"strategy_params": {"mode": "dual_refine_ei"}, "bounds_expansion_mode": "fi_aware"},
     ),
     ExplorerStrategy(
         "S8_dual",
-        {"strategy_params": {"mode": "dual_gradient_refine"}},
+        {"strategy_params": {"mode": "dual_gradient_refine"}, "bounds_expansion_mode": "fi_aware"},
     ),
     ExplorerStrategy(
         "S4_pred",
-        {"strategy_params": {"mode": "pred_refine_ei"}},
+        {"strategy_params": {"mode": "pred_refine_ei"}, "bounds_expansion_mode": "fi_aware"},
     ),
     ExplorerStrategy(
         "S8_pred",
-        {"strategy_params": {"mode": "pred_refine_lcb"}},
+        {"strategy_params": {"mode": "pred_refine_lcb"}, "bounds_expansion_mode": "fi_aware"},
     ),
     ExplorerStrategy(
         "S4_obj",
-        {"strategy_params": {"mode": "obj_refine_ei"}},
+        {"strategy_params": {"mode": "obj_refine_ei"}, "bounds_expansion_mode": "fi_aware"},
     ),
     ExplorerStrategy(
         "S8_obj",
-        {"strategy_params": {"mode": "obj_refine_lcb"}},
+        {"strategy_params": {"mode": "obj_refine_lcb"}, "bounds_expansion_mode": "fi_aware"},
     ),
 ]
 
@@ -271,6 +271,7 @@ def _build_strategy_explorer_config(
         doe_metadata_path=base_explorer.doe_metadata_path,
         model_pkl_path=base_explorer.model_pkl_path,
         modeler_metadata_path=base_explorer.modeler_metadata_path,
+        fi_scores_path=base_explorer.fi_scores_path,
     )
 
 

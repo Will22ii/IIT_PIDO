@@ -722,6 +722,7 @@ class FeatureSelector:
             return pd.DataFrame(columns=["feature", "selected"])
 
         out = global_df.copy()
+        p_dim = int(out["feature"].nunique()) if "feature" in out.columns else int(len(out))
         out = out.rename(
             columns={
                 "scale_score": "global_score",
@@ -861,7 +862,8 @@ class FeatureSelector:
                 rd_drop_ceil = float(getattr(self.config, "redundancy_drop_ceil", 0.40))
                 rd_factor = float(np.clip(getattr(self.config, "redundancy_dampening_factor", 0.5), 0.0, 1.0))
                 redundancy_suspect = (
-                    (out["perm_selection_rate"] >= rd_perm_floor)
+                    (p_dim > 8)
+                    & (out["perm_selection_rate"] >= rd_perm_floor)
                     & (out["drop_selection_rate"] < rd_drop_ceil)
                 )
                 dampening = np.where(redundancy_suspect, rd_factor, 1.0)
@@ -1014,9 +1016,25 @@ class FeatureSelector:
         drop_pass = out["drop_selection_rate"] >= drop_thr
 
         if stability_rule == "and":
-            stability_pass = perm_pass & drop_pass
+            base_stability_pass = perm_pass & drop_pass
         else:
-            stability_pass = perm_pass | drop_pass
+            base_stability_pass = perm_pass | drop_pass
+
+        # L3: normal-data에서 high-disagreement이면서 redundancy 의심이 아닌 feature는
+        # stability rule을 row-wise로 강제 AND 적용한다.
+        if "redundancy_suspect" in out.columns:
+            redundancy_suspect = out["redundancy_suspect"].astype(bool)
+        else:
+            redundancy_suspect = pd.Series(False, index=out.index)
+        l3_force_and = pd.Series(False, index=out.index)
+        if not bool(low_data):
+            l3_force_and = (out["disagreement"] > 0.50) & (~redundancy_suspect)
+
+        and_pass = perm_pass & drop_pass
+        stability_pass = pd.Series(
+            np.where(l3_force_and, and_pass, base_stability_pass),
+            index=out.index,
+        ).astype(bool)
 
         out["stability_enabled"] = bool(stability_enabled)
         out["stability_rule"] = str(stability_rule)

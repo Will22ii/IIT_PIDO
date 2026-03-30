@@ -115,10 +115,48 @@ def compute_selected_bounds(
     return selected_bounds, pred_bounds, obj_bounds
 
 
+def compute_fi_importance_weights(
+    *,
+    fi_scores: dict[str, float],
+    selected_features: list[str],
+    clip_min: float = 0.5,
+    clip_max: float = 2.0,
+) -> np.ndarray | None:
+    """FI score 기반 bounds 확장 가중치를 반환한다.
+
+    FI가 높은 feature → 낮은 가중치 (좁힘, 정밀 탐색)
+    FI가 낮은 feature → 높은 가중치 (넓힘, 안전 마진)
+    반환값은 합이 d인 가중치 배열.
+    """
+    if not fi_scores or not selected_features:
+        return None
+
+    d = len(selected_features)
+    scores = np.array(
+        [float(fi_scores.get(f, 0.0)) for f in selected_features],
+        dtype=float,
+    )
+
+    if scores.sum() <= 0.0 or not np.all(np.isfinite(scores)):
+        return None
+
+    # 반전: FI 높으면 가중치 낮게, FI 낮으면 가중치 높게
+    # 제곱근으로 부드럽게 변환 (선형보다 완만한 차등)
+    inv = (1.0 - scores) ** 0.5
+    inv = np.clip(inv, 0.05, 0.95)
+
+    weights = inv / inv.mean()
+    weights = np.clip(weights, float(clip_min), float(clip_max))
+    weights = weights * (float(d) / weights.sum())
+    return weights
+
+
 def compute_gp_boundary_uncertainty(
     *,
     gp_models: list,
     selected_bounds: list[Tuple[float, float]],
+    clip_min: float = 0.5,
+    clip_max: float = 2.0,
 ) -> np.ndarray | None:
     """GP 모델의 경계 불확실성(σ)을 차원별로 측정하여 확장 가중치를 반환한다.
 
@@ -155,7 +193,7 @@ def compute_gp_boundary_uncertainty(
         return None
 
     weights = sigmas / sigmas.mean()
-    weights = np.clip(weights, 0.3, 3.0)
+    weights = np.clip(weights, float(clip_min), float(clip_max))
     weights = weights * (float(d) / weights.sum())
     return weights
 

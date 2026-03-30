@@ -29,6 +29,7 @@ from utils.dbscan_utils import auto_dbscan_eps_quantile
 from DOE.executor.constraint_filter import evaluate_constraints_batch, validate_constraint_defs
 from Explorer.executor.explorer_utils import (
     apply_bounds_margin,
+    compute_fi_importance_weights,
     compute_gp_boundary_uncertainty,
     compute_selected_bounds,
     format_span_rows,
@@ -647,6 +648,13 @@ class ExplorerOrchestrator:
             feature_cols=feature_cols,
             doe_df=doe_df,
         )
+
+        # FI scores path resolve (fi_aware 모드용)
+        fi_scores_path = self.config.fi_scores_path
+        if not fi_scores_path and modeler_task_dir:
+            _candidate = os.path.join(modeler_task_dir, "artifacts", "public", "selected_features.csv")
+            if os.path.exists(_candidate):
+                fi_scores_path = _candidate
 
         raw_constraint_defs = (
             (doe_meta or {}).get("constraint_defs")
@@ -1592,15 +1600,65 @@ class ExplorerOrchestrator:
         vol_ratio = None
 
         if selected_bounds is not None:
-            dim_weights = compute_gp_boundary_uncertainty(
-                gp_models=[gp_pred, gp_obj],
-                selected_bounds=selected_bounds,
-            )
-            if dim_weights is not None:
-                parts = ", ".join(
-                    f"{fn}:{w:.2f}" for fn, w in zip(selected_features, dim_weights)
+            expansion_mode = str(getattr(self.config.system, "bounds_expansion_mode", "uncertainty_aware")).strip().lower()
+            _w_clip_min = float(getattr(self.config.system, "bounds_weight_clip_min", 0.5))
+            _w_clip_max = float(getattr(self.config.system, "bounds_weight_clip_max", 2.0))
+            dim_weights = None
+
+            if expansion_mode == "fi_aware":
+                # FI score 기반 가중치 시도
+                fi_scores = None
+                if fi_scores_path and os.path.exists(fi_scores_path):
+                    try:
+                        _fi_df = pd.read_csv(fi_scores_path)
+                        if "feature" in _fi_df.columns and "final_score_adj" in _fi_df.columns:
+                            fi_scores = dict(zip(
+                                _fi_df["feature"].astype(str),
+                                _fi_df["final_score_adj"].astype(float),
+                            ))
+                    except Exception as exc:
+                        print(f"[Explorer] FI scores 로드 실패: {exc}")
+
+                if fi_scores:
+                    dim_weights = compute_fi_importance_weights(
+                        fi_scores=fi_scores,
+                        selected_features=selected_features,
+                        clip_min=_w_clip_min,
+                        clip_max=_w_clip_max,
+                    )
+                if dim_weights is not None:
+                    parts = ", ".join(
+                        f"{fn}:{w:.2f}" for fn, w in zip(selected_features, dim_weights)
+                    )
+                    print(f"[Explorer] bounds_expansion_mode=fi_aware: {parts}")
+                else:
+                    # fallback to uncertainty_aware
+                    print("[Explorer] fi_aware 모드이나 FI score 없음 → uncertainty_aware로 fallback")
+                    dim_weights = compute_gp_boundary_uncertainty(
+                        gp_models=[gp_pred, gp_obj],
+                        selected_bounds=selected_bounds,
+                        clip_min=_w_clip_min,
+                        clip_max=_w_clip_max,
+                    )
+                    if dim_weights is not None:
+                        parts = ", ".join(
+                            f"{fn}:{w:.2f}" for fn, w in zip(selected_features, dim_weights)
+                        )
+                        print(f"[Explorer] fallback uncertainty_aware: {parts}")
+            else:
+                # default: uncertainty_aware
+                dim_weights = compute_gp_boundary_uncertainty(
+                    gp_models=[gp_pred, gp_obj],
+                    selected_bounds=selected_bounds,
+                    clip_min=_w_clip_min,
+                    clip_max=_w_clip_max,
                 )
-                print(f"[Explorer] uncertainty weights: {parts}")
+                if dim_weights is not None:
+                    parts = ", ".join(
+                        f"{fn}:{w:.2f}" for fn, w in zip(selected_features, dim_weights)
+                    )
+                    print(f"[Explorer] bounds_expansion_mode=uncertainty_aware: {parts}")
+
             selected_bounds = apply_bounds_margin(
                 selected_bounds=selected_bounds,
                 bounds=bounds,
