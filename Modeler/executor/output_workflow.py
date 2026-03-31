@@ -44,13 +44,13 @@ def save_modeler_outputs(
     model_path: str,
     selected_path: str,
     feas_model_path: str | None,
-    processed_path: str,
-    processed_drop_path: str,
-    processed_drop_df: pd.DataFrame,
+    processed_path: str | None,
+    processed_drop_path: str | None,
+    processed_drop_df: pd.DataFrame | None,
     keep_debug: bool,
-    perm_path: str,
-    perm_global_path: str,
-    perm_elite_path: str,
+    perm_path: str | None,
+    perm_global_path: str | None,
+    perm_elite_path: str | None,
     drop_path: str | None,
     drop_global_path: str | None,
     drop_elite_path: str | None,
@@ -113,6 +113,7 @@ def save_modeler_outputs(
         "fi_global_score_floor": float(config_system.fi_global_score_floor),
         "fi_use_score_drop": bool(config_system.fi_use_score_drop),
         "fi_drop_metric": str(config_system.fi_drop_metric),
+        "use_primary_selection": bool(config_system.use_primary_selection),
         "use_secondary_selection": bool(config_user.use_secondary_selection),
         "secondary_target_kr": int(config_system.secondary_target_kr),
         "secondary_min_repeats": int(config_system.secondary_min_repeats),
@@ -135,10 +136,10 @@ def save_modeler_outputs(
     if feas_model_path:
         public_artifacts["feas_model_path"] = os.path.relpath(feas_model_path, task_dir)
 
-    meta_artifacts = {
-        "importance_processed": os.path.relpath(processed_path, task_dir),
-    }
-    if processed_drop_df is not None and not processed_drop_df.empty:
+    meta_artifacts = {}
+    if processed_path:
+        meta_artifacts["importance_processed"] = os.path.relpath(processed_path, task_dir)
+    if processed_drop_df is not None and not processed_drop_df.empty and processed_drop_path:
         meta_artifacts["importance_processed_drop"] = os.path.relpath(
             processed_drop_path,
             task_dir,
@@ -149,15 +150,19 @@ def save_modeler_outputs(
         df_params = pd.DataFrame(
             [{"param": k, "value": v} for k, v in best_params.items()]
         )
-        hpo_params_csv_path = os.path.join(os.path.dirname(processed_path), "hpo_best_params.csv")
+        _hpo_dir = os.path.dirname(processed_path) if processed_path else os.path.join(task_dir, "artifacts", "meta")
+        hpo_params_csv_path = os.path.join(_hpo_dir, "hpo_best_params.csv")
         df_params.to_csv(hpo_params_csv_path, index=False)
         meta_artifacts["hpo_best_params"] = os.path.relpath(hpo_params_csv_path, task_dir)
 
     debug_artifacts = {}
     if keep_debug:
-        debug_artifacts["perm_effect_raw"] = os.path.relpath(perm_path, task_dir)
-        debug_artifacts["perm_effect_raw_global"] = os.path.relpath(perm_global_path, task_dir)
-        debug_artifacts["perm_effect_raw_elite"] = os.path.relpath(perm_elite_path, task_dir)
+        if perm_path and os.path.exists(perm_path):
+            debug_artifacts["perm_effect_raw"] = os.path.relpath(perm_path, task_dir)
+        if perm_global_path and os.path.exists(perm_global_path):
+            debug_artifacts["perm_effect_raw_global"] = os.path.relpath(perm_global_path, task_dir)
+        if perm_elite_path and os.path.exists(perm_elite_path):
+            debug_artifacts["perm_effect_raw_elite"] = os.path.relpath(perm_elite_path, task_dir)
         if drop_path and os.path.exists(drop_path):
             debug_artifacts["score_drop_raw"] = os.path.relpath(drop_path, task_dir)
         if drop_global_path and os.path.exists(drop_global_path):

@@ -43,11 +43,11 @@ def _align_df_schema(
     x1_cols = [f"x{i + 1}" for i in range(len(expected))]
     if all(c in df.columns for c in x0_cols):
         rename_map = {old: new for old, new in zip(x0_cols, expected)}
-        print("- Renaming x_0..x_n columns to variable names from metadata")
+        pass  # x_0..x_n fallback rename
         df = df.rename(columns=rename_map)
     elif all(c in df.columns for c in x1_cols):
         rename_map = {old: new for old, new in zip(x1_cols, expected)}
-        print("- Renaming x1..xn columns to variable names from metadata")
+        pass  # x1..xn fallback rename
         df = df.rename(columns=rename_map)
     else:
         # Fallback for standalone external CSV:
@@ -73,10 +73,6 @@ def _align_df_schema(
         if len(candidate_cols) >= len(expected):
             picked = candidate_cols[: len(expected)]
             rename_map = {old: new for old, new in zip(picked, expected)}
-            print(
-                "- Renaming external feature columns by position: "
-                + ", ".join(f"{o}->{n}" for o, n in rename_map.items())
-            )
             df = df.rename(columns=rename_map)
 
     missing = [c for c in expected if c not in df.columns]
@@ -355,7 +351,7 @@ def prepare_modeler_data_policy(
         f"low_data={cv_policy['low_data']} "
         f"(configured_k={configured_kfold_splits}, configured_r={configured_kfold_repeats})"
     )
-    if bool(cv_policy["low_data"]):
+    if keep_debug and bool(cv_policy["low_data"]):
         print(
             "[Modeler][FI] low-data mode enabled: "
             "SHAP/gain hard-gating is disabled (informational ranking only)."
@@ -368,12 +364,13 @@ def prepare_modeler_data_policy(
         ratio_base=float(system_cfg.fi_elite_ratio_base),
         min_samples=int(system_cfg.fi_elite_min_samples),
     )
-    print(
-        "[Modeler][FI] "
-        f"elite_ratio_eff={elite_ratio_eff:.3f} "
-        f"n_elite={n_elite}/{len(y)} "
-        f"(base={system_cfg.fi_elite_ratio_base}, min={system_cfg.fi_elite_min_samples})"
-    )
+    if keep_debug:
+        print(
+            "[Modeler][FI] "
+            f"elite_ratio_eff={elite_ratio_eff:.3f} "
+            f"n_elite={n_elite}/{len(y)} "
+            f"(base={system_cfg.fi_elite_ratio_base}, min={system_cfg.fi_elite_min_samples})"
+        )
     if keep_debug:
         p_dim = max(int(len(feature_cols)), 1)
         fi_top_ratio = _resolve_fi_quantile_top_ratio(

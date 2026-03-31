@@ -141,9 +141,9 @@ class ModelerSystemConfig:
     # Adaptive score gap filter (L2)
     # 선택된 feature 간 점수 갭이 클 때, 갭 아래의 저점수 feature를 제거
     fi_gap_filter_enabled: bool = True
-    fi_gap_threshold_very_low_data: float = 0.10
+    fi_gap_threshold_very_low_data: float = 0.08
     fi_gap_threshold_normal: float = 0.12
-    fi_gap_global_floor: float = 0.65  # global_score가 이 값 미만인 feature만 제거 대상
+    fi_gap_global_floor: float = 0.75  # global_score가 이 값 미만인 feature만 제거 대상
     fi_gap_min_retain: int = 2         # 제거 후 최소 유지 feature 수
     # very_low_data drop veto: drop_rate가 극도로 낮은 feature를 perm 점수와 무관하게 기각
     fi_drop_veto_enabled: bool = True
@@ -160,7 +160,7 @@ class ModelerSystemConfig:
     fi_bootstrap_np_threshold: float = 10.0   # N/p ≤ 이 값일 때 발동
     fi_bootstrap_rounds: int = 15             # 반복 횟수
     fi_bootstrap_sample_ratio: float = 0.8    # 서브샘플 비율
-    fi_bootstrap_min_freq: float = 0.87       # 최소 선택 빈도 (미만이면 제거)
+    fi_bootstrap_min_freq: float = 0.80       # 최소 선택 빈도 (미만이면 제거)
 
     # -----------------------------
     # 7) FI Null(soft) Gate
@@ -208,8 +208,11 @@ class ModelerSystemConfig:
     debug_level: str = "full"
 
     # -----------------------------
-    # 11) Secondary Selection
+    # 11) Primary / Secondary Selection
     # -----------------------------
+    # Primary Selection 사용 여부 (False이면 FI 전체 스킵, 모든 피쳐로 모델 생성)
+    use_primary_selection: bool = True
+    # Secondary Selection은 user config의 use_secondary_selection으로 제어
     # model1=f(X_primary), model2=f(X_primary+dj)
     # - secondary 후보 dj를 하나씩 추가한 model2와 model1을 같은 CV split에서 비교
     # - delta_r2 = r2(model2) - r2(model1)
@@ -217,6 +220,97 @@ class ModelerSystemConfig:
     secondary_min_repeats: int = 5
     secondary_min_delta_r2: float = 0.0
     secondary_min_freq: float = 0.7
+
+
+def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSelectionConfig":
+    """ModelerSystemConfig → FeatureSelectionConfig 변환."""
+    from Modeler.feature_selection.primary_selection import FeatureSelectionConfig
+
+    return FeatureSelectionConfig(
+        # perm 채널 (접두사 없음)
+        perm_min_pass_rate=system.perm_min_pass_rate,
+        perm_epsilon=system.perm_epsilon,
+        # drop 채널
+        use_score_drop=system.fi_use_score_drop,
+        drop_metric=system.fi_drop_metric,
+        drop_min_pass_rate=system.fi_drop_min_pass_rate,
+        drop_epsilon=system.fi_drop_epsilon,
+        drop_min_pass_rate_very_low_data=system.fi_drop_min_pass_rate_very_low_data,
+        drop_epsilon_very_low_data=system.fi_drop_epsilon_very_low_data,
+        # fold vote weights
+        weight_abs=system.fi_weight_abs,
+        weight_quantile=system.fi_weight_quantile,
+        weight_rank=system.fi_weight_rank,
+        # channel merge weights
+        weight_perm=system.fi_weight_perm,
+        weight_drop=system.fi_weight_drop,
+        weight_perm_low_data=system.fi_weight_perm_low_data,
+        weight_drop_low_data=system.fi_weight_drop_low_data,
+        # scale merge weights
+        weight_global_default=system.fi_weight_global_default,
+        weight_global_low=system.fi_weight_global_low,
+        weight_global_rich=system.fi_weight_global_rich,
+        # elite
+        elite_small_threshold=system.fi_elite_small_threshold,
+        elite_rich_threshold=system.fi_elite_rich_threshold,
+        elite_mode=system.fi_elite_mode,
+        elite_bonus_beta=system.fi_elite_bonus_beta,
+        elite_var_penalty_enabled=system.fi_elite_var_penalty_enabled,
+        elite_var_threshold=system.fi_elite_var_threshold,
+        elite_var_penalty_scale=system.fi_elite_var_penalty_scale,
+        # decision guards
+        final_score_threshold=system.fi_final_score_threshold,
+        global_score_floor=system.fi_global_score_floor,
+        # stability gate
+        stability_enabled=system.fi_stability_enabled,
+        stability_rule=system.fi_stability_rule,
+        stability_very_low_data_n_threshold=system.fi_stability_very_low_data_n_threshold,
+        stability_rule_very_low_data=system.fi_stability_rule_very_low_data,
+        stability_perm_min_rate_very_low_data=system.fi_stability_perm_min_rate_very_low_data,
+        stability_drop_min_rate_very_low_data=system.fi_stability_drop_min_rate_very_low_data,
+        stability_rule_low_data=system.fi_stability_rule_low_data,
+        stability_perm_min_rate_low_data=system.fi_stability_perm_min_rate_low_data,
+        stability_drop_min_rate_low_data=system.fi_stability_drop_min_rate_low_data,
+        stability_rule_normal=system.fi_stability_rule_normal,
+        stability_perm_min_rate_normal=system.fi_stability_perm_min_rate_normal,
+        stability_drop_min_rate_normal=system.fi_stability_drop_min_rate_normal,
+        # disagreement penalty
+        disagreement_penalty_enabled=system.fi_disagreement_penalty_enabled,
+        disagreement_threshold=system.fi_disagreement_threshold,
+        disagreement_penalty_scale=system.fi_disagreement_penalty_scale,
+        # drop veto
+        drop_veto_enabled=system.fi_drop_veto_enabled,
+        drop_veto_threshold=system.fi_drop_veto_threshold,
+        # perm var penalty
+        perm_var_penalty_very_low_data_enabled=system.fi_perm_var_penalty_very_low_data_enabled,
+        perm_var_penalty_very_low_data_scale=system.fi_perm_var_penalty_very_low_data_scale,
+        # redundancy dampening
+        redundancy_dampening_enabled=system.fi_redundancy_dampening_enabled,
+        redundancy_perm_floor=system.fi_redundancy_perm_floor,
+        redundancy_drop_ceil=system.fi_redundancy_drop_ceil,
+        redundancy_dampening_factor=system.fi_redundancy_dampening_factor,
+        # gap filter
+        gap_filter_enabled=system.fi_gap_filter_enabled,
+        gap_threshold_very_low_data=system.fi_gap_threshold_very_low_data,
+        gap_threshold_normal=system.fi_gap_threshold_normal,
+        gap_global_floor=system.fi_gap_global_floor,
+        gap_min_retain=system.fi_gap_min_retain,
+        # null importance
+        null_enabled=system.fi_null_enabled,
+        null_mode=system.fi_null_mode,
+        null_quantile=system.fi_null_quantile,
+        null_shuffle_runs_low_data=system.fi_null_shuffle_runs_low_data,
+        null_shuffle_runs_normal=system.fi_null_shuffle_runs_normal,
+        null_alpha_low_data=system.fi_null_alpha_low_data,
+        null_alpha_normal=system.fi_null_alpha_normal,
+        null_apply_to=system.fi_null_apply_to,
+        null_pre_elite_ratio=system.fi_null_pre_elite_ratio,
+        # quantile policy
+        quantile_top_ratio_default=system.fi_quantile_top_ratio_default,
+        quantile_top_ratio_p_le_6=system.fi_quantile_top_ratio_p_le_6,
+        quantile_top_ratio_p_le_12=system.fi_quantile_top_ratio_p_le_12,
+        quantile_top_ratio_p_gt_12=system.fi_quantile_top_ratio_p_gt_12,
+    )
 
 
 @dataclass

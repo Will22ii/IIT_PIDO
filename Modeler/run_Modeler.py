@@ -32,7 +32,7 @@ from Modeler.feature_selection import (
     run_secondary_selection,
 )
 from utils.result_saver import ResultSaver
-from Modeler.config import ModelerConfig, ModelerSystemConfig, ModelerUserConfig
+from Modeler.config import ModelerConfig, ModelerSystemConfig, ModelerUserConfig, build_feature_selection_config
 from CAE_tool_interface.config import CAEConfig, CAEUserConfig, CAESystemConfig
 from pipeline.run_context import RunContext
 
@@ -72,7 +72,14 @@ def run_modeler(
     model_name = config.user.model_name
     use_hpo = config.user.use_hpo
     target_col = config.user.target_col
+    use_primary_selection = bool(config.system.use_primary_selection)
     use_secondary_selection = bool(config.user.use_secondary_selection)
+    if not use_primary_selection and use_secondary_selection:
+        print(
+            "[Modeler] WARNING: use_secondary_selection=True이지만 "
+            "use_primary_selection=False → Secondary Selection도 비활성화됩니다."
+        )
+        use_secondary_selection = False
     objective_sense = str(cae_objective_sense)
     use_timestamp = (
         config.cae.system.use_timestamp if config.cae is not None else False
@@ -80,76 +87,7 @@ def run_modeler(
     hpo_config = config.system.hpo_config
     configured_kfold_splits = config.system.kfold_splits
     configured_kfold_repeats = config.system.kfold_repeats
-    feature_selection_cfg = {
-        "perm_min_pass_rate": config.system.perm_min_pass_rate,
-        "perm_epsilon": config.system.perm_epsilon,
-        "use_score_drop": config.system.fi_use_score_drop,
-        "drop_metric": config.system.fi_drop_metric,
-        "drop_min_pass_rate": config.system.fi_drop_min_pass_rate,
-        "drop_epsilon": config.system.fi_drop_epsilon,
-        "drop_min_pass_rate_very_low_data": config.system.fi_drop_min_pass_rate_very_low_data,
-        "drop_epsilon_very_low_data": config.system.fi_drop_epsilon_very_low_data,
-        "weight_abs": config.system.fi_weight_abs,
-        "weight_quantile": config.system.fi_weight_quantile,
-        "weight_rank": config.system.fi_weight_rank,
-        "weight_perm": config.system.fi_weight_perm,
-        "weight_drop": config.system.fi_weight_drop,
-        "weight_perm_low_data": config.system.fi_weight_perm_low_data,
-        "weight_drop_low_data": config.system.fi_weight_drop_low_data,
-        "weight_global_default": config.system.fi_weight_global_default,
-        "weight_global_low": config.system.fi_weight_global_low,
-        "weight_global_rich": config.system.fi_weight_global_rich,
-        "elite_small_threshold": config.system.fi_elite_small_threshold,
-        "elite_rich_threshold": config.system.fi_elite_rich_threshold,
-        "elite_mode": config.system.fi_elite_mode,
-        "elite_bonus_beta": config.system.fi_elite_bonus_beta,
-        "elite_var_penalty_enabled": config.system.fi_elite_var_penalty_enabled,
-        "elite_var_threshold": config.system.fi_elite_var_threshold,
-        "elite_var_penalty_scale": config.system.fi_elite_var_penalty_scale,
-        "final_score_threshold": config.system.fi_final_score_threshold,
-        "global_score_floor": config.system.fi_global_score_floor,
-        "stability_enabled": config.system.fi_stability_enabled,
-        "stability_rule": config.system.fi_stability_rule,
-        "stability_very_low_data_n_threshold": config.system.fi_stability_very_low_data_n_threshold,
-        "stability_rule_very_low_data": config.system.fi_stability_rule_very_low_data,
-        "stability_perm_min_rate_very_low_data": config.system.fi_stability_perm_min_rate_very_low_data,
-        "stability_drop_min_rate_very_low_data": config.system.fi_stability_drop_min_rate_very_low_data,
-        "stability_rule_low_data": config.system.fi_stability_rule_low_data,
-        "stability_perm_min_rate_low_data": config.system.fi_stability_perm_min_rate_low_data,
-        "stability_drop_min_rate_low_data": config.system.fi_stability_drop_min_rate_low_data,
-        "stability_rule_normal": config.system.fi_stability_rule_normal,
-        "stability_perm_min_rate_normal": config.system.fi_stability_perm_min_rate_normal,
-        "stability_drop_min_rate_normal": config.system.fi_stability_drop_min_rate_normal,
-        "disagreement_penalty_enabled": config.system.fi_disagreement_penalty_enabled,
-        "disagreement_threshold": config.system.fi_disagreement_threshold,
-        "disagreement_penalty_scale": config.system.fi_disagreement_penalty_scale,
-        "drop_veto_enabled": config.system.fi_drop_veto_enabled,
-        "drop_veto_threshold": config.system.fi_drop_veto_threshold,
-        "perm_var_penalty_very_low_data_enabled": config.system.fi_perm_var_penalty_very_low_data_enabled,
-        "perm_var_penalty_very_low_data_scale": config.system.fi_perm_var_penalty_very_low_data_scale,
-        "null_enabled": config.system.fi_null_enabled,
-        "null_mode": config.system.fi_null_mode,
-        "null_quantile": config.system.fi_null_quantile,
-        "null_shuffle_runs_low_data": config.system.fi_null_shuffle_runs_low_data,
-        "null_shuffle_runs_normal": config.system.fi_null_shuffle_runs_normal,
-        "null_alpha_low_data": config.system.fi_null_alpha_low_data,
-        "null_alpha_normal": config.system.fi_null_alpha_normal,
-        "null_apply_to": config.system.fi_null_apply_to,
-        "null_pre_elite_ratio": config.system.fi_null_pre_elite_ratio,
-        "quantile_top_ratio_default": config.system.fi_quantile_top_ratio_default,
-        "quantile_top_ratio_p_le_6": config.system.fi_quantile_top_ratio_p_le_6,
-        "quantile_top_ratio_p_le_12": config.system.fi_quantile_top_ratio_p_le_12,
-        "quantile_top_ratio_p_gt_12": config.system.fi_quantile_top_ratio_p_gt_12,
-        "redundancy_dampening_enabled": config.system.fi_redundancy_dampening_enabled,
-        "redundancy_perm_floor": config.system.fi_redundancy_perm_floor,
-        "redundancy_drop_ceil": config.system.fi_redundancy_drop_ceil,
-        "redundancy_dampening_factor": config.system.fi_redundancy_dampening_factor,
-        "gap_filter_enabled": config.system.fi_gap_filter_enabled,
-        "gap_threshold_very_low_data": config.system.fi_gap_threshold_very_low_data,
-        "gap_threshold_normal": config.system.fi_gap_threshold_normal,
-        "gap_global_floor": config.system.fi_gap_global_floor,
-        "gap_min_retain": config.system.fi_gap_min_retain,
-    }
+    fs_config = build_feature_selection_config(config.system)
     perm_sample_size = config.system.perm_sample_size
     perm_repeats = config.system.perm_repeats
     debug_level = _normalize_debug_level(config.system.debug_level)
@@ -157,7 +95,6 @@ def run_modeler(
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     if model_name != "xgb" and use_hpo:
-        print("- HPO is XGB-only; disabling HPO for non-XGB model")
         use_hpo = False
 
     data_policy = prepare_modeler_data_policy(
@@ -219,21 +156,6 @@ def run_modeler(
     hpo_n_trials_effective = hpo_result.hpo_n_trials_effective
     hpo_lambda_std_effective = hpo_result.hpo_lambda_std_effective
 
-    trainer = ModelTrainer(
-        base_random_seed=base_seed,
-        target_col=target_col,
-        feature_cols=feature_cols,
-        model_params=best_params,
-        model_name=model_name,
-        kfold_splits=kfold_splits,
-        kfold_repeats=kfold_repeats,
-    )
-
-    train_result = trainer.run(df)
-    models = train_result["models"]
-
-    print(f"- Trained models: {len(models)}")
-
     saver = ResultSaver(use_timestamp=use_timestamp)
     task_dir = os.path.join(run_context.run_root, "Modeler")
     artifacts_root = os.path.join(task_dir, "artifacts")
@@ -244,131 +166,182 @@ def run_modeler(
     os.makedirs(meta_dir, exist_ok=True)
     os.makedirs(debug_dir, exist_ok=True)
 
-    _np_ratio = float(cv_policy.get("np_ratio", float(len(X)) / max(len(feature_cols), 1)))
-    fi_result = run_fi_selection_workflow(
-        models=models,
-        fold_predictions=train_result["fold_predictions"],
-        y_true=train_result["y_true"],
-        X_ref=df[feature_cols].astype(float),
-        elite_mask=elite_mask,
-        problem_name=problem_name,
-        base_seed=base_seed,
-        perm_sample_size=perm_sample_size,
-        perm_repeats=int(perm_repeats),
-        feature_selection_cfg=feature_selection_cfg,
-        use_score_drop=bool(config.system.fi_use_score_drop),
-        low_data=bool(cv_policy["low_data"]),
-        n_features=len(feature_cols),
-        n_elite=int(n_elite),
-        n_samples=len(X),
-        keep_debug=keep_debug,
-        debug_dir=debug_dir,
-        meta_dir=meta_dir,
-        # Bootstrap Stability Selection
-        bootstrap_enabled=bool(config.system.fi_bootstrap_enabled),
-        bootstrap_np_ratio=_np_ratio,
-        bootstrap_np_threshold=float(config.system.fi_bootstrap_np_threshold),
-        bootstrap_rounds=int(config.system.fi_bootstrap_rounds),
-        bootstrap_sample_ratio=float(config.system.fi_bootstrap_sample_ratio),
-        bootstrap_min_freq=float(config.system.fi_bootstrap_min_freq),
-        bootstrap_df=df,
-        bootstrap_target_col=target_col,
-        bootstrap_model_name=model_name,
-        bootstrap_model_params=best_params,
-        bootstrap_kfold_splits=int(kfold_splits),
-        bootstrap_kfold_repeats=int(kfold_repeats),
-        bootstrap_objective_sense=objective_sense,
-        bootstrap_elite_ratio_base=float(config.system.fi_elite_ratio_base),
-        bootstrap_elite_min_samples=int(config.system.fi_elite_min_samples),
-    )
-    selected_df = fi_result.selected_df
-    processed_df = fi_result.processed_df
-    processed_drop_df = fi_result.processed_drop_df
-    processed_path = fi_result.processed_path
-    processed_drop_path = fi_result.processed_drop_path
-    perm_path = fi_result.perm_path
-    perm_global_path = fi_result.perm_global_path
-    perm_elite_path = fi_result.perm_elite_path
-    drop_path = fi_result.drop_path
-    drop_global_path = fi_result.drop_global_path
-    drop_elite_path = fi_result.drop_elite_path
-
-    selection_result = finalize_selected_features(
-        selected_df=selected_df,
-        feature_cols=feature_cols,
-        constraint_defs=constraint_defs,
-        public_dir=public_dir,
-        keep_debug=keep_debug,
-        use_score_drop=bool(config.system.fi_use_score_drop),
-    )
-    primary_selected_df = selection_result.selected_df.copy()
-    selected_df = selection_result.selected_df
-    selected_features = selection_result.selected_features
-    selected_path = selection_result.selected_path
-
-    secondary_diagnostics: list[dict] = []
-    if use_secondary_selection:
-        core_features = list(selected_features)
-        core_set = set(str(f) for f in core_features)
-        secondary_candidates = [
-            f for f in feature_cols
-            if str(f) not in core_set
-        ]
-        df_secondary = df.loc[elite_mask].reset_index(drop=True)
-        print(
-            "[Modeler][Secondary][DATA] "
-            f"N={len(df_secondary)} core={len(core_features)} "
-            f"candidates={len(secondary_candidates)} "
-            f"elite_ratio_eff={float(elite_ratio_eff):.3f}"
-        )
-        secondary_cfg = SecondarySelectionConfig(
-            target_kr=int(config.system.secondary_target_kr),
-            min_repeats=int(config.system.secondary_min_repeats),
-            min_delta_r2=float(config.system.secondary_min_delta_r2),
-            min_freq=float(config.system.secondary_min_freq),
-        )
-        secondary_result = run_secondary_selection(
-            df=df_secondary,
+    # ------------------------------------------------------------------
+    # Feature Selection 분기
+    # ------------------------------------------------------------------
+    if use_primary_selection:
+        # === Primary Selection ON: FI용 학습 → FI 계산 → Primary → (Secondary) ===
+        trainer = ModelTrainer(
+            base_random_seed=base_seed,
             target_col=target_col,
-            base_seed=int(base_seed),
-            model_name=str(model_name),
-            model_params=dict(best_params or {}),
-            kfold_splits=int(kfold_splits),
-            kfold_repeats=int(kfold_repeats),
-            core_features=core_features,
-            candidate_features=secondary_candidates,
-            cfg=secondary_cfg,
+            feature_cols=feature_cols,
+            model_params=best_params,
+            model_name=model_name,
+            kfold_splits=kfold_splits,
+            kfold_repeats=kfold_repeats,
         )
-        selected_df, selected_features = merge_secondary_features(
+        train_result = trainer.run(df)
+        models = train_result["models"]
+        _np_ratio = float(cv_policy.get("np_ratio", float(len(X)) / max(len(feature_cols), 1)))
+        fi_result = run_fi_selection_workflow(
+            models=models,
+            fold_predictions=train_result["fold_predictions"],
+            y_true=train_result["y_true"],
+            X_ref=df[feature_cols].astype(float),
+            elite_mask=elite_mask,
+            problem_name=problem_name,
+            base_seed=base_seed,
+            perm_sample_size=perm_sample_size,
+            perm_repeats=int(perm_repeats),
+            fs_config=fs_config,
+            use_score_drop=bool(config.system.fi_use_score_drop),
+            low_data=bool(cv_policy["low_data"]),
+            n_features=len(feature_cols),
+            n_elite=int(n_elite),
+            n_samples=len(X),
+            keep_debug=keep_debug,
+            debug_dir=debug_dir,
+            meta_dir=meta_dir,
+            # Bootstrap Stability Selection
+            bootstrap_enabled=bool(config.system.fi_bootstrap_enabled),
+            bootstrap_np_ratio=_np_ratio,
+            bootstrap_np_threshold=float(config.system.fi_bootstrap_np_threshold),
+            bootstrap_rounds=int(config.system.fi_bootstrap_rounds),
+            bootstrap_sample_ratio=float(config.system.fi_bootstrap_sample_ratio),
+            bootstrap_min_freq=float(config.system.fi_bootstrap_min_freq),
+            bootstrap_df=df,
+            bootstrap_target_col=target_col,
+            bootstrap_model_name=model_name,
+            bootstrap_model_params=best_params,
+            bootstrap_kfold_splits=int(kfold_splits),
+            bootstrap_kfold_repeats=int(kfold_repeats),
+            bootstrap_objective_sense=objective_sense,
+            bootstrap_elite_ratio_base=float(config.system.fi_elite_ratio_base),
+            bootstrap_elite_min_samples=int(config.system.fi_elite_min_samples),
+        )
+        selected_df = fi_result.selected_df
+        processed_df = fi_result.processed_df
+        processed_drop_df = fi_result.processed_drop_df
+        processed_path = fi_result.processed_path
+        processed_drop_path = fi_result.processed_drop_path
+        perm_path = fi_result.perm_path
+        perm_global_path = fi_result.perm_global_path
+        perm_elite_path = fi_result.perm_elite_path
+        drop_path = fi_result.drop_path
+        drop_global_path = fi_result.drop_global_path
+        drop_elite_path = fi_result.drop_elite_path
+
+        selection_result = finalize_selected_features(
             selected_df=selected_df,
-            selected_features=selected_features,
-            secondary_features=secondary_result.selected_features,
+            feature_cols=feature_cols,
+            constraint_defs=constraint_defs,
+            public_dir=public_dir,
+            keep_debug=keep_debug,
+            use_score_drop=bool(config.system.fi_use_score_drop),
         )
-        secondary_diagnostics = list(secondary_result.diagnostics or [])
+        primary_selected_df = selection_result.selected_df.copy()
+        selected_df = selection_result.selected_df
+        selected_features = selection_result.selected_features
+        selected_path = selection_result.selected_path
+
+        secondary_diagnostics: list[dict] = []
+        if use_secondary_selection:
+            core_features = list(selected_features)
+            core_set = set(str(f) for f in core_features)
+            secondary_candidates = [
+                f for f in feature_cols
+                if str(f) not in core_set
+            ]
+            df_secondary = df.loc[elite_mask].reset_index(drop=True)
+            if keep_debug:
+                print(
+                    "[Modeler][Secondary][DATA] "
+                    f"N={len(df_secondary)} core={len(core_features)} "
+                    f"candidates={len(secondary_candidates)} "
+                    f"elite_ratio_eff={float(elite_ratio_eff):.3f}"
+                )
+            secondary_cfg = SecondarySelectionConfig(
+                target_kr=int(config.system.secondary_target_kr),
+                min_repeats=int(config.system.secondary_min_repeats),
+                min_delta_r2=float(config.system.secondary_min_delta_r2),
+                min_freq=float(config.system.secondary_min_freq),
+            )
+            secondary_result = run_secondary_selection(
+                df=df_secondary,
+                target_col=target_col,
+                base_seed=int(base_seed),
+                model_name=str(model_name),
+                model_params=dict(best_params or {}),
+                kfold_splits=int(kfold_splits),
+                kfold_repeats=int(kfold_repeats),
+                core_features=core_features,
+                candidate_features=secondary_candidates,
+                cfg=secondary_cfg,
+                keep_debug=keep_debug,
+            )
+            selected_df, selected_features = merge_secondary_features(
+                selected_df=selected_df,
+                selected_features=selected_features,
+                secondary_features=secondary_result.selected_features,
+            )
+            secondary_diagnostics = list(secondary_result.diagnostics or [])
+            selected_df.to_csv(selected_path, index=False)
+
+        cleanup_fi_temp_artifacts(
+            keep_debug=keep_debug,
+            perm_path=perm_path,
+            perm_global_path=perm_global_path,
+            perm_elite_path=perm_elite_path,
+            drop_path=drop_path,
+            drop_global_path=drop_global_path,
+            drop_elite_path=drop_elite_path,
+        )
+
+        plot_path, drop_plot_path, compare_plot_path, secondary_plot_path = render_fi_debug_plots(
+            keep_debug=keep_debug,
+            debug_dir=debug_dir,
+            primary_selected_df=primary_selected_df,
+            perm_epsilon=float(config.system.perm_epsilon),
+            drop_epsilon=float(config.system.fi_drop_epsilon),
+            use_score_drop=bool(config.system.fi_use_score_drop),
+            use_secondary_selection=bool(use_secondary_selection),
+            secondary_diagnostics=secondary_diagnostics,
+        )
+        if plot_path:
+            print(f"- Saved feature selection plot: {plot_path}")
+
+    else:
+        # === Primary Selection OFF: 전체 피쳐 사용, FI 스킵 ===
+        import pandas as pd
+
+        print(
+            "[Modeler] Primary Selection OFF → "
+            f"모든 피쳐({len(feature_cols)}개)를 사용하여 모델을 생성합니다."
+        )
+        selected_features = list(feature_cols)
+        selected_df = pd.DataFrame({
+            "feature": feature_cols,
+            "selected": True,
+            "selected_by": "all_features_no_selection",
+        })
+        selected_path = os.path.join(public_dir, "selected_features.csv")
         selected_df.to_csv(selected_path, index=False)
 
-    cleanup_fi_temp_artifacts(
-        keep_debug=keep_debug,
-        perm_path=perm_path,
-        perm_global_path=perm_global_path,
-        perm_elite_path=perm_elite_path,
-        drop_path=drop_path,
-        drop_global_path=drop_global_path,
-        drop_elite_path=drop_elite_path,
-    )
-
-    plot_path, drop_plot_path, compare_plot_path, secondary_plot_path = render_fi_debug_plots(
-        keep_debug=keep_debug,
-        debug_dir=debug_dir,
-        primary_selected_df=primary_selected_df,
-        perm_epsilon=float(config.system.perm_epsilon),
-        drop_epsilon=float(config.system.fi_drop_epsilon),
-        use_score_drop=bool(config.system.fi_use_score_drop),
-        use_secondary_selection=bool(use_secondary_selection),
-        secondary_diagnostics=secondary_diagnostics,
-    )
-    if plot_path:
-        print(f"- Saved feature selection plot: {plot_path}")
+        # FI 관련 아티팩트 없음
+        processed_df = None
+        processed_drop_df = None
+        processed_path = None
+        processed_drop_path = None
+        perm_path = None
+        perm_global_path = None
+        perm_elite_path = None
+        drop_path = None
+        drop_global_path = None
+        drop_elite_path = None
+        plot_path = None
+        drop_plot_path = None
+        compare_plot_path = None
+        secondary_plot_path = None
 
     artifact_result = train_and_save_model_artifacts(
         df=df,
@@ -401,7 +374,7 @@ def run_modeler(
         doe_meta=doe_meta or {},
         selected_df=selected_df,
         selected_features=selected_features,
-        models_count=len(models),
+        models_count=int(kfold_splits) * int(kfold_repeats),
         kfold_splits=int(kfold_splits),
         kfold_repeats=int(kfold_repeats),
         cv_policy=cv_policy,

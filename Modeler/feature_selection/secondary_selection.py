@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import math
 
 import numpy as np
@@ -104,6 +105,38 @@ def _rank_selected_features(diagnostics: list[dict]) -> list[str]:
     return passed_df["feature"].astype(str).tolist()
 
 
+def _fail_diagnostic(
+    feature: str,
+    fail_reason: str,
+    *,
+    min_delta_r2: float,
+    min_freq: float,
+    target_kr: int,
+    min_repeats: int,
+    k_eff: int,
+    r_eff: int,
+) -> dict:
+    return {
+        "feature": feature,
+        "mean_delta_r2": float("-inf"),
+        "var_delta_r2": float("inf"),
+        "std_delta_r2": float("nan"),
+        "freq": 0.0,
+        "mean_r2_model1": float("nan"),
+        "mean_r2_model2": float("nan"),
+        "n_pairs": 0,
+        "gate_min_delta_r2": min_delta_r2,
+        "gate_min_freq": min_freq,
+        "gate_target_kr": int(target_kr),
+        "gate_min_repeats": int(min_repeats),
+        "oof_k_used": int(k_eff),
+        "oof_r_used": int(r_eff),
+        "passed": False,
+        "fail_reason": fail_reason,
+        "test_available": False,
+    }
+
+
 def run_secondary_selection(
     *,
     df: pd.DataFrame,
@@ -116,6 +149,7 @@ def run_secondary_selection(
     core_features: list[str],
     candidate_features: list[str],
     cfg: SecondarySelectionConfig,
+    keep_debug: bool = False,
 ) -> SecondarySelectionResult:
     diagnostics: list[dict] = []
     if len(core_features) == 0 or len(candidate_features) == 0:
@@ -137,15 +171,23 @@ def run_secondary_selection(
     r_eff = max(int(kfold_repeats), min_repeats, r_from_target)
     kr_eff = int(k_eff * r_eff)
 
-    print(
-        "[Modeler][Secondary] "
-        f"enabled=True core={len(core_features)} candidates={len(candidate_features)} "
-        f"metric=delta_r2(model2-model1) gate(mean>={min_delta_r2:.6f}, freq>={min_freq:.3f})"
+    fail = partial(
+        _fail_diagnostic,
+        min_delta_r2=min_delta_r2, min_freq=min_freq,
+        target_kr=target_kr, min_repeats=min_repeats,
+        k_eff=k_eff, r_eff=r_eff,
     )
-    print(
-        "[Modeler][Secondary][CV] "
-        f"k={k_eff} r_base={int(kfold_repeats)} r_eff={r_eff} target_kr={target_kr} kr_eff={kr_eff}"
-    )
+
+    if keep_debug:
+        print(
+            "[Modeler][Secondary] "
+            f"enabled=True core={len(core_features)} candidates={len(candidate_features)} "
+            f"metric=delta_r2(model2-model1) gate(mean>={min_delta_r2:.6f}, freq>={min_freq:.3f})"
+        )
+        print(
+            "[Modeler][Secondary][CV] "
+            f"k={k_eff} r_base={int(kfold_repeats)} r_eff={r_eff} target_kr={target_kr} kr_eff={kr_eff}"
+        )
 
     try:
         base_trainer = ModelTrainer(
@@ -160,27 +202,7 @@ def run_secondary_selection(
         base_out = base_trainer.run(df)
     except Exception as exc:  # noqa: BLE001
         for feature in candidate_features:
-            diagnostics.append(
-                {
-                    "feature": str(feature),
-                    "mean_delta_r2": float("-inf"),
-                    "var_delta_r2": float("inf"),
-                    "std_delta_r2": float("nan"),
-                    "freq": 0.0,
-                    "mean_r2_model1": float("nan"),
-                    "mean_r2_model2": float("nan"),
-                    "n_pairs": 0,
-                    "gate_min_delta_r2": min_delta_r2,
-                    "gate_min_freq": min_freq,
-                    "gate_target_kr": int(target_kr),
-                    "gate_min_repeats": int(min_repeats),
-                    "oof_k_used": int(k_eff),
-                    "oof_r_used": int(r_eff),
-                    "passed": False,
-                    "fail_reason": f"model1_train_error:{type(exc).__name__}",
-                    "test_available": False,
-                }
-            )
+            diagnostics.append(fail(str(feature), f"model1_train_error:{type(exc).__name__}"))
         return SecondarySelectionResult(selected_features=[], diagnostics=diagnostics)
 
     y_true = np.asarray(base_out.get("y_true", []), dtype=float).reshape(-1)
@@ -190,27 +212,7 @@ def run_secondary_selection(
     for feature in candidate_features:
         feature_s = str(feature)
         if feature_s not in df.columns:
-            diagnostics.append(
-                {
-                    "feature": feature_s,
-                    "mean_delta_r2": float("-inf"),
-                    "var_delta_r2": float("inf"),
-                    "std_delta_r2": float("nan"),
-                    "freq": 0.0,
-                    "mean_r2_model1": float("nan"),
-                    "mean_r2_model2": float("nan"),
-                    "n_pairs": 0,
-                    "gate_min_delta_r2": min_delta_r2,
-                    "gate_min_freq": min_freq,
-                    "gate_target_kr": int(target_kr),
-                    "gate_min_repeats": int(min_repeats),
-                    "oof_k_used": int(k_eff),
-                    "oof_r_used": int(r_eff),
-                    "passed": False,
-                    "fail_reason": "missing_feature_column",
-                    "test_available": False,
-                }
-            )
+            diagnostics.append(fail(feature_s, "missing_feature_column"))
             continue
 
         try:
@@ -225,107 +227,27 @@ def run_secondary_selection(
             )
             cand_out = cand_trainer.run(df)
         except Exception as exc:  # noqa: BLE001
-            diagnostics.append(
-                {
-                    "feature": feature_s,
-                    "mean_delta_r2": float("-inf"),
-                    "var_delta_r2": float("inf"),
-                    "std_delta_r2": float("nan"),
-                    "freq": 0.0,
-                    "mean_r2_model1": float("nan"),
-                    "mean_r2_model2": float("nan"),
-                    "n_pairs": 0,
-                    "gate_min_delta_r2": min_delta_r2,
-                    "gate_min_freq": min_freq,
-                    "gate_target_kr": int(target_kr),
-                    "gate_min_repeats": int(min_repeats),
-                    "oof_k_used": int(k_eff),
-                    "oof_r_used": int(r_eff),
-                    "passed": False,
-                    "fail_reason": f"candidate_train_error:{type(exc).__name__}",
-                    "test_available": False,
-                }
-            )
+            diagnostics.append(fail(feature_s, f"candidate_train_error:{type(exc).__name__}"))
             continue
 
         cand_fold_predictions = list(cand_out.get("fold_predictions", []))
         cand_y_true = np.asarray(cand_out.get("y_true", []), dtype=float).reshape(-1)
         if cand_y_true.shape != y_true.shape or not np.allclose(cand_y_true, y_true, equal_nan=True):
-            diagnostics.append(
-                {
-                    "feature": feature_s,
-                    "mean_delta_r2": float("-inf"),
-                    "var_delta_r2": float("inf"),
-                    "std_delta_r2": float("nan"),
-                    "freq": 0.0,
-                    "mean_r2_model1": float("nan"),
-                    "mean_r2_model2": float("nan"),
-                    "n_pairs": 0,
-                    "gate_min_delta_r2": min_delta_r2,
-                    "gate_min_freq": min_freq,
-                    "gate_target_kr": int(target_kr),
-                    "gate_min_repeats": int(min_repeats),
-                    "oof_k_used": int(k_eff),
-                    "oof_r_used": int(r_eff),
-                    "passed": False,
-                    "fail_reason": "y_alignment_mismatch",
-                    "test_available": False,
-                }
-            )
+            diagnostics.append(fail(feature_s, "y_alignment_mismatch"))
             continue
 
         if not _is_same_fold_layout(
             fold_predictions_a=base_fold_predictions,
             fold_predictions_b=cand_fold_predictions,
         ):
-            diagnostics.append(
-                {
-                    "feature": feature_s,
-                    "mean_delta_r2": float("-inf"),
-                    "var_delta_r2": float("inf"),
-                    "std_delta_r2": float("nan"),
-                    "freq": 0.0,
-                    "mean_r2_model1": float("nan"),
-                    "mean_r2_model2": float("nan"),
-                    "n_pairs": 0,
-                    "gate_min_delta_r2": min_delta_r2,
-                    "gate_min_freq": min_freq,
-                    "gate_target_kr": int(target_kr),
-                    "gate_min_repeats": int(min_repeats),
-                    "oof_k_used": int(k_eff),
-                    "oof_r_used": int(r_eff),
-                    "passed": False,
-                    "fail_reason": "fold_layout_mismatch",
-                    "test_available": False,
-                }
-            )
+            diagnostics.append(fail(feature_s, "fold_layout_mismatch"))
             continue
 
         cand_fold_r2 = _fold_r2_from_predictions(y_true=y_true, fold_predictions=cand_fold_predictions)
         pair_ok = np.isfinite(base_fold_r2) & np.isfinite(cand_fold_r2)
         n_pairs = int(np.sum(pair_ok))
         if n_pairs <= 0:
-            diagnostics.append(
-                {
-                    "feature": feature_s,
-                    "mean_delta_r2": float("-inf"),
-                    "var_delta_r2": float("inf"),
-                    "std_delta_r2": float("nan"),
-                    "freq": 0.0,
-                    "mean_r2_model1": float("nan"),
-                    "mean_r2_model2": float("nan"),
-                    "n_pairs": 0,
-                    "gate_min_delta_r2": min_delta_r2,
-                    "gate_min_freq": min_freq,
-                    "gate_target_kr": int(target_kr),
-                    "gate_min_repeats": int(min_repeats),
-                    "oof_k_used": int(k_eff),
-                    "oof_r_used": int(r_eff),
-                    "passed": False,
-                    "fail_reason": "no_valid_fold_pair",
-                    "test_available": False,
-                }
-            )
+            diagnostics.append(fail(feature_s, "no_valid_fold_pair"))
             continue
 
         r2_1 = base_fold_r2[pair_ok]
@@ -370,20 +292,22 @@ def run_secondary_selection(
         }
         diagnostics.append(diag)
 
-        print(
-            "[Modeler][Secondary] "
-            f"feature={feature_s} mean_delta_r2={mean_delta:.6f} freq={freq:.3f} var={var_delta:.6f} "
-            f"r2_1={mean_r2_1:.6f} r2_2={mean_r2_2:.6f} "
-            f"pairs={n_pairs} pass={passed} reason={fail_reason}"
-        )
+        if keep_debug:
+            print(
+                "[Modeler][Secondary] "
+                f"feature={feature_s} mean_delta_r2={mean_delta:.6f} freq={freq:.3f} var={var_delta:.6f} "
+                f"r2_1={mean_r2_1:.6f} r2_2={mean_r2_2:.6f} "
+                f"pairs={n_pairs} pass={passed} reason={fail_reason}"
+            )
 
-    for d in diagnostics:
-        if d.get("test_available", False):
-            continue
-        print(
-            "[Modeler][Secondary] "
-            f"feature={d.get('feature')} pass=False reason={d.get('fail_reason')}"
-        )
+    if keep_debug:
+        for d in diagnostics:
+            if d.get("test_available", False):
+                continue
+            print(
+                "[Modeler][Secondary] "
+                f"feature={d.get('feature')} pass=False reason={d.get('fail_reason')}"
+            )
 
     selected = _rank_selected_features(diagnostics)
     print(

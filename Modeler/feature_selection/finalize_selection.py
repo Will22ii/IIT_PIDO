@@ -213,20 +213,21 @@ def finalize_selected_features(
     selected_path = os.path.join(public_dir, "selected_features.csv")
     selected_df.to_csv(selected_path, index=False)
 
-    for _, row in selected_df.iterrows():
-        feat = str(row.get("feature"))
-        perm_rate = float(row.get("perm_selection_rate", 0.0))
-        perm_pass = bool(row.get("perm_selected", False))
-        drop_rate = float(row.get("drop_selection_rate", 0.0))
-        drop_pass = bool(row.get("drop_selected", False))
-        final_pass = bool(row.get("selected", False))
-        print(
-            "[FI] "
-            f"feature={feat} "
-            f"perm_rate={perm_rate:.3f} perm_pass={perm_pass} "
-            f"drop_rate={drop_rate:.3f} drop_pass={drop_pass} "
-            f"final={final_pass}"
-        )
+    if keep_debug:
+        for _, row in selected_df.iterrows():
+            feat = str(row.get("feature"))
+            perm_rate = float(row.get("perm_selection_rate", 0.0))
+            perm_pass = bool(row.get("perm_selected", False))
+            drop_rate = float(row.get("drop_selection_rate", 0.0))
+            drop_pass = bool(row.get("drop_selected", False))
+            final_pass = bool(row.get("selected", False))
+            print(
+                "[FI] "
+                f"feature={feat} "
+                f"perm_rate={perm_rate:.3f} perm_pass={perm_pass} "
+                f"drop_rate={drop_rate:.3f} drop_pass={drop_pass} "
+                f"final={final_pass}"
+            )
 
     print(
         f"- Selected features ({len(selected_features)}/{len(feature_cols)}): "

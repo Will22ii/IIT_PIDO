@@ -34,7 +34,7 @@ def _run_bootstrap_and_filter(
     kfold_repeats: int,
     perm_sample_size: int,
     perm_repeats: int,
-    feature_selection_cfg: dict[str, Any],
+    fs_config: "FeatureSelectionConfig",
     use_score_drop: bool,
     low_data: bool,
     problem_name: str,
@@ -52,7 +52,7 @@ def _run_bootstrap_and_filter(
     all_features = list(selected_df["feature"].astype(str))
     freq = {f: 0 for f in all_features}
 
-    print(f"[Bootstrap] N/p 기준 발동: rounds={n_rounds}, sample={n_sub}/{n_total}, min_freq={min_freq}")
+    print(f"[Bootstrap] rounds={n_rounds}, sample={n_sub}/{n_total}, min_freq={min_freq}")
 
     for r_idx in range(n_rounds):
         seed_r = base_seed + 7000 + r_idx
@@ -135,7 +135,7 @@ def _run_bootstrap_and_filter(
         perm_g = perm_global.get("perm_effect_raw", pd.DataFrame())
         perm_e = perm_elite.get("perm_effect_raw", pd.DataFrame())
 
-        selector = FeatureSelector(FeatureSelectionConfig(**feature_selection_cfg))
+        selector = FeatureSelector(fs_config)
         try:
             sub_result = selector.run(
                 perm_effect_df=perm_g,
@@ -209,7 +209,7 @@ def run_fi_selection_workflow(
     base_seed: int,
     perm_sample_size: int,
     perm_repeats: int = 1,
-    feature_selection_cfg: dict[str, Any],
+    fs_config: "FeatureSelectionConfig",
     use_score_drop: bool,
     low_data: bool,
     n_features: int,
@@ -239,7 +239,7 @@ def run_fi_selection_workflow(
         perm_sample_size=perm_sample_size,
         perm_repeats=int(perm_repeats),
     )
-    elite_mode = _normalize_elite_mode(feature_selection_cfg.get("elite_mode", "bonus"))
+    elite_mode = _normalize_elite_mode(fs_config.elite_mode)
     use_elite_scale = elite_mode != "off"
 
     importance_global = analyzer.run_perm_effect(
@@ -271,7 +271,8 @@ def run_fi_selection_workflow(
     else:
         importance_elite = {"perm_effect_raw": pd.DataFrame()}
         perm_imp_df = importance_global.get("perm_effect_raw", pd.DataFrame()).copy()
-        print("[Modeler][FI-ELITE] elite_mode=off -> skip elite permutation importance")
+        if keep_debug:
+            print("[Modeler][FI-ELITE] elite_mode=off -> skip elite permutation importance")
 
     drop_imp_df = pd.DataFrame()
     if bool(use_score_drop):
@@ -305,11 +306,10 @@ def run_fi_selection_workflow(
             )
         else:
             drop_imp_df = drop_global.get("score_drop_raw", pd.DataFrame()).copy()
-            print("[Modeler][FI-ELITE] elite_mode=off -> skip elite score-drop importance")
+            if keep_debug:
+                print("[Modeler][FI-ELITE] elite_mode=off -> skip elite score-drop importance")
 
-    selector = FeatureSelector(
-        FeatureSelectionConfig(**feature_selection_cfg)
-    )
+    selector = FeatureSelector(fs_config)
 
     perm_global_df = perm_imp_df.loc[
         perm_imp_df["scale"].astype(str) == "global"
@@ -401,7 +401,7 @@ def run_fi_selection_workflow(
             kfold_repeats=int(bootstrap_kfold_repeats),
             perm_sample_size=int(perm_sample_size),
             perm_repeats=int(perm_repeats),
-            feature_selection_cfg=feature_selection_cfg,
+            fs_config=fs_config,
             use_score_drop=bool(use_score_drop),
             low_data=bool(low_data),
             problem_name=problem_name,
