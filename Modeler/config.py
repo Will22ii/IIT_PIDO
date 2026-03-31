@@ -160,7 +160,7 @@ class ModelerSystemConfig:
     fi_bootstrap_np_threshold: float = 10.0   # N/p ≤ 이 값일 때 발동
     fi_bootstrap_rounds: int = 15             # 반복 횟수
     fi_bootstrap_sample_ratio: float = 0.8    # 서브샘플 비율
-    fi_bootstrap_min_freq: float = 0.8        # 최소 선택 빈도 (미만이면 제거)
+    fi_bootstrap_min_freq: float = 0.87       # 최소 선택 빈도 (미만이면 제거)
 
     # -----------------------------
     # 7) FI Null(soft) Gate
