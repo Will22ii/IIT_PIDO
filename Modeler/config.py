@@ -143,7 +143,7 @@ class ModelerSystemConfig:
     fi_gap_filter_enabled: bool = True
     fi_gap_threshold_very_low_data: float = 0.08
     fi_gap_threshold_normal: float = 0.12
-    fi_gap_global_floor: float = 0.75  # global_score가 이 값 미만인 feature만 제거 대상
+    fi_gap_global_floor: float = 0.80  # global_score가 이 값 미만인 feature만 제거 대상
     fi_gap_min_retain: int = 2         # 제거 후 최소 유지 feature 수
     # very_low_data drop veto: drop_rate가 극도로 낮은 feature를 perm 점수와 무관하게 기각
     fi_drop_veto_enabled: bool = True
@@ -160,7 +160,7 @@ class ModelerSystemConfig:
     fi_bootstrap_np_threshold: float = 10.0   # N/p ≤ 이 값일 때 발동
     fi_bootstrap_rounds: int = 15             # 반복 횟수
     fi_bootstrap_sample_ratio: float = 0.8    # 서브샘플 비율
-    fi_bootstrap_min_freq: float = 0.80       # 최소 선택 빈도 (미만이면 제거)
+    fi_bootstrap_min_freq: float = 0.73       # 최소 선택 빈도 (미만이면 제거)
 
     # -----------------------------
     # 7) FI Null(soft) Gate

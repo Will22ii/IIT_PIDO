@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from typing import List, Dict
+from typing import Generator, List, Dict
 from sklearn.metrics import r2_score
 
 
@@ -29,55 +29,25 @@ class ImportanceAnalyzer:
         scale_label: str = "global",
     ) -> Dict[str, pd.DataFrame]:
         rows = []
-        model_by_run = {i: m for i, m in enumerate(models)}
-        mask = None
-        if subset_mask is not None:
-            mask = np.asarray(subset_mask, dtype=bool).reshape(-1)
-            if mask.shape[0] != len(X_ref):
-                raise RuntimeError(
-                    f"subset_mask length mismatch: {mask.shape[0]} != {len(X_ref)}"
-                )
-        for fold_item in fold_predictions:
-            run_id = int(fold_item["run_id"])
-            valid_idx = np.asarray(fold_item["valid_idx"], dtype=int)
-            if valid_idx.size == 0:
-                continue
-            if np.max(valid_idx) >= len(X_ref):
-                continue
-            model = model_by_run.get(run_id)
-            if model is None:
-                continue
-
-            rng = np.random.default_rng(
-                None if random_seed is None else random_seed + run_id
-            )
-            X_num = self._prepare_input(model, X_ref)
-            valid_use = valid_idx
-            if mask is not None:
-                valid_use = valid_idx[mask[valid_idx]]
-            if valid_use.size < 2:
-                continue
-            if self.perm_sample_size is not None and valid_use.size > int(self.perm_sample_size):
-                valid_use = np.sort(
-                    rng.choice(valid_use, size=int(self.perm_sample_size), replace=False)
-                )
-            X_valid = X_num.iloc[valid_use]
-            base = X_valid.to_numpy()
-            if base.shape[0] == 0:
-                continue
-            columns = list(X_valid.columns)
-            pred_base = np.asarray(model.predict(base), dtype=float).reshape(-1)
-
+        for run_id, rng, model, _valid_idx, _valid_use, _X_num, _X_valid, base_arr, columns, _fold_item, _mask in self._iter_fold_setup(
+            models=models,
+            fold_predictions=fold_predictions,
+            X_ref=X_ref,
+            random_seed=random_seed,
+            subset_mask=subset_mask,
+            apply_perm_sample_size=True,
+        ):
+            pred_base = np.asarray(model.predict(base_arr), dtype=float).reshape(-1)
             for idx, col in enumerate(columns):
                 if self.perm_repeats <= 1:
-                    X_perm = base.copy()
+                    X_perm = base_arr.copy()
                     X_perm[:, idx] = rng.permutation(X_perm[:, idx])
                     pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
                     delta = float(np.mean((pred_base - pred_perm) ** 2))
                 else:
                     deltas_k = []
                     for _ in range(self.perm_repeats):
-                        X_perm = base.copy()
+                        X_perm = base_arr.copy()
                         X_perm[:, idx] = rng.permutation(X_perm[:, idx])
                         pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
                         deltas_k.append(float(np.mean((pred_base - pred_perm) ** 2)))
@@ -113,43 +83,23 @@ class ImportanceAnalyzer:
         scale_label: str = "global",
     ) -> Dict[str, pd.DataFrame]:
         rows = []
-
-        model_by_run = {i: m for i, m in enumerate(models)}
-        mask = None
-        if subset_mask is not None:
-            mask = np.asarray(subset_mask, dtype=bool).reshape(-1)
-            if mask.shape[0] != len(X_ref):
-                raise RuntimeError(
-                    f"subset_mask length mismatch: {mask.shape[0]} != {len(X_ref)}"
-                )
-        for fold_item in fold_predictions:
-            run_id = int(fold_item["run_id"])
-            valid_idx = np.asarray(fold_item["valid_idx"], dtype=int)
-            if valid_idx.size == 0:
-                continue
-            if np.max(valid_idx) >= len(X_ref):
-                # split indices are based on full X_ref; skip if subsampled index mismatch
-                continue
-            model = model_by_run.get(run_id)
-            if model is None:
-                continue
-            rng = np.random.default_rng(
-                None if random_seed is None else random_seed + run_id
-            )
-            X_num = self._prepare_input(model, X_ref)
-            valid_use = valid_idx
-            if mask is not None:
-                valid_use = valid_idx[mask[valid_idx]]
-            if valid_use.size < 2:
-                continue
-            X_valid = X_num.iloc[valid_use]
+        for run_id, rng, model, valid_idx, valid_use, X_num, X_valid, base_arr, columns, fold_item, mask in self._iter_fold_setup(
+            models=models,
+            fold_predictions=fold_predictions,
+            X_ref=X_ref,
+            random_seed=random_seed,
+            subset_mask=subset_mask,
+            apply_perm_sample_size=False,
+        ):
             y_valid = np.asarray(y_true, dtype=float)[valid_use]
             if y_valid.size < 2:
                 continue
 
             base_pred = np.asarray(fold_item.get("y_pred", []), dtype=float).reshape(-1)
-            if base_pred.size != np.asarray(valid_idx, dtype=int).size:
-                base_pred = np.asarray(model.predict(X_num.iloc[valid_idx].to_numpy()), dtype=float).reshape(-1)
+            if base_pred.size != valid_idx.size:
+                base_pred = np.asarray(
+                    model.predict(X_num.iloc[valid_idx].to_numpy()), dtype=float
+                ).reshape(-1)
             if mask is not None:
                 base_pred = base_pred[mask[valid_idx]]
             if base_pred.size != y_valid.size:
@@ -159,8 +109,6 @@ class ImportanceAnalyzer:
             except Exception:
                 continue
 
-            base_arr = X_valid.to_numpy()
-            columns = list(X_valid.columns)
             for idx, col in enumerate(columns):
                 if self.perm_repeats <= 1:
                     X_perm = base_arr.copy()
@@ -225,6 +173,64 @@ class ImportanceAnalyzer:
     # =================================================
     # Internal helpers
     # =================================================
+
+    def _iter_fold_setup(
+        self,
+        *,
+        models: List,
+        fold_predictions: List[dict],
+        X_ref: pd.DataFrame,
+        random_seed: int | None,
+        subset_mask: np.ndarray | None,
+        apply_perm_sample_size: bool,
+    ) -> Generator:
+        """Yield per-fold setup data shared by both importance methods.
+
+        Yields
+        ------
+        run_id, rng, model, valid_idx, valid_use, X_num, X_valid, base_arr, columns, fold_item, mask
+        """
+        model_by_run = {i: m for i, m in enumerate(models)}
+        mask = None
+        if subset_mask is not None:
+            mask = np.asarray(subset_mask, dtype=bool).reshape(-1)
+            if mask.shape[0] != len(X_ref):
+                raise RuntimeError(
+                    f"subset_mask length mismatch: {mask.shape[0]} != {len(X_ref)}"
+                )
+        for fold_item in fold_predictions:
+            run_id = int(fold_item["run_id"])
+            valid_idx = np.asarray(fold_item["valid_idx"], dtype=int)
+            if valid_idx.size == 0:
+                continue
+            if np.max(valid_idx) >= len(X_ref):
+                continue
+            model = model_by_run.get(run_id)
+            if model is None:
+                continue
+            rng = np.random.default_rng(
+                None if random_seed is None else random_seed + run_id
+            )
+            X_num = self._prepare_input(model, X_ref)
+            valid_use = valid_idx
+            if mask is not None:
+                valid_use = valid_idx[mask[valid_idx]]
+            if valid_use.size < 2:
+                continue
+            if (
+                apply_perm_sample_size
+                and self.perm_sample_size is not None
+                and valid_use.size > int(self.perm_sample_size)
+            ):
+                valid_use = np.sort(
+                    rng.choice(valid_use, size=int(self.perm_sample_size), replace=False)
+                )
+            X_valid = X_num.iloc[valid_use]
+            base_arr = X_valid.to_numpy()
+            if base_arr.shape[0] == 0:
+                continue
+            columns = list(X_valid.columns)
+            yield run_id, rng, model, valid_idx, valid_use, X_num, X_valid, base_arr, columns, fold_item, mask
 
     def _prepare_input(self, model, X: pd.DataFrame) -> pd.DataFrame:
         # keep only the features used by the model (and in correct order)
