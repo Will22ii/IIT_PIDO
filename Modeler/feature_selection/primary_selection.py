@@ -117,6 +117,7 @@ class FeatureSelector:
         n_features: int | None = None,
         n_elite: int | None = None,
         n_samples: int | None = None,
+        keep_debug: bool = False,
     ) -> Dict[str, pd.DataFrame]:
         _ = problem_name
 
@@ -171,6 +172,32 @@ class FeatureSelector:
             float(getattr(self.config, "drop_min_pass_rate_very_low_data", self.config.drop_min_pass_rate))
             if is_very_low_data else float(self.config.drop_min_pass_rate)
         )
+
+        if keep_debug:
+            w_abs_n, w_q_n, w_r_n = self._normalize_vote_weights()
+            w_perm_n, w_drop_n = self._resolve_channel_weights(low_data=bool(low_data))
+            elite_mode_dbg = self._normalize_elite_mode(self.config.elite_mode)
+            beta_dbg = float(np.clip(float(self.config.elite_bonus_beta), 0.0, 1.0)) if elite_mode_dbg == "bonus" else 0.0
+            wg_dbg, we_dbg = self._resolve_scale_weights(low_data=bool(low_data), n_elite=int(n_elite or 0))
+            print(
+                "[Modeler][FI-POLICY] "
+                f"perm_eps={self.config.perm_epsilon:.3f} "
+                f"drop_eps={eff_drop_epsilon:.3f} "
+                f"tau={self.config.final_score_threshold:.3f} "
+                f"global_floor={self.config.global_score_floor:.3f} "
+                f"top_ratio={top_ratio:.2f}"
+            )
+            print(
+                "[Modeler][FI-ELITE] "
+                f"mode={elite_mode_dbg} "
+                f"bonus_beta={beta_dbg:.2f}"
+            )
+            print(
+                "[Modeler][FI-WEIGHT] "
+                f"fold(abs/q/r)={w_abs_n:.2f}/{w_q_n:.2f}/{w_r_n:.2f} "
+                f"channel(perm/drop)={w_perm_n:.2f}/{w_drop_n:.2f} "
+                f"scale(global/elite)={wg_dbg:.2f}/{we_dbg:.2f}"
+            )
 
         perm_proc_g, perm_sum_g = self._score_channel(
             raw=perm_global_raw,

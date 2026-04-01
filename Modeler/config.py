@@ -143,7 +143,7 @@ class ModelerSystemConfig:
     fi_gap_filter_enabled: bool = True
     fi_gap_threshold_very_low_data: float = 0.08
     fi_gap_threshold_normal: float = 0.12
-    fi_gap_global_floor: float = 0.80  # global_score가 이 값 미만인 feature만 제거 대상
+    fi_gap_global_floor: float = 0.79  # global_score가 이 값 미만인 feature만 제거 대상
     fi_gap_min_retain: int = 2         # 제거 후 최소 유지 feature 수
     # very_low_data drop veto: drop_rate가 극도로 낮은 feature를 perm 점수와 무관하게 기각
     fi_drop_veto_enabled: bool = True

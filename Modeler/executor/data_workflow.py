@@ -195,34 +195,6 @@ def _build_elite_mask(
     return mask, int(n_elite), float(ratio)
 
 
-def _resolve_fi_quantile_top_ratio(
-    *,
-    low_data: bool,
-    p_dim: int,
-    system_cfg: ModelerSystemConfig,
-) -> float:
-    if not bool(low_data):
-        return float(np.clip(system_cfg.fi_quantile_top_ratio_default, 0.05, 1.0))
-    if p_dim <= 6:
-        return float(np.clip(system_cfg.fi_quantile_top_ratio_p_le_6, 0.05, 1.0))
-    if p_dim <= 12:
-        return float(np.clip(system_cfg.fi_quantile_top_ratio_p_le_12, 0.05, 1.0))
-    return float(np.clip(system_cfg.fi_quantile_top_ratio_p_gt_12, 0.05, 1.0))
-
-
-def _normalize_pair_weights(a: float, b: float) -> tuple[float, float]:
-    denom = float(a) + float(b)
-    if denom <= 0.0:
-        return 1.0, 0.0
-    return float(a) / denom, float(b) / denom
-
-
-def _normalize_triplet_weights(a: float, b: float, c: float) -> tuple[float, float, float]:
-    denom = float(a) + float(b) + float(c)
-    if denom <= 0.0:
-        return 1.0, 0.0, 0.0
-    return float(a) / denom, float(b) / denom, float(c) / denom
-
 
 def prepare_modeler_data_policy(
     *,
@@ -371,55 +343,6 @@ def prepare_modeler_data_policy(
             f"n_elite={n_elite}/{len(y)} "
             f"(base={system_cfg.fi_elite_ratio_base}, min={system_cfg.fi_elite_min_samples})"
         )
-    if keep_debug:
-        p_dim = max(int(len(feature_cols)), 1)
-        fi_top_ratio = _resolve_fi_quantile_top_ratio(
-            low_data=bool(cv_policy["low_data"]),
-            p_dim=p_dim,
-            system_cfg=system_cfg,
-        )
-        w_abs_n, w_q_n, w_r_n = _normalize_triplet_weights(
-            float(system_cfg.fi_weight_abs),
-            float(system_cfg.fi_weight_quantile),
-            float(system_cfg.fi_weight_rank),
-        )
-        w_drop_raw = float(system_cfg.fi_weight_drop) if bool(system_cfg.fi_use_score_drop) else 0.0
-        w_perm_n, w_drop_n = _normalize_pair_weights(
-            float(system_cfg.fi_weight_perm),
-            w_drop_raw,
-        )
-        elite_mode = str(getattr(system_cfg, "fi_elite_mode", "bonus")).strip().lower()
-        if elite_mode not in {"blend", "bonus", "off"}:
-            elite_mode = "bonus"
-        elite_bonus_beta = float(np.clip(float(getattr(system_cfg, "fi_elite_bonus_beta", 0.3)), 0.0, 1.0))
-        if bool(cv_policy["low_data"]) or int(n_elite) < int(system_cfg.fi_elite_small_threshold):
-            w_global = float(system_cfg.fi_weight_global_low)
-        elif int(n_elite) >= int(system_cfg.fi_elite_rich_threshold):
-            w_global = float(system_cfg.fi_weight_global_rich)
-        else:
-            w_global = float(system_cfg.fi_weight_global_default)
-        w_global = float(np.clip(w_global, 0.0, 1.0))
-        w_elite = float(np.clip(1.0 - w_global, 0.0, 1.0))
-        print(
-            "[Modeler][FI-POLICY] "
-            f"perm_eps={system_cfg.perm_epsilon:.3f} "
-            f"drop_eps={system_cfg.fi_drop_epsilon:.3f} "
-            f"tau={system_cfg.fi_final_score_threshold:.3f} "
-            f"global_floor={system_cfg.fi_global_score_floor:.3f} "
-            f"top_ratio={fi_top_ratio:.2f}"
-        )
-        print(
-            "[Modeler][FI-ELITE] "
-            f"mode={elite_mode} "
-            f"bonus_beta={elite_bonus_beta:.2f}"
-        )
-        print(
-            "[Modeler][FI-WEIGHT] "
-            f"fold(abs/q/r)={w_abs_n:.2f}/{w_q_n:.2f}/{w_r_n:.2f} "
-            f"channel(perm/drop)={w_perm_n:.2f}/{w_drop_n:.2f} "
-            f"scale(global/elite)={w_global:.2f}/{w_elite:.2f}"
-        )
-
     return ModelerDataPolicyResult(
         df=df,
         df_all_for_feas=df_all_for_feas,

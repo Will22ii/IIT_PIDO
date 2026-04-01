@@ -89,7 +89,7 @@ class ImportanceAnalyzer:
             X_ref=X_ref,
             random_seed=random_seed,
             subset_mask=subset_mask,
-            apply_perm_sample_size=False,
+            apply_perm_sample_size=True,
         ):
             y_valid = np.asarray(y_true, dtype=float)[valid_use]
             if y_valid.size < 2:

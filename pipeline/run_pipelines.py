@@ -47,11 +47,23 @@ PROBLEM_SUITE: list[ProblemCase] = [
         repeats=10,
     ),
     ProblemCase(
+        problem_name="rosenbrock_nodummy",
+        known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
+        n_samples=450,
+        repeats=10,
+    ),
+    ProblemCase(
         problem_name="cantilever_beam",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         n_samples=90,
         repeats=25,
 
+    ),
+    ProblemCase(
+        problem_name="cantilever_beam_nodummy",
+        known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
+        n_samples=90,
+        repeats=25,
     ),
     ProblemCase(
         problem_name="goldstein_price",
@@ -60,7 +72,22 @@ PROBLEM_SUITE: list[ProblemCase] = [
         repeats=50,
     ),
     ProblemCase(
+        problem_name="goldstein_price_nodummy",
+        known_optimum={"x1": 0.0, "x2": -1.0},
+        n_samples=150,
+        repeats=50,
+    ),
+    ProblemCase(
         problem_name="six_hump_camel",
+        known_optimum=[
+            {"x1": 0.0898, "x2": -0.7126},
+            {"x1": -0.0898, "x2": 0.7126},
+        ],
+        n_samples=50,
+        repeats=25,
+    ),
+    ProblemCase(
+        problem_name="six_hump_camel_nodummy",
         known_optimum=[
             {"x1": 0.0898, "x2": -0.7126},
             {"x1": -0.0898, "x2": 0.7126},

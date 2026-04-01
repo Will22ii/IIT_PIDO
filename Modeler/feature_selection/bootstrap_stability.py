@@ -43,6 +43,7 @@ def run_bootstrap_stability(
     all_features = list(selected_df["feature"].astype(str))
     freq = {f: 0 for f in all_features}
 
+    use_elite_scale = str(fs_config.elite_mode).strip().lower() != "off"
     print(f"[Bootstrap] rounds={n_rounds}, sample={n_sub}/{n_total}, min_freq={min_freq}")
 
     for r_idx in range(n_rounds):
@@ -87,15 +88,18 @@ def run_bootstrap_stability(
             subset_mask=None,
             scale_label="global",
         )
-        perm_elite = analyzer.run_perm_effect(
-            models=sub_models,
-            fold_predictions=train_result["fold_predictions"],
-            X_ref=sub_df[feature_cols].astype(float),
-            problem_name=problem_name,
-            random_seed=seed_r,
-            subset_mask=elite_mask_sub,
-            scale_label="elite",
-        )
+        if use_elite_scale:
+            perm_elite = analyzer.run_perm_effect(
+                models=sub_models,
+                fold_predictions=train_result["fold_predictions"],
+                X_ref=sub_df[feature_cols].astype(float),
+                problem_name=problem_name,
+                random_seed=seed_r,
+                subset_mask=elite_mask_sub,
+                scale_label="elite",
+            )
+        else:
+            perm_elite = {"perm_effect_raw": pd.DataFrame()}
 
         drop_global_df_sub = None
         drop_elite_df_sub = None
@@ -110,18 +114,19 @@ def run_bootstrap_stability(
                 subset_mask=None,
                 scale_label="global",
             )
-            drop_e = analyzer.run_score_drop(
-                models=sub_models,
-                fold_predictions=train_result["fold_predictions"],
-                X_ref=sub_df[feature_cols].astype(float),
-                y_true=train_result["y_true"],
-                problem_name=problem_name,
-                random_seed=seed_r,
-                subset_mask=elite_mask_sub,
-                scale_label="elite",
-            )
             drop_global_df_sub = drop_g.get("score_drop_raw", pd.DataFrame())
-            drop_elite_df_sub = drop_e.get("score_drop_raw", pd.DataFrame())
+            if use_elite_scale:
+                drop_e = analyzer.run_score_drop(
+                    models=sub_models,
+                    fold_predictions=train_result["fold_predictions"],
+                    X_ref=sub_df[feature_cols].astype(float),
+                    y_true=train_result["y_true"],
+                    problem_name=problem_name,
+                    random_seed=seed_r,
+                    subset_mask=elite_mask_sub,
+                    scale_label="elite",
+                )
+                drop_elite_df_sub = drop_e.get("score_drop_raw", pd.DataFrame())
 
         perm_g = perm_global.get("perm_effect_raw", pd.DataFrame())
         perm_e = perm_elite.get("perm_effect_raw", pd.DataFrame())
@@ -138,6 +143,7 @@ def run_bootstrap_stability(
                 n_features=len(feature_cols),
                 n_elite=int(n_elite_sub),
                 n_samples=int(n_sub),
+                keep_debug=False,
             )
         except Exception:
             continue

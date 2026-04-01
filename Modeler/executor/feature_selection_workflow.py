@@ -215,6 +215,7 @@ def run_fi_selection_workflow(
         n_features=int(n_features),
         n_elite=int(n_elite),
         n_samples=int(n_samples),
+        keep_debug=keep_debug,
     )
     processed_df = selection_result["importance_processed_pred"]
     processed_drop_df = selection_result.get("importance_processed_drop", pd.DataFrame())

@@ -3,6 +3,8 @@
 import os
 import sys
 
+import pandas as pd
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -312,8 +314,6 @@ def run_modeler(
 
     else:
         # === Primary Selection OFF: 전체 피쳐 사용, FI 스킵 ===
-        import pandas as pd
-
         print(
             "[Modeler] Primary Selection OFF → "
             f"모든 피쳐({len(feature_cols)}개)를 사용하여 모델을 생성합니다."

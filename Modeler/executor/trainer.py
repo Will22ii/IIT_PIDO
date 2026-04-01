@@ -2,7 +2,6 @@
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional
 
 from Modeler.executor.splitter import FixedKFoldSplitter
 from Modeler.Models.registry import get_model_class
@@ -23,8 +22,8 @@ class ModelTrainer:
         *,
         base_random_seed: int,
         target_col: str,
-        feature_cols: Optional[List[str]] = None,
-        model_params: Optional[Dict] = None,   # ✅ HPO 결과 주입
+        feature_cols: list[str] | None = None,
+        model_params: dict | None = None,  # HPO 결과 주입
         model_name: str = "xgb",
         kfold_splits: int = 5,
         kfold_repeats: int = 1,
@@ -49,7 +48,7 @@ class ModelTrainer:
     # Main entry
     # -------------------------------------------------
 
-    def run(self, df: pd.DataFrame) -> Dict:
+    def run(self, df: pd.DataFrame) -> dict:
         """
         Execute K-Fold training.
 
@@ -80,7 +79,7 @@ class ModelTrainer:
         # -----------------------------
         # Containers
         # -----------------------------
-        models: List = []
+        models: list = []
         fold_predictions = []
         oof_sum = np.zeros(len(df), dtype=float)
         oof_count = np.zeros(len(df), dtype=int)
@@ -90,8 +89,6 @@ class ModelTrainer:
         # -----------------------------
         for run_id, train_idx, valid_idx in self.splitter.split(X):
             model_seed = self.splitter.get_model_seed(run_id)
-
-
             model_cls = get_model_class(self.model_name)
             model = model_cls(
                 **self.model_params,
