@@ -27,7 +27,7 @@ class ExplorerSystemConfig:
     # 선택 경계 마진 기본 계수 (adaptive: m = base * (min_v - raw_v) / min_v, raw_v>=min_v면 off)
     bounds_margin_ratio: float = 0.03
     # 선택 경계 최소 부피비(역마진 floor). raw/final volume이 이 값보다 작으면 확장 시도
-    bounds_min_volume_ratio: float = 0.25
+    bounds_min_volume_ratio: float = 0.24
     # bounds 확장 모드: "uncertainty_aware" (GP σ 기반) | "fi_aware" (FI score 기반, fallback: GP σ)
     bounds_expansion_mode: str = "uncertainty_aware"
     # fi_aware / uncertainty_aware 차원별 가중치 clip 범위 [min, max]
