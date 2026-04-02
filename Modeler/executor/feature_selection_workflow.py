@@ -255,7 +255,7 @@ def run_fi_selection_workflow(
             n_samples=int(n_samples),
             rescue_global_floor=float(fs_config.fi_bootstrap_rescue_global_floor),
             rescue_very_low_data_only=bool(fs_config.fi_bootstrap_rescue_very_low_data_only),
-            very_low_data_n_threshold=int(fs_config.fi_stability_very_low_data_n_threshold),
+            very_low_data_n_threshold=int(fs_config.stability_very_low_data_n_threshold),
         )
 
     processed_path = os.path.join(meta_dir, "importance_processed.csv")
