@@ -35,6 +35,10 @@ def run_bootstrap_stability(
     objective_sense: str,
     elite_ratio_base: float,
     elite_min_samples: int,
+    n_samples: int = 0,
+    rescue_global_floor: float = 0.0,
+    rescue_very_low_data_only: bool = True,
+    very_low_data_n_threshold: int = 55,
 ) -> pd.DataFrame:
     """Bootstrap Stability Selection: 서브샘플 K회 반복 → 선택 빈도 < min_freq인 feature 제거."""
     rng = np.random.default_rng(base_seed + 9999)
@@ -159,15 +163,28 @@ def run_bootstrap_stability(
     freq_series = out["feature"].astype(str).map(lambda f: freq.get(f, 0) / valid_rounds)
     out["bootstrap_freq"] = freq_series.values
 
+    # very_low_data 구제 적용 여부 판정
+    is_very_low = bool(low_data) and int(n_samples) < int(very_low_data_n_threshold)
+    rescue_active = float(rescue_global_floor) > 0 and (
+        not rescue_very_low_data_only or is_very_low
+    )
+
     removed = []
+    rescued = []
     for idx, row in out.iterrows():
         if row["selected"] and row["bootstrap_freq"] < min_freq:
+            gs = float(row.get("global_score", 0.0))
+            if rescue_active and gs >= float(rescue_global_floor):
+                rescued.append(f"{row['feature']}(freq={row['bootstrap_freq']:.2f},gs={gs:.3f})")
+                continue
             out.at[idx, "selected"] = False
             out.at[idx, "reason"] = "bootstrap_stability_fail"
             removed.append(f"{row['feature']}(freq={row['bootstrap_freq']:.2f})")
+    if rescued:
+        print(f"[Bootstrap] rescued (global_score >= {rescue_global_floor}): {', '.join(rescued)}")
     if removed:
         print(f"[Bootstrap] removed: {', '.join(removed)}")
-    else:
+    elif not rescued:
         print("[Bootstrap] all selected features passed stability check")
 
     return out

@@ -90,6 +90,9 @@ class FeatureSelectionConfig:
     null_alpha_normal: float = 0.12
     null_apply_to: str = "both"
     null_pre_elite_ratio: float = 0.5
+    # bootstrap rescue (very_low_data)
+    fi_bootstrap_rescue_global_floor: float = 0.75
+    fi_bootstrap_rescue_very_low_data_only: bool = True
     # quantile policy
     quantile_top_ratio_default: float = 0.30
     quantile_top_ratio_p_le_6: float = 0.50

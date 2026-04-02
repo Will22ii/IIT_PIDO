@@ -194,6 +194,7 @@ def _build_pipeline_config(
     run_explorer: bool,
     use_additional: bool,
     use_hpo: bool,
+    use_primary_selection: bool,
     use_timestamp: bool,
 ) -> PipelineConfig:
     cae_cfg = CAEConfig(
@@ -221,7 +222,9 @@ def _build_pipeline_config(
             use_hpo=bool(use_hpo),
             use_secondary_selection=False,
         ),
-        system=ModelerSystemConfig(),
+        system=ModelerSystemConfig(
+            use_primary_selection=bool(use_primary_selection),
+        ),
         cae=cae_cfg,
         doe_csv_path=None,
         doe_metadata_path=None,
@@ -444,11 +447,7 @@ def _save_explorer_stats_csv(
                 modeler_all_real_only_pct=("modeler_all_real_only_num", "mean"),
                 modeler_real_coverage_pct_mean=("modeler_real_coverage_pct", "mean"),
                 volume_ratio_pct_mean=("volume_ratio_pct", "mean"),
-                volume_ratio_pct_std=("volume_ratio_pct", "std"),
-                volume_ratio_pct_min=("volume_ratio_pct", "min"),
-                volume_ratio_pct_max=("volume_ratio_pct", "max"),
                 joint_pass_pct=("joint_pass", "mean"),
-                joint_pass_std=("joint_pass", "std"),
                 volume_cap_pass_pct=("volume_cap_pass", "mean"),
                 over_shrink_fail_pct=("over_shrink_fail", "mean"),
                 over_wide_fail_pct=("over_wide_fail", "mean"),
@@ -462,21 +461,33 @@ def _save_explorer_stats_csv(
         grouped["over_shrink_fail_pct"] = grouped["over_shrink_fail_pct"] * 100.0
         grouped["over_wide_fail_pct"] = grouped["over_wide_fail_pct"] * 100.0
         grouped["both_fail_pct"] = grouped["both_fail_pct"] * 100.0
+        grouped = grouped[
+            [
+                "strategy",
+                "problem",
+                "tries",
+                "joint_pass_pct",
+                "survivor_optimum_included_pct",
+                "modeler_all_real_only_pct",
+                "modeler_real_coverage_pct_mean",
+                "volume_ratio_pct_mean",
+                "volume_cap_pass_pct",
+                "over_shrink_fail_pct",
+                "over_wide_fail_pct",
+                "both_fail_pct",
+            ]
+        ]
     else:
         grouped = pd.DataFrame(
             columns=[
                 "strategy",
                 "problem",
                 "tries",
+                "joint_pass_pct",
                 "survivor_optimum_included_pct",
                 "modeler_all_real_only_pct",
                 "modeler_real_coverage_pct_mean",
                 "volume_ratio_pct_mean",
-                "volume_ratio_pct_std",
-                "volume_ratio_pct_min",
-                "volume_ratio_pct_max",
-                "joint_pass_pct",
-                "joint_pass_std",
                 "volume_cap_pass_pct",
                 "over_shrink_fail_pct",
                 "over_wide_fail_pct",
@@ -579,6 +590,11 @@ def main() -> None:
     )
     parser.add_argument("--no-additional", action="store_true", help="Disable DOE additional mode.")
     parser.add_argument("--no-hpo", action="store_true", help="Disable Modeler HPO.")
+    parser.add_argument(
+        "--no-primary-selection",
+        action="store_true",
+        help="Disable Modeler primary selection (FI) and use all features.",
+    )
     parser.add_argument("--no-timestamp", action="store_true", help="Disable timestamp in CAE/system config.")
     parser.add_argument("--skip-doe", action="store_true", help="Skip DOE stage.")
     parser.add_argument("--skip-modeler", action="store_true", help="Skip Modeler stage.")
@@ -601,6 +617,7 @@ def main() -> None:
     run_explorer = not bool(args.skip_explorer)
     use_additional = not bool(args.no_additional)
     use_hpo = not bool(args.no_hpo)
+    use_primary_selection = not bool(args.no_primary_selection)
     use_timestamp = not bool(args.no_timestamp)
     explorer_strategies = _resolve_requested_strategies(args.explorer_strategies)
 
@@ -619,7 +636,8 @@ def main() -> None:
     print("===================================")
     print(
         f"- repeats={repeats} total_runs={total_runs} "
-        f"tasks(doe/modeler/explorer)={run_doe}/{run_modeler}/{run_explorer}"
+        f"tasks(doe/modeler/explorer)={run_doe}/{run_modeler}/{run_explorer} "
+        f"modeler(primary_selection)={use_primary_selection}"
     )
     print(
         "- problem_repeats="
@@ -652,6 +670,7 @@ def main() -> None:
                 run_explorer=False,
                 use_additional=use_additional,
                 use_hpo=use_hpo,
+                use_primary_selection=use_primary_selection,
                 use_timestamp=use_timestamp,
             )
 

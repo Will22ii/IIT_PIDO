@@ -161,6 +161,9 @@ class ModelerSystemConfig:
     fi_bootstrap_rounds: int = 15             # 반복 횟수
     fi_bootstrap_sample_ratio: float = 0.8    # 서브샘플 비율
     fi_bootstrap_min_freq: float = 0.73       # 최소 선택 빈도 (미만이면 제거)
+    # very_low_data 구제: bootstrap_freq < min_freq여도 global_score가 이 값 이상이면 유지
+    fi_bootstrap_rescue_global_floor: float = 0.75
+    fi_bootstrap_rescue_very_low_data_only: bool = True  # very_low_data에서만 구제 적용
 
     # -----------------------------
     # 7) FI Null(soft) Gate
@@ -306,6 +309,9 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         null_apply_to=system.fi_null_apply_to,
         null_pre_elite_ratio=system.fi_null_pre_elite_ratio,
         # quantile policy
+        # bootstrap rescue
+        fi_bootstrap_rescue_global_floor=system.fi_bootstrap_rescue_global_floor,
+        fi_bootstrap_rescue_very_low_data_only=system.fi_bootstrap_rescue_very_low_data_only,
         quantile_top_ratio_default=system.fi_quantile_top_ratio_default,
         quantile_top_ratio_p_le_6=system.fi_quantile_top_ratio_p_le_6,
         quantile_top_ratio_p_le_12=system.fi_quantile_top_ratio_p_le_12,
