@@ -1,8 +1,0 @@
-﻿sig,n_total,n_six_hump,succ_cantilever,succ_goldstein,succ_rosenbrock,succ_six_hump,fi_gap_threshold_very_low_data,fi_gap_global_floor,fi_bootstrap_min_freq,fi_null_alpha_low_data,fi_stability_drop_min_rate_very_low_data,fi_disagreement_penalty_scale,fi_drop_veto_threshold,fi_final_score_threshold,fi_global_score_floor,fi_perm_var_penalty_very_low_data_scale,fi_null_quantile
-1f193ab0fd,110,25,100.0,98.0,90.0,92.0,0.08,0.8,0.73,0.45,0.42,0.55,0.03,0.55,0.25,0.2,0.85
-638b47df2a,208,38,100.0,98.0,100.0,86.8421052631579,0.1,0.65,0.87,0.45,0.42,0.55,0.03,0.55,0.25,0.2,0.85
-3f14493c75,220,50,100.0,95.0,100.0,86.0,0.1,0.7,0.7,0.45,0.45,0.4,0.03,0.55,0.25,0.2,0.85
-584a7dead8,110,25,100.0,100.0,100.0,84.0,0.08,0.79,0.73,0.45,0.42,0.55,0.03,0.55,0.25,0.2,0.85
-9a2fbf510b,110,25,100.0,98.0,100.0,84.0,0.08,0.75,0.8,0.45,0.42,0.55,0.03,0.55,0.25,0.2,0.85
-77f4bb9079,330,75,100.0,98.66666666666667,100.0,82.66666666666667,0.1,0.65,0.8,0.45,0.42,0.55,0.03,0.55,0.25,0.2,0.85
-6ae1a6108d,330,75,100.0,97.33333333333334,90.0,76.0,,,0.7,0.3,0.3,0.55,0.03,0.55,0.25,0.2,0.85
