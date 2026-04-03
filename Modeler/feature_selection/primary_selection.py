@@ -91,7 +91,7 @@ class FeatureSelectionConfig:
     null_apply_to: str = "both"
     null_pre_elite_ratio: float = 0.5
     # bootstrap rescue (very_low_data)
-    fi_bootstrap_rescue_global_floor: float = 0.75
+    fi_bootstrap_rescue_global_floor: float = 0.83
     fi_bootstrap_rescue_very_low_data_only: bool = True
     # quantile policy
     quantile_top_ratio_default: float = 0.30
@@ -1103,28 +1103,27 @@ class FeatureSelector:
             if sel_mask.sum() > gap_min_retain:
                 sel_rows = out.loc[sel_mask].sort_values("final_score_adj", ascending=False)
                 scores = sel_rows["final_score_adj"].values
-                g_scores = sel_rows["global_score"].values
                 indices = sel_rows.index.tolist()
 
-                # 인접 feature 간 갭 탐색 (내림차순)
-                best_gap_pos = -1
-                best_gap_val = 0.0
+                # 인접 feature 간 갭 탐색.
+                # 기존에는 "최대 gap 1개"만 사용해 gap_min_retain 조건과 충돌 시
+                # 유효한 컷이 있어도 필터가 동작하지 않는 경우가 있었다.
+                candidate_gaps: list[tuple[int, float]] = []
                 for i in range(len(scores) - 1):
                     gap_val = scores[i] - scores[i + 1]
-                    if gap_val > best_gap_val:
-                        best_gap_val = gap_val
-                        best_gap_pos = i
+                    n_above = i + 1
+                    if gap_val >= gap_thr and n_above >= gap_min_retain:
+                        candidate_gaps.append((i, float(gap_val)))
 
-                if best_gap_val >= gap_thr and best_gap_pos >= 0:
+                if candidate_gaps:
+                    best_gap_pos, _best_gap_val = max(candidate_gaps, key=lambda x: x[1])
                     # 갭 아래 feature 중 global_score < gap_g_floor인 것만 제거
                     below_indices = indices[best_gap_pos + 1:]
-                    n_above = best_gap_pos + 1
-                    if n_above >= gap_min_retain:
-                        for idx in below_indices:
-                            if out.loc[idx, "global_score"] < gap_g_floor:
-                                out.loc[idx, "selected"] = False
-                                out.loc[idx, "reason"] = "gap_filter"
-                                out.loc[idx, "gap_filtered"] = True
+                    for idx in below_indices:
+                        if out.loc[idx, "global_score"] < gap_g_floor:
+                            out.loc[idx, "selected"] = False
+                            out.loc[idx, "reason"] = "gap_filter"
+                            out.loc[idx, "gap_filtered"] = True
 
         out = out.sort_values(
             by=["selected", "final_score_adj", "final_score", "global_score", "delta_mean_norm"],

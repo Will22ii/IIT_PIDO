@@ -168,20 +168,38 @@ def run_bootstrap_stability(
     rescue_active = float(rescue_global_floor) > 0 and (
         not rescue_very_low_data_only or is_very_low
     )
+    # Rescue는 "핵심 상위 feature"로 제한한다.
+    # global_score 상위 gap_min_retain개(기본 2개) 안에서만 low-frequency 구제를 허용하여
+    # dummy 과구제를 줄이고 core feature 보존을 우선한다.
+    rescue_core_k = int(max(int(getattr(fs_config, "gap_min_retain", 2)), 1))
+    rank_series = (
+        out["global_score"].rank(method="first", ascending=False)
+        if "global_score" in out.columns
+        else pd.Series(np.arange(1, len(out) + 1), index=out.index, dtype=float)
+    )
+    out["bootstrap_rescue_core"] = rank_series <= float(rescue_core_k)
 
     removed = []
     rescued = []
     for idx, row in out.iterrows():
         if row["selected"] and row["bootstrap_freq"] < min_freq:
             gs = float(row.get("global_score", 0.0))
-            if rescue_active and gs >= float(rescue_global_floor):
-                rescued.append(f"{row['feature']}(freq={row['bootstrap_freq']:.2f},gs={gs:.3f})")
+            is_rescue_core = bool(row.get("bootstrap_rescue_core", False))
+            if rescue_active and is_rescue_core and gs >= float(rescue_global_floor):
+                rescued.append(
+                    f"{row['feature']}(freq={row['bootstrap_freq']:.2f},"
+                    f"gs={gs:.3f},core={is_rescue_core})"
+                )
                 continue
             out.at[idx, "selected"] = False
             out.at[idx, "reason"] = "bootstrap_stability_fail"
             removed.append(f"{row['feature']}(freq={row['bootstrap_freq']:.2f})")
     if rescued:
-        print(f"[Bootstrap] rescued (global_score >= {rescue_global_floor}): {', '.join(rescued)}")
+        print(
+            "[Bootstrap] rescued "
+            f"(global_score >= {rescue_global_floor}, core_rank<={rescue_core_k}): "
+            + ", ".join(rescued)
+        )
     if removed:
         print(f"[Bootstrap] removed: {', '.join(removed)}")
     elif not rescued:
