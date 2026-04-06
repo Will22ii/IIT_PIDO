@@ -79,6 +79,7 @@ class FeatureSelectionConfig:
     gap_threshold_very_low_data: float = 0.10
     gap_threshold_normal: float = 0.12
     gap_global_floor: float = 0.70
+    gap_global_floor_very_low_data: float = 0.85
     gap_min_retain: int = 2
     # null-importance soft gate
     null_enabled: bool = True
@@ -1096,7 +1097,17 @@ class FeatureSelector:
                 if is_very_low_data
                 else float(getattr(self.config, "gap_threshold_normal", 0.12))
             )
-            gap_g_floor = float(getattr(self.config, "gap_global_floor", 0.70))
+            gap_g_floor = (
+                float(
+                    getattr(
+                        self.config,
+                        "gap_global_floor_very_low_data",
+                        getattr(self.config, "gap_global_floor", 0.70),
+                    )
+                )
+                if is_very_low_data
+                else float(getattr(self.config, "gap_global_floor", 0.70))
+            )
             gap_min_retain = int(getattr(self.config, "gap_min_retain", 2))
 
             sel_mask = out["selected"].astype(bool)

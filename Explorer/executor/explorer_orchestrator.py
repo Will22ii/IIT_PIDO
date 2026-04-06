@@ -182,6 +182,163 @@ def _volume_ratio_for_bounds(
     return float(np.prod(ratios)) if ratios else 0.0
 
 
+def _shrink_bounds_to_target_volume(
+    *,
+    selected_bounds: list[tuple[float, float]] | None,
+    global_bounds: list[tuple[float, float]],
+    target_volume_ratio: float,
+    center: np.ndarray | None = None,
+) -> list[tuple[float, float]] | None:
+    if selected_bounds is None or len(selected_bounds) != len(global_bounds):
+        return selected_bounds
+    if not np.isfinite(float(target_volume_ratio)) or float(target_volume_ratio) <= 0.0:
+        return selected_bounds
+    tol = 1e-12
+    d = len(global_bounds)
+    if d <= 0:
+        return selected_bounds
+
+    c = None
+    if center is not None:
+        arr = np.asarray(center, dtype=float).reshape(-1)
+        if arr.size == d:
+            c = arr
+
+    glb: list[tuple[float, float]] = []
+    out: list[tuple[float, float]] = []
+    spans: list[float] = []
+    ratios: list[float] = []
+    for (s_lb, s_ub), (g_lb, g_ub) in zip(selected_bounds, global_bounds):
+        gl = float(min(g_lb, g_ub))
+        gu = float(max(g_lb, g_ub))
+        lo = float(np.clip(min(s_lb, s_ub), gl, gu))
+        hi = float(np.clip(max(s_lb, s_ub), gl, gu))
+        if hi < lo:
+            lo, hi = hi, lo
+        glb.append((gl, gu))
+        out.append((lo, hi))
+        span = max(gu - gl, 0.0)
+        spans.append(span)
+        if span <= 0.0:
+            ratios.append(0.0)
+        else:
+            ratios.append(float(np.clip((hi - lo) / span, 0.0, 1.0)))
+
+    current_volume = float(np.prod(ratios)) if ratios else 0.0
+    if (not np.isfinite(current_volume)) or current_volume <= float(target_volume_ratio) + tol:
+        return out
+
+    active_dims = max(sum(1 for s in spans if s > 0.0), 1)
+    alpha = float((float(target_volume_ratio) / float(current_volume)) ** (1.0 / float(active_dims)))
+    alpha = float(np.clip(alpha, 0.0, 1.0))
+
+    # Pass 1: center-anchored uniform shrink.
+    pass1: list[tuple[float, float]] = []
+    for j, ((lo, hi), (gl, gu), span) in enumerate(zip(out, glb, spans)):
+        if span <= 0.0:
+            pass1.append((gl, gu))
+            continue
+        cur_w = max(hi - lo, 0.0)
+        tgt_w = min(cur_w * alpha, span)
+        cc = float(c[j]) if c is not None else 0.5 * (lo + hi)
+        cc = float(np.clip(cc, gl, gu))
+        lo_new = float(np.clip(cc - 0.5 * tgt_w, gl, gu - tgt_w))
+        hi_new = float(lo_new + tgt_w)
+        if hi_new < lo_new:
+            lo_new, hi_new = hi_new, lo_new
+        pass1.append((lo_new, hi_new))
+
+    out = pass1
+    vol = _volume_ratio_for_bounds(out, glb)
+    if vol is None:
+        return out
+    if float(vol) <= float(target_volume_ratio) + tol:
+        return out
+
+    # Pass 2: if pass1 is still wide (center clipping side effect), greedily shrink widest dims asymmetrically.
+    for _ in range(max(2 * d, 1)):
+        vol = _volume_ratio_for_bounds(out, glb)
+        if vol is None or float(vol) <= float(target_volume_ratio) + tol:
+            break
+
+        cur_ratios: list[float] = []
+        for (lo, hi), (gl, gu), span in zip(out, glb, spans):
+            if span <= 0.0:
+                cur_ratios.append(0.0)
+            else:
+                lo_c = float(np.clip(lo, gl, gu))
+                hi_c = float(np.clip(hi, gl, gu))
+                cur_ratios.append(float(np.clip((hi_c - lo_c) / span, 0.0, 1.0)))
+
+        # Shrink the widest ratio dimension first.
+        j = int(np.argmax(np.asarray(cur_ratios, dtype=float)))
+        rj = float(cur_ratios[j])
+        if rj <= tol:
+            break
+        other = float(vol) / max(rj, tol)
+        req_rj = float(target_volume_ratio) / max(other, tol)
+        req_rj = float(np.clip(req_rj, 0.0, rj))
+        if req_rj >= rj - tol:
+            req_rj = max(0.0, rj * 0.95)
+
+        gl, gu = glb[j]
+        span = spans[j]
+        lo, hi = out[j]
+        cur_w = max(hi - lo, 0.0)
+        tgt_w = float(np.clip(req_rj * span, 0.0, span))
+        if tgt_w >= cur_w - tol:
+            continue
+
+        cut = cur_w - tgt_w
+        cc = float(c[j]) if c is not None else 0.5 * (lo + hi)
+        cc = float(np.clip(cc, lo, hi))
+        left_room = cc - lo
+        right_room = hi - cc
+        lo_new, hi_new = lo, hi
+
+        # Keep side near center, shrink the opposite side first.
+        if left_room <= right_room:
+            cut_r = min(cut, right_room)
+            hi_new -= cut_r
+            cut -= cut_r
+            if cut > 0.0:
+                lo_new += cut
+        else:
+            cut_l = min(cut, left_room)
+            lo_new += cut_l
+            cut -= cut_l
+            if cut > 0.0:
+                hi_new -= cut
+
+        lo_new = float(np.clip(lo_new, gl, gu))
+        hi_new = float(np.clip(hi_new, gl, gu))
+        if hi_new < lo_new:
+            lo_new, hi_new = hi_new, lo_new
+        out[j] = (lo_new, hi_new)
+
+    # Final guard: enforce target if still above due to numeric drift.
+    vol = _volume_ratio_for_bounds(out, glb)
+    if vol is not None and float(vol) > float(target_volume_ratio) + tol:
+        active_dims = max(sum(1 for s in spans if s > 0.0), 1)
+        beta = float((float(target_volume_ratio) / float(vol)) ** (1.0 / float(active_dims)))
+        beta = float(np.clip(beta, 0.0, 1.0))
+        out2: list[tuple[float, float]] = []
+        for (lo, hi), (gl, gu), span in zip(out, glb, spans):
+            if span <= 0.0:
+                out2.append((gl, gu))
+                continue
+            w = max(hi - lo, 0.0) * beta
+            mid = 0.5 * (lo + hi)
+            lo_new = float(np.clip(mid - 0.5 * w, gl, gu - w))
+            hi_new = float(lo_new + w)
+            if hi_new < lo_new:
+                lo_new, hi_new = hi_new, lo_new
+            out2.append((lo_new, hi_new))
+        out = out2
+
+    return out
+
+
 def _normal_cdf(z: np.ndarray) -> np.ndarray:
     return 0.5 * (1.0 + np.vectorize(erf)(z / sqrt(2.0)))
 
@@ -1074,6 +1231,14 @@ class ExplorerOrchestrator:
         doe_vs_optimum_plot_paths = []
         pred_stats = {}
         obj_stats = {}
+        strategy_params = dict(self.config.system.strategy_params or {})
+        obj_div_extra = int(max(0, int(strategy_params.get("obj_diversity_extra_clusters", 0))))
+        obj_div_weight = float(strategy_params.get("obj_diversity_weight", 0.35))
+        obj_div_min_dist = float(strategy_params.get("obj_diversity_min_distance", 0.22))
+        obj_div_close_penalty = float(strategy_params.get("obj_diversity_close_penalty", 0.8))
+        obj_div_min_dim = int(max(1, int(strategy_params.get("obj_diversity_min_dim", 4))))
+        if len(selected_features) < obj_div_min_dim:
+            obj_div_extra = 0
         X_obj = np.empty((0, len(selected_features)))
         y_obj = np.array([], dtype=float)
         try:
@@ -1131,6 +1296,11 @@ class ExplorerOrchestrator:
                 bounds=bounds,
                 min_topk_count=int(self.config.system.min_topk_count),
                 eps_quantile=float(self.config.system.dbscan_eps_quantile),
+                diversity_extra_clusters=obj_div_extra,
+                diversity_weight=obj_div_weight,
+                diversity_min_distance=obj_div_min_dist,
+                diversity_close_penalty=obj_div_close_penalty,
+                diversity_min_dim=obj_div_min_dim,
             )
         except Exception as exc:
             print(f"[Explorer] Dual cluster selection failed: {exc}")
@@ -1598,9 +1768,12 @@ class ExplorerOrchestrator:
 
         bounds_path = None
         vol_ratio = None
+        dual_volume_cap_target = None
+        dual_volume_ratio_before_cap = None
+        dual_volume_cap_applied = False
 
         if selected_bounds is not None:
-            expansion_mode = str(getattr(self.config.system, "bounds_expansion_mode", "uncertainty_aware")).strip().lower()
+            expansion_mode = str(getattr(self.config.system, "bounds_expansion_mode", "uniform")).strip().lower()
             _w_clip_min = float(getattr(self.config.system, "bounds_weight_clip_min", 0.5))
             _w_clip_max = float(getattr(self.config.system, "bounds_weight_clip_max", 2.0))
             dim_weights = None
@@ -1632,21 +1805,8 @@ class ExplorerOrchestrator:
                     )
                     print(f"[Explorer] bounds_expansion_mode=fi_aware: {parts}")
                 else:
-                    # fallback to uncertainty_aware
-                    print("[Explorer] fi_aware 모드이나 FI score 없음 → uncertainty_aware로 fallback")
-                    dim_weights = compute_gp_boundary_uncertainty(
-                        gp_models=[gp_pred, gp_obj],
-                        selected_bounds=selected_bounds,
-                        clip_min=_w_clip_min,
-                        clip_max=_w_clip_max,
-                    )
-                    if dim_weights is not None:
-                        parts = ", ".join(
-                            f"{fn}:{w:.2f}" for fn, w in zip(selected_features, dim_weights)
-                        )
-                        print(f"[Explorer] fallback uncertainty_aware: {parts}")
-            else:
-                # default: uncertainty_aware
+                    print("[Explorer] fi_aware 모드에서 유효한 FI score 없음 → uniform fallback")
+            elif expansion_mode == "uncertainty_aware":
                 dim_weights = compute_gp_boundary_uncertainty(
                     gp_models=[gp_pred, gp_obj],
                     selected_bounds=selected_bounds,
@@ -1658,6 +1818,15 @@ class ExplorerOrchestrator:
                         f"{fn}:{w:.2f}" for fn, w in zip(selected_features, dim_weights)
                     )
                     print(f"[Explorer] bounds_expansion_mode=uncertainty_aware: {parts}")
+                else:
+                    print("[Explorer] uncertainty_aware 모드에서 유효한 GP uncertainty 없음 → uniform fallback")
+            elif expansion_mode == "uniform":
+                print("[Explorer] bounds_expansion_mode=uniform")
+            else:
+                print(
+                    f"[Explorer] unknown bounds_expansion_mode='{expansion_mode}' "
+                    "→ uniform fallback"
+                )
 
             selected_bounds = apply_bounds_margin(
                 selected_bounds=selected_bounds,
@@ -1666,6 +1835,48 @@ class ExplorerOrchestrator:
                 min_volume_ratio=float(self.config.system.bounds_min_volume_ratio),
                 dim_weights=dim_weights,
             )
+
+            strategy_params = dict(self.config.system.strategy_params or {})
+            dual_cap_raw = strategy_params.get("max_volume_ratio_target", None)
+            if strategy_alias in {"s4", "s8"} and dual_cap_raw is not None:
+                try:
+                    dual_volume_cap_target = float(dual_cap_raw)
+                except Exception:
+                    dual_volume_cap_target = None
+                if (
+                    dual_volume_cap_target is not None
+                    and np.isfinite(dual_volume_cap_target)
+                    and dual_volume_cap_target > 0.0
+                ):
+                    dual_volume_ratio_before_cap = _volume_ratio_for_bounds(selected_bounds, bounds)
+                    if (
+                        dual_volume_ratio_before_cap is not None
+                        and np.isfinite(dual_volume_ratio_before_cap)
+                        and dual_volume_ratio_before_cap > dual_volume_cap_target
+                    ):
+                        center_hint = None
+                        if isinstance(selected_points, np.ndarray) and selected_points.ndim == 2 and selected_points.shape[0] > 0:
+                            center_hint = np.mean(selected_points, axis=0)
+                        selected_bounds_cap = _shrink_bounds_to_target_volume(
+                            selected_bounds=selected_bounds,
+                            global_bounds=bounds,
+                            target_volume_ratio=dual_volume_cap_target,
+                            center=center_hint,
+                        )
+                        if selected_bounds_cap is not None:
+                            vol_after_cap = _volume_ratio_for_bounds(selected_bounds_cap, bounds)
+                            if (
+                                vol_after_cap is not None
+                                and np.isfinite(vol_after_cap)
+                                and vol_after_cap < dual_volume_ratio_before_cap
+                            ):
+                                selected_bounds = selected_bounds_cap
+                                dual_volume_cap_applied = True
+                                print(
+                                    "[Explorer] dual volume cap applied: "
+                                    f"{dual_volume_ratio_before_cap:.4f} -> {vol_after_cap:.4f} "
+                                    f"(target={dual_volume_cap_target:.4f})"
+                                )
 
         if selected_bounds is not None:
             vol_ratio = _volume_ratio_for_bounds(selected_bounds, bounds)
@@ -1822,10 +2033,16 @@ class ExplorerOrchestrator:
         resolved_params = {
             "seed": int(rng_seed),
             "objective_sense": objective_sense,
+            "p_dim": int(len(selected_features)),
             "threshold_value": threshold,
             "dbscan_eps_used": eps_used,
             "dbscan_min_samples_used": dbscan_min_samples,
             "base_n_success_feasible": int(base_n),
+            "usable_n": int(base_n),
+            "usable_n_over_p": (
+                float(base_n) / float(max(len(selected_features), 1))
+                if len(selected_features) > 0 else None
+            ),
             "nominal_n": int(nominal_n),
             "target_n_generated": int(n_samples),
             "generated_boundary": int(X_boundary_raw.shape[0]),
@@ -1847,6 +2064,9 @@ class ExplorerOrchestrator:
             "strategy_id": strategy_id,
             "strategy_alias": strategy_alias,
             "strategy_mode": strategy_mode,
+            "dual_volume_cap_target": dual_volume_cap_target,
+            "dual_volume_ratio_before_cap": dual_volume_ratio_before_cap,
+            "dual_volume_cap_applied": bool(dual_volume_cap_applied),
             "probe_multistart": int(self.config.system.probe_multistart),
             "workflow_info": workflow_info,
         }
@@ -1862,6 +2082,12 @@ class ExplorerOrchestrator:
             "n_q_samples": n_q_samples,
             "n_clusters": n_clusters,
             "cluster_sizes": cluster_sizes,
+            "p_dim": int(len(selected_features)),
+            "usable_n": int(base_n),
+            "usable_n_over_p": (
+                float(base_n) / float(max(len(selected_features), 1))
+                if len(selected_features) > 0 else None
+            ),
             "n_generated_raw": int(pre_generated),
             "n_generated_after_pre": int(X.shape[0]),
             "post_penalty_active": bool(has_post_penalty),
@@ -1869,6 +2095,9 @@ class ExplorerOrchestrator:
             "obj_mean_volume": obj_mean_vol,
             "strategy_id": strategy_id,
             "strategy_alias": strategy_alias,
+            "dual_volume_cap_target": dual_volume_cap_target,
+            "dual_volume_ratio_before_cap": dual_volume_ratio_before_cap,
+            "dual_volume_cap_applied": bool(dual_volume_cap_applied),
         }
 
         public_artifacts = {}

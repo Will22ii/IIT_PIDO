@@ -105,27 +105,93 @@ PROBLEM_SUITE: list[ProblemCase] = [
 EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
     ExplorerStrategy(
         "S4_dual",
-        {"strategy_params": {"mode": "dual_refine_ei"}, "bounds_expansion_mode": "fi_aware"},
+        {
+            "strategy_params": {
+                "mode": "dual_refine_ei",
+                "max_volume_ratio_target": 0.249,
+                "obj_diversity_extra_clusters": 1,
+                "obj_diversity_weight": 0.35,
+                "obj_diversity_min_distance": 0.22,
+                "obj_diversity_close_penalty": 0.80,
+                "obj_diversity_min_dim": 4,
+            },
+            "bounds_expansion_mode": "fi_aware",
+            "quantile_threshold": 0.94,
+            "bounds_margin_ratio": 0.02,
+            "dbscan_eps_quantile": 0.88,
+        },
     ),
     ExplorerStrategy(
         "S8_dual",
-        {"strategy_params": {"mode": "dual_gradient_refine"}, "bounds_expansion_mode": "fi_aware"},
+        {
+            "strategy_params": {
+                "mode": "dual_gradient_refine",
+                "max_volume_ratio_target": 0.249,
+                "obj_diversity_extra_clusters": 1,
+                "obj_diversity_weight": 0.35,
+                "obj_diversity_min_distance": 0.22,
+                "obj_diversity_close_penalty": 0.80,
+                "obj_diversity_min_dim": 4,
+            },
+            "bounds_expansion_mode": "fi_aware",
+            "quantile_threshold": 0.94,
+            "bounds_margin_ratio": 0.02,
+            "dbscan_eps_quantile": 0.88,
+        },
     ),
     ExplorerStrategy(
         "S4_pred",
-        {"strategy_params": {"mode": "pred_refine_ei"}, "bounds_expansion_mode": "fi_aware"},
+        {
+            "strategy_params": {"mode": "pred_refine_ei"},
+            "bounds_expansion_mode": "fi_aware",
+            "quantile_threshold": 0.86,
+            "bounds_margin_ratio": 0.05,
+            "dbscan_eps_quantile": 0.92,
+        },
     ),
     ExplorerStrategy(
         "S8_pred",
-        {"strategy_params": {"mode": "pred_refine_lcb"}, "bounds_expansion_mode": "fi_aware"},
+        {
+            "strategy_params": {"mode": "pred_refine_lcb"},
+            "bounds_expansion_mode": "fi_aware",
+            "quantile_threshold": 0.86,
+            "bounds_margin_ratio": 0.05,
+            "dbscan_eps_quantile": 0.92,
+        },
     ),
     ExplorerStrategy(
         "S4_obj",
-        {"strategy_params": {"mode": "obj_refine_ei"}, "bounds_expansion_mode": "fi_aware"},
+        {
+            "strategy_params": {
+                "mode": "obj_refine_ei",
+                "obj_diversity_extra_clusters": 1,
+                "obj_diversity_weight": 0.35,
+                "obj_diversity_min_distance": 0.22,
+                "obj_diversity_close_penalty": 0.80,
+                "obj_diversity_min_dim": 4,
+            },
+            "bounds_expansion_mode": "fi_aware",
+            "quantile_threshold": 0.90,
+            "bounds_margin_ratio": 0.03,
+            "dbscan_eps_quantile": 0.90,
+        },
     ),
     ExplorerStrategy(
         "S8_obj",
-        {"strategy_params": {"mode": "obj_refine_lcb"}, "bounds_expansion_mode": "fi_aware"},
+        {
+            "strategy_params": {
+                "mode": "obj_refine_lcb",
+                "obj_diversity_extra_clusters": 1,
+                "obj_diversity_weight": 0.35,
+                "obj_diversity_min_distance": 0.22,
+                "obj_diversity_close_penalty": 0.80,
+                "obj_diversity_min_dim": 4,
+            },
+            "bounds_expansion_mode": "fi_aware",
+            "quantile_threshold": 0.90,
+            "bounds_margin_ratio": 0.03,
+            "dbscan_eps_quantile": 0.90,
+        },
     ),
 ]
 
@@ -352,6 +418,122 @@ def _known_optimum_list(known_optimum: Any) -> list[dict[str, float]]:
     return []
 
 
+def _read_json_file(path: str | None) -> dict[str, Any]:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _extract_doe_router_metadata(doe_metadata_path: str | None) -> dict[str, Any]:
+    meta = _read_json_file(doe_metadata_path)
+    resolved = meta.get("resolved_params", {}) if isinstance(meta.get("resolved_params"), dict) else {}
+    results = meta.get("results", {}) if isinstance(meta.get("results"), dict) else {}
+    extra = resolved.get("extra_context", {}) if isinstance(resolved.get("extra_context"), dict) else {}
+
+    def _pick(key: str) -> Any:
+        if key in resolved:
+            return resolved.get(key)
+        if key in extra:
+            return extra.get(key)
+        if key in results:
+            return results.get(key)
+        return None
+
+    return {
+        "doe_failure_reason": _pick("failure_reason"),
+        "doe_config_hash": _pick("doe_config_hash"),
+        "doe_budget_policy": _pick("budget_policy"),
+        "doe_has_pre_constraints": _pick("has_pre_constraints"),
+        "doe_has_post_constraints": _pick("has_post_constraints"),
+        "doe_additional_triggered": _pick("doe_additional_triggered"),
+        "doe_added_samples": _pick("doe_added_samples"),
+        "doe_gate1_pass_rate": _pick("doe_gate1_pass_rate"),
+        "doe_gate2_pass_rate": _pick("doe_gate2_pass_rate"),
+        "doe_gate1_score_mean": _pick("doe_gate1_score_mean"),
+        "doe_gate2_score_mean": _pick("doe_gate2_score_mean"),
+        "doe_gate1_score_last": _pick("doe_gate1_score_last"),
+        "doe_gate2_score_last": _pick("doe_gate2_score_last"),
+        "doe_gate1_score_ema_mean": _pick("doe_gate1_score_ema_mean"),
+        "doe_gate2_score_ema_mean": _pick("doe_gate2_score_ema_mean"),
+        "doe_gate1_score_ema_last": _pick("doe_gate1_score_ema_last"),
+        "doe_gate2_score_ema_last": _pick("doe_gate2_score_ema_last"),
+        "doe_gate_decision_source_last": _pick("doe_gate_decision_source_last"),
+        "doe_phase2_entered": _pick("phase2_entered"),
+        "doe_used_budget_ratio_final": _pick("used_budget_ratio_final"),
+        "doe_phase2_gate1_score_min": _pick("phase2_gate1_score_min"),
+        "doe_phase2_gate2_score_min": _pick("phase2_gate2_score_min"),
+        "doe_phase2_gate2_score_sticky_min": _pick("phase2_gate2_score_sticky_min"),
+        "doe_gate_smoothing_enabled": _pick("gate_smoothing_enabled"),
+        "doe_gate_ema_alpha": _pick("gate_ema_alpha"),
+        "doe_gate_ema_warmup_stages": _pick("gate_ema_warmup_stages"),
+        "doe_gate_smoothing_use_for_phase2": _pick("gate_smoothing_use_for_phase2"),
+        "doe_gate_smoothing_use_for_stop": _pick("gate_smoothing_use_for_stop"),
+        "doe_collapse_span_ratio_threshold": _pick("collapse_span_ratio_threshold"),
+        "doe_collapse_anchor_streak_threshold": _pick("collapse_anchor_streak_threshold"),
+        "doe_collapse_min_stage": _pick("collapse_min_stage"),
+        "doe_diversity_injection_ratio": _pick("diversity_injection_ratio"),
+        "doe_diversity_injection_min_points": _pick("diversity_injection_min_points"),
+        "doe_diversity_injection_max_ratio": _pick("diversity_injection_max_ratio"),
+        "doe_diversity_boundary_floor_ratio": _pick("diversity_boundary_floor_ratio"),
+        "doe_phase2_min_used_budget_ratio": _pick("phase2_min_used_budget_ratio"),
+        "doe_phase2_np_gate_last": _pick("phase2_np_gate_last"),
+        "doe_early_stop_min_used_budget_ratio": _pick("early_stop_min_used_budget_ratio"),
+        "doe_early_stop_min_usable_np_ratio": _pick("early_stop_min_usable_np_ratio"),
+        "doe_budget_used": _pick("budget_used"),
+        "doe_budget_total": _pick("budget_total"),
+        "doe_budget_exhausted": _pick("budget_exhausted"),
+        "doe_stage_count_total": _pick("stage_count_total"),
+        "doe_stage_gate_eval_count": _pick("stage_gate_eval_count"),
+        "doe_gate_eval_skipped_count": _pick("gate_eval_skipped_count"),
+        "doe_phase2_first_stage": _pick("phase2_first_stage"),
+        "doe_phase2_stage_count": _pick("phase2_stage_count"),
+        "doe_phase2_transition_count": _pick("phase2_transition_count"),
+        "doe_gate_stop_raw_count": _pick("gate_stop_raw_count"),
+        "doe_gate_stop_final_count": _pick("gate_stop_final_count"),
+        "doe_gate_stop_blocked_count": _pick("gate_stop_blocked_count"),
+        "doe_collapse_detected_count": _pick("doe_collapse_detected_count"),
+        "doe_diversity_injection_applied_count": _pick("doe_diversity_injection_applied_count"),
+        "doe_diversity_sample_count_total": _pick("doe_diversity_sample_count_total"),
+        "doe_diversity_hit_rate_mean": _pick("doe_diversity_hit_rate_mean"),
+        "doe_dynamic_exec_allocation_enabled": _pick("dynamic_exec_allocation_enabled"),
+        "doe_exec_round_shares": _pick("exec_round_shares"),
+        "doe_alloc_multiplier_last": _pick("alloc_multiplier_last"),
+        "doe_alloc_multiplier_mean": _pick("alloc_multiplier_mean"),
+        "doe_alloc_eff_prev_last": _pick("alloc_eff_prev_last"),
+        "doe_alloc_eff_ref_last": _pick("alloc_eff_ref_last"),
+        "doe_alloc_dynamic_applied_count": _pick("alloc_dynamic_applied_count"),
+        "doe_used_budget_ratio_phase2_first": _pick("used_budget_ratio_phase2_first"),
+        "doe_terminated_by": _pick("terminated_by"),
+        "doe_p_dim": _pick("p_dim"),
+        "doe_usable_n": _pick("usable_n"),
+        "doe_usable_n_over_p": _pick("usable_n_over_p"),
+        "doe_local_span_ratio_mean_last": _pick("local_span_ratio_mean_last"),
+        "doe_anchor_spread_zero_streak_max": _pick("anchor_spread_zero_streak_max"),
+        "doe_metadata": doe_metadata_path,
+    }
+
+
+def _extract_explorer_router_metadata(explorer_metadata_path: str | None) -> dict[str, Any]:
+    meta = _read_json_file(explorer_metadata_path)
+    resolved = meta.get("resolved_params", {}) if isinstance(meta.get("resolved_params"), dict) else {}
+    return {
+        "explorer_strategy_alias": resolved.get("strategy_alias"),
+        "explorer_strategy_mode": resolved.get("strategy_mode"),
+        "explorer_p_dim": resolved.get("p_dim"),
+        "explorer_usable_n": resolved.get("usable_n"),
+        "explorer_usable_n_over_p": resolved.get("usable_n_over_p"),
+        "explorer_selected_bounds_volume_ratio": resolved.get("selected_bounds_volume_ratio"),
+        "explorer_dual_volume_cap_target": resolved.get("dual_volume_cap_target"),
+        "explorer_dual_volume_ratio_before_cap": resolved.get("dual_volume_ratio_before_cap"),
+        "explorer_dual_volume_cap_applied": resolved.get("dual_volume_cap_applied"),
+    }
+
+
 def _is_optimum_included(
     *,
     known_optimum: Any,
@@ -418,6 +600,88 @@ def _save_explorer_stats_csv(
                 "explorer_metadata",
                 "selected_bounds_path",
                 "run_root",
+                "p_dim",
+                "usable_n",
+                "usable_n_over_p",
+                "doe_failure_reason",
+                "doe_config_hash",
+                "doe_budget_policy",
+                "doe_has_pre_constraints",
+                "doe_has_post_constraints",
+                "doe_additional_triggered",
+                "doe_added_samples",
+                "doe_gate1_pass_rate",
+                "doe_gate2_pass_rate",
+                "doe_gate1_score_mean",
+                "doe_gate2_score_mean",
+                "doe_gate1_score_last",
+                "doe_gate2_score_last",
+                "doe_gate1_score_ema_mean",
+                "doe_gate2_score_ema_mean",
+                "doe_gate1_score_ema_last",
+                "doe_gate2_score_ema_last",
+                "doe_gate_decision_source_last",
+                "doe_phase2_entered",
+                "doe_used_budget_ratio_final",
+                "doe_phase2_gate1_score_min",
+                "doe_phase2_gate2_score_min",
+                "doe_phase2_gate2_score_sticky_min",
+                "doe_gate_smoothing_enabled",
+                "doe_gate_ema_alpha",
+                "doe_gate_ema_warmup_stages",
+                "doe_gate_smoothing_use_for_phase2",
+                "doe_gate_smoothing_use_for_stop",
+                "doe_collapse_span_ratio_threshold",
+                "doe_collapse_anchor_streak_threshold",
+                "doe_collapse_min_stage",
+                "doe_diversity_injection_ratio",
+                "doe_diversity_injection_min_points",
+                "doe_diversity_injection_max_ratio",
+                "doe_diversity_boundary_floor_ratio",
+                "doe_phase2_min_used_budget_ratio",
+                "doe_phase2_np_gate_last",
+                "doe_early_stop_min_used_budget_ratio",
+                "doe_early_stop_min_usable_np_ratio",
+                "doe_budget_used",
+                "doe_budget_total",
+                "doe_budget_exhausted",
+                "doe_stage_count_total",
+                "doe_stage_gate_eval_count",
+                "doe_gate_eval_skipped_count",
+                "doe_phase2_first_stage",
+                "doe_phase2_stage_count",
+                "doe_phase2_transition_count",
+                "doe_gate_stop_raw_count",
+                "doe_gate_stop_final_count",
+                "doe_gate_stop_blocked_count",
+                "doe_collapse_detected_count",
+                "doe_diversity_injection_applied_count",
+                "doe_diversity_sample_count_total",
+                "doe_diversity_hit_rate_mean",
+                "doe_dynamic_exec_allocation_enabled",
+                "doe_exec_round_shares",
+                "doe_alloc_multiplier_last",
+                "doe_alloc_multiplier_mean",
+                "doe_alloc_eff_prev_last",
+                "doe_alloc_eff_ref_last",
+                "doe_alloc_dynamic_applied_count",
+                "doe_used_budget_ratio_phase2_first",
+                "doe_terminated_by",
+                "doe_p_dim",
+                "doe_usable_n",
+                "doe_usable_n_over_p",
+                "doe_local_span_ratio_mean_last",
+                "doe_anchor_spread_zero_streak_max",
+                "doe_metadata",
+                "explorer_strategy_alias",
+                "explorer_strategy_mode",
+                "explorer_p_dim",
+                "explorer_usable_n",
+                "explorer_usable_n_over_p",
+                "explorer_selected_bounds_volume_ratio",
+                "explorer_dual_volume_cap_target",
+                "explorer_dual_volume_ratio_before_cap",
+                "explorer_dual_volume_cap_applied",
             ]
         )
 
@@ -681,6 +945,7 @@ def main() -> None:
             try:
                 pipe_out = run_pipeline(config=cfg)
                 run_context = pipe_out["run_context"]
+                doe_meta_features = _extract_doe_router_metadata(pipe_out.get("doe_metadata"))
                 modeler_metadata_path = pipe_out.get("modeler_metadata")
                 modeler_selected_features = _load_modeler_selected_features(modeler_metadata_path)
                 selected_feature_count = int(len(modeler_selected_features))
@@ -753,6 +1018,7 @@ def main() -> None:
                             )
                             vol_ratio_float = float(vol_ratio) if vol_ratio is not None else None
                             vol_pct = (vol_ratio_float * 100.0) if vol_ratio_float is not None else None
+                            explorer_meta_features = _extract_explorer_router_metadata(exp_out.get("metadata"))
                             print(f"[Explorer][{requested_id}] executed={strategy.strategy_id}")
                             if vol_pct is not None:
                                 print(
@@ -791,6 +1057,88 @@ def main() -> None:
                                     "explorer_metadata": exp_out.get("metadata"),
                                     "selected_bounds_path": exp_out.get("selected_bounds_path"),
                                     "run_root": run_context.run_root,
+                                    "p_dim": int(selected_feature_count),
+                                    "usable_n": doe_meta_features.get("doe_usable_n"),
+                                    "usable_n_over_p": doe_meta_features.get("doe_usable_n_over_p"),
+                                    "doe_failure_reason": doe_meta_features.get("doe_failure_reason"),
+                                    "doe_config_hash": doe_meta_features.get("doe_config_hash"),
+                                    "doe_budget_policy": doe_meta_features.get("doe_budget_policy"),
+                                    "doe_has_pre_constraints": doe_meta_features.get("doe_has_pre_constraints"),
+                                    "doe_has_post_constraints": doe_meta_features.get("doe_has_post_constraints"),
+                                    "doe_additional_triggered": doe_meta_features.get("doe_additional_triggered"),
+                                    "doe_added_samples": doe_meta_features.get("doe_added_samples"),
+                                    "doe_gate1_pass_rate": doe_meta_features.get("doe_gate1_pass_rate"),
+                                    "doe_gate2_pass_rate": doe_meta_features.get("doe_gate2_pass_rate"),
+                                    "doe_gate1_score_mean": doe_meta_features.get("doe_gate1_score_mean"),
+                                    "doe_gate2_score_mean": doe_meta_features.get("doe_gate2_score_mean"),
+                                    "doe_gate1_score_last": doe_meta_features.get("doe_gate1_score_last"),
+                                    "doe_gate2_score_last": doe_meta_features.get("doe_gate2_score_last"),
+                                    "doe_gate1_score_ema_mean": doe_meta_features.get("doe_gate1_score_ema_mean"),
+                                    "doe_gate2_score_ema_mean": doe_meta_features.get("doe_gate2_score_ema_mean"),
+                                    "doe_gate1_score_ema_last": doe_meta_features.get("doe_gate1_score_ema_last"),
+                                    "doe_gate2_score_ema_last": doe_meta_features.get("doe_gate2_score_ema_last"),
+                                    "doe_gate_decision_source_last": doe_meta_features.get("doe_gate_decision_source_last"),
+                                    "doe_phase2_entered": doe_meta_features.get("doe_phase2_entered"),
+                                    "doe_used_budget_ratio_final": doe_meta_features.get("doe_used_budget_ratio_final"),
+                                    "doe_phase2_gate1_score_min": doe_meta_features.get("doe_phase2_gate1_score_min"),
+                                    "doe_phase2_gate2_score_min": doe_meta_features.get("doe_phase2_gate2_score_min"),
+                                    "doe_phase2_gate2_score_sticky_min": doe_meta_features.get("doe_phase2_gate2_score_sticky_min"),
+                                    "doe_gate_smoothing_enabled": doe_meta_features.get("doe_gate_smoothing_enabled"),
+                                    "doe_gate_ema_alpha": doe_meta_features.get("doe_gate_ema_alpha"),
+                                    "doe_gate_ema_warmup_stages": doe_meta_features.get("doe_gate_ema_warmup_stages"),
+                                    "doe_gate_smoothing_use_for_phase2": doe_meta_features.get("doe_gate_smoothing_use_for_phase2"),
+                                    "doe_gate_smoothing_use_for_stop": doe_meta_features.get("doe_gate_smoothing_use_for_stop"),
+                                    "doe_collapse_span_ratio_threshold": doe_meta_features.get("doe_collapse_span_ratio_threshold"),
+                                    "doe_collapse_anchor_streak_threshold": doe_meta_features.get("doe_collapse_anchor_streak_threshold"),
+                                    "doe_collapse_min_stage": doe_meta_features.get("doe_collapse_min_stage"),
+                                    "doe_diversity_injection_ratio": doe_meta_features.get("doe_diversity_injection_ratio"),
+                                    "doe_diversity_injection_min_points": doe_meta_features.get("doe_diversity_injection_min_points"),
+                                    "doe_diversity_injection_max_ratio": doe_meta_features.get("doe_diversity_injection_max_ratio"),
+                                    "doe_diversity_boundary_floor_ratio": doe_meta_features.get("doe_diversity_boundary_floor_ratio"),
+                                    "doe_phase2_min_used_budget_ratio": doe_meta_features.get("doe_phase2_min_used_budget_ratio"),
+                                    "doe_phase2_np_gate_last": doe_meta_features.get("doe_phase2_np_gate_last"),
+                                    "doe_early_stop_min_used_budget_ratio": doe_meta_features.get("doe_early_stop_min_used_budget_ratio"),
+                                    "doe_early_stop_min_usable_np_ratio": doe_meta_features.get("doe_early_stop_min_usable_np_ratio"),
+                                    "doe_budget_used": doe_meta_features.get("doe_budget_used"),
+                                    "doe_budget_total": doe_meta_features.get("doe_budget_total"),
+                                    "doe_budget_exhausted": doe_meta_features.get("doe_budget_exhausted"),
+                                    "doe_stage_count_total": doe_meta_features.get("doe_stage_count_total"),
+                                    "doe_stage_gate_eval_count": doe_meta_features.get("doe_stage_gate_eval_count"),
+                                    "doe_gate_eval_skipped_count": doe_meta_features.get("doe_gate_eval_skipped_count"),
+                                    "doe_phase2_first_stage": doe_meta_features.get("doe_phase2_first_stage"),
+                                    "doe_phase2_stage_count": doe_meta_features.get("doe_phase2_stage_count"),
+                                    "doe_phase2_transition_count": doe_meta_features.get("doe_phase2_transition_count"),
+                                    "doe_gate_stop_raw_count": doe_meta_features.get("doe_gate_stop_raw_count"),
+                                    "doe_gate_stop_final_count": doe_meta_features.get("doe_gate_stop_final_count"),
+                                    "doe_gate_stop_blocked_count": doe_meta_features.get("doe_gate_stop_blocked_count"),
+                                    "doe_collapse_detected_count": doe_meta_features.get("doe_collapse_detected_count"),
+                                    "doe_diversity_injection_applied_count": doe_meta_features.get("doe_diversity_injection_applied_count"),
+                                    "doe_diversity_sample_count_total": doe_meta_features.get("doe_diversity_sample_count_total"),
+                                    "doe_diversity_hit_rate_mean": doe_meta_features.get("doe_diversity_hit_rate_mean"),
+                                    "doe_dynamic_exec_allocation_enabled": doe_meta_features.get("doe_dynamic_exec_allocation_enabled"),
+                                    "doe_exec_round_shares": doe_meta_features.get("doe_exec_round_shares"),
+                                    "doe_alloc_multiplier_last": doe_meta_features.get("doe_alloc_multiplier_last"),
+                                    "doe_alloc_multiplier_mean": doe_meta_features.get("doe_alloc_multiplier_mean"),
+                                    "doe_alloc_eff_prev_last": doe_meta_features.get("doe_alloc_eff_prev_last"),
+                                    "doe_alloc_eff_ref_last": doe_meta_features.get("doe_alloc_eff_ref_last"),
+                                    "doe_alloc_dynamic_applied_count": doe_meta_features.get("doe_alloc_dynamic_applied_count"),
+                                    "doe_used_budget_ratio_phase2_first": doe_meta_features.get("doe_used_budget_ratio_phase2_first"),
+                                    "doe_terminated_by": doe_meta_features.get("doe_terminated_by"),
+                                    "doe_p_dim": doe_meta_features.get("doe_p_dim"),
+                                    "doe_usable_n": doe_meta_features.get("doe_usable_n"),
+                                    "doe_usable_n_over_p": doe_meta_features.get("doe_usable_n_over_p"),
+                                    "doe_local_span_ratio_mean_last": doe_meta_features.get("doe_local_span_ratio_mean_last"),
+                                    "doe_anchor_spread_zero_streak_max": doe_meta_features.get("doe_anchor_spread_zero_streak_max"),
+                                    "doe_metadata": doe_meta_features.get("doe_metadata"),
+                                    "explorer_strategy_alias": explorer_meta_features.get("explorer_strategy_alias"),
+                                    "explorer_strategy_mode": explorer_meta_features.get("explorer_strategy_mode"),
+                                    "explorer_p_dim": explorer_meta_features.get("explorer_p_dim"),
+                                    "explorer_usable_n": explorer_meta_features.get("explorer_usable_n"),
+                                    "explorer_usable_n_over_p": explorer_meta_features.get("explorer_usable_n_over_p"),
+                                    "explorer_selected_bounds_volume_ratio": explorer_meta_features.get("explorer_selected_bounds_volume_ratio"),
+                                    "explorer_dual_volume_cap_target": explorer_meta_features.get("explorer_dual_volume_cap_target"),
+                                    "explorer_dual_volume_ratio_before_cap": explorer_meta_features.get("explorer_dual_volume_ratio_before_cap"),
+                                    "explorer_dual_volume_cap_applied": explorer_meta_features.get("explorer_dual_volume_cap_applied"),
                                 }
                             )
                         except Exception as exp_exc:

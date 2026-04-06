@@ -144,6 +144,8 @@ class ModelerSystemConfig:
     fi_gap_threshold_very_low_data: float = 0.08
     fi_gap_threshold_normal: float = 0.12
     fi_gap_global_floor: float = 0.79  # global_score가 이 값 미만인 feature만 제거 대상
+    # very_low_data에서는 더 보수적으로 tail을 제거하기 위해 별도 floor 사용
+    fi_gap_global_floor_very_low_data: float = 0.85
     fi_gap_min_retain: int = 2         # 제거 후 최소 유지 feature 수
     # very_low_data drop veto: drop_rate가 극도로 낮은 feature를 perm 점수와 무관하게 기각
     fi_drop_veto_enabled: bool = True
@@ -297,6 +299,7 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         gap_threshold_very_low_data=system.fi_gap_threshold_very_low_data,
         gap_threshold_normal=system.fi_gap_threshold_normal,
         gap_global_floor=system.fi_gap_global_floor,
+        gap_global_floor_very_low_data=system.fi_gap_global_floor_very_low_data,
         gap_min_retain=system.fi_gap_min_retain,
         # null importance
         null_enabled=system.fi_null_enabled,

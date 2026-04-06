@@ -20,16 +20,19 @@ class ExplorerSystemConfig:
     n_samples_max: int = 10000
 
     # 경계 샘플 비율 (0~1)
-    boundary_ratio: float = 0.1
+    boundary_ratio: float = 0.15
     # 경계 샘플 중 코너 조합 비율 (0~1)
     boundary_corner_ratio: float = 0.5
 
     # 선택 경계 마진 기본 계수 (adaptive: m = base * (min_v - raw_v) / min_v, raw_v>=min_v면 off)
     bounds_margin_ratio: float = 0.03
     # 선택 경계 최소 부피비(역마진 floor). raw/final volume이 이 값보다 작으면 확장 시도
-    bounds_min_volume_ratio: float = 0.24
-    # bounds 확장 모드: "uncertainty_aware" (GP σ 기반) | "fi_aware" (FI score 기반, fallback: GP σ)
-    bounds_expansion_mode: str = "uncertainty_aware"
+    bounds_min_volume_ratio: float = 0.249
+    # bounds 확장 모드:
+    # - "uniform": 차원 가중치 없이 균등 확장(기본)
+    # - "uncertainty_aware": GP σ 기반 가중 확장(실패 시 uniform fallback)
+    # - "fi_aware": FI score 기반 가중 확장(실패 시 uniform fallback)
+    bounds_expansion_mode: str = "uniform"
     # fi_aware / uncertainty_aware 차원별 가중치 clip 범위 [min, max]
     bounds_weight_clip_min: float = 0.5
     bounds_weight_clip_max: float = 2.0

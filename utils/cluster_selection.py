@@ -15,6 +15,11 @@ def select_top_clusters(
     bounds: list[Tuple[float, float]],
     min_topk_count: int,
     eps_quantile: float,
+    diversity_extra_clusters: int = 0,
+    diversity_weight: float = 0.35,
+    diversity_min_distance: float = 0.22,
+    diversity_close_penalty: float = 0.8,
+    diversity_min_dim: int = 4,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     if X.size == 0 or y.size == 0:
         return np.empty((0, X.shape[1] if X.ndim == 2 else 0)), np.array([], dtype=int), {}
@@ -72,6 +77,7 @@ def select_top_clusters(
                 "label": label,
                 "best_val": float(y_q[best_local]),
                 "points": X_q[idx],
+                "center": np.mean(X_q[idx], axis=0),
             }
         )
 
@@ -92,9 +98,11 @@ def select_top_clusters(
         clusters_sorted = sorted(clusters, key=lambda c: c["best_val"])
     else:
         clusters_sorted = sorted(clusters, key=lambda c: c["best_val"], reverse=True)
+    rank_map = {c["label"]: i for i, c in enumerate(clusters_sorted)}
 
     selected = []
     if forced_best is not None:
+        forced_best["center"] = np.asarray(forced_best["points"], dtype=float).mean(axis=0)
         selected.append(forced_best)
     elif best_cluster_label is not None:
         best_cluster = next((c for c in clusters_sorted if c["label"] == best_cluster_label), None)
@@ -106,6 +114,59 @@ def select_top_clusters(
             if len(selected) >= 2:
                 break
             selected.append(c)
+
+    diversity_used = False
+    diversity_selected_count = 0
+    diversity_selected_min_dist: list[float] = []
+    if (
+        selected
+        and int(diversity_extra_clusters) > 0
+        and X.shape[1] >= int(max(diversity_min_dim, 1))
+        and len(clusters_sorted) >= 2
+    ):
+        d_eff = max(int(X.shape[1]), 1)
+        spans = np.asarray([max(float(ub - lb), 1e-12) for lb, ub in bounds], dtype=float)
+        weight = float(np.clip(diversity_weight, 0.0, 1.0))
+        close_pen = float(max(diversity_close_penalty, 0.0))
+        dist_floor = float(max(diversity_min_distance, 0.0))
+
+        selected_labels = {str(c.get("label")) for c in selected}
+        candidates = [c for c in clusters_sorted if str(c.get("label")) not in selected_labels]
+        n_rank = max(len(clusters_sorted) - 1, 1)
+
+        def _norm_min_dist(cand_center: np.ndarray, ref_clusters: list[dict]) -> float:
+            dists = []
+            for rc in ref_clusters:
+                rc_center = np.asarray(rc.get("center"), dtype=float).reshape(-1)
+                diff = (cand_center - rc_center) / spans
+                d = float(np.linalg.norm(diff) / np.sqrt(float(d_eff)))
+                dists.append(max(d, 0.0))
+            return float(min(dists)) if dists else 0.0
+
+        for _ in range(int(diversity_extra_clusters)):
+            if not candidates:
+                break
+            best_idx = None
+            best_score = -1e18
+            best_dist = 0.0
+            for i, c in enumerate(candidates):
+                rank = int(rank_map.get(c["label"], n_rank))
+                quality = 1.0 - (float(rank) / float(n_rank))
+                cand_center = np.asarray(c["center"], dtype=float).reshape(-1)
+                min_dist = _norm_min_dist(cand_center, selected)
+                close_penalty = close_pen * max(dist_floor - min_dist, 0.0)
+                score = (1.0 - weight) * quality + weight * min_dist - close_penalty
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+                    best_dist = min_dist
+            if best_idx is None:
+                break
+            chosen = candidates.pop(best_idx)
+            selected.append(chosen)
+            diversity_used = True
+            diversity_selected_count += 1
+            diversity_selected_min_dist.append(float(best_dist))
 
     if not selected:
         return np.empty((0, X.shape[1]), dtype=float), np.array([], dtype=int), {}
@@ -142,6 +203,10 @@ def select_top_clusters(
         "threshold": threshold,
         "eps": float(eps),
         "n_clusters": len(unique_labels),
+        "n_selected_clusters": int(len(selected)),
+        "diversity_used": bool(diversity_used),
+        "diversity_selected_count": int(diversity_selected_count),
+        "diversity_selected_min_dist": diversity_selected_min_dist,
         "selected_spans": spans,
         "selected_volumes": volumes,
     }

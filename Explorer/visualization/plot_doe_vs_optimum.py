@@ -210,7 +210,7 @@ def _plot_exec_scope_split(
         return None
 
     scope = df["exec_scope"].astype(str).str.strip().str.lower()
-    g_mask = scope.isin({"global", "initial", "basic"})
+    g_mask = scope.isin({"global", "global_diversity", "initial", "basic"})
     l_mask = scope == "local"
     p_mask = scope == "probe"
     local_title_suffix = ""

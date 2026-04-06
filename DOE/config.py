@@ -18,20 +18,29 @@ class DOESystemConfig:
     # =========================
     n_samples: int = 120  # DOE 전체 샘플 수 (추가 DOE면 total_budget)
     force_baseline_initial: bool = False  # 초기 DOE에서 기준점 강제 포함 여부
-    initial_corner_ratio: float = 0.05  # 초기 DOE에서 corner 샘플 비율
+    initial_corner_ratio: float = 0.08  # 초기 DOE에서 corner 샘플 비율
 
     # =========================
     # 2) 추가 DOE: 단계/비율
     # =========================
     additional_init_ratio: float = 0.4  # 초기 DOE 비율
     additional_exec_ratio: float = 0.1  # 단계별 실행점(X_exec) 비율
+    dynamic_exec_allocation_enabled: bool = True  # 추가 DOE stage별 X_exec 동적 배분 사용
+    additional_exec_round_shares: tuple[float, ...] = (0.24, 0.19, 0.17, 0.15, 0.13, 0.12)  # stage별 기본 배분 비율(합 1.0으로 정규화)
+    exec_eff_weight_gate1: float = 0.45  # 동적 배분 효율 계산 시 Gate1 가중치
+    exec_eff_weight_gate2: float = 0.55  # 동적 배분 효율 계산 시 Gate2 가중치
+    exec_eff_gain_k: float = 0.7  # 효율 증감에 대한 배분 증폭 계수
+    exec_eff_clip_min: float = 0.85  # stage 배분 multiplier 하한
+    exec_eff_clip_max: float = 1.20  # stage 배분 multiplier 상한
+    exec_stage_min_ratio: float = 0.08  # stage별 최소 배분 비율(추가 예산 대비)
+    exec_stage_max_ratio: float = 0.40  # stage별 최대 배분 비율(추가 예산 대비)
     additional_initial_probe_multiplier: float = 2.0  # 초기 DOE 제약 통과율 추정용 배수
     success_rate_floor: float = 0.02  # success 비율 하한 (미만이면 FAILED_SUCCESS_RATE_MIN)
     # NOTE:
     # global_random_ratio는 현재 전달/적용하지 않습니다.
     # 전역 X_exec은 boundary/margin/top 버킷을 우선 배정하고,
     # 남은 슬롯을 random으로 채우는 정책을 사용합니다.
-    global_boundary_ratio: float = 0.2  # 전역 X_plan/X_exec 경계 샘플 비율
+    global_boundary_ratio: float = 0.25  # 전역 X_plan/X_exec 경계 샘플 비율
     global_margin_ratio: float = 0.2  # 전역 X_exec 중 제약 경계(margin) 버킷 비율
     global_top_ratio: float = 0.2  # 전역 X_exec 중 top-k 버킷 비율
     global_boundary_corner_ratio: float = 0.4  # 경계 샘플 중 코너 조합 비율
@@ -113,15 +122,42 @@ class DOESystemConfig:
     post_clf_min_neg: int = 5  # post feasibility 분류모델 음성 최소 개수
 
     # =========================
-    # 10) Phase/종료 정책
+    # 10) Phase/예산 정책
     # =========================
+    # 추가 DOE 예산 정책
+    # - consume_all: total_budget을 기본적으로 모두 소진 (현재 기본)
+    # - adaptive_early_stop: 종료 조건 충족 시 조기 종료 허용
+    budget_policy: str = "consume_all"
     phase1_global_ratio: float = 0.8  # 1단계 전역 비율
     phase2_global_ratio: float = 0.35  # 2단계 전역 비율
-    min_additional_rounds: int = 6  # 최소 추가 스테이지 횟수
-    phase2_min_usable_np_ratio: float = 10.0  # phase1->2 전환 최소 usable N/p 비율 (strictly greater)
+    # Phase2 진입 임계값 (stop 임계값과 분리)
+    phase2_gate1_score_min: float = 0.55  # phase2 진입용 Gate1 score 최소값
+    phase2_gate2_score_min: float = 0.75  # phase2 진입용 Gate2 score 최소값
+    phase2_gate2_score_sticky_min: float = 0.65  # phase2 유지용 Gate2 score 최소값(히스테리시스)
+    phase2_min_usable_np_ratio: float = 10.0  # phase1->2 전환 usable N/p 기준치
+    phase2_np_ratio_cap_scale: float = 0.75  # phase2 N/p gate 동적 상한 스케일: min(base, scale * total_budget/p_dim)
+    phase2_min_used_budget_ratio: float = 0.30  # phase2 진입 최소 예산 소진 비율 (used/total)
+    # Gate 판정 스무딩(EMA) 설정: raw는 항상 저장하고, 전환 판정은 EMA 사용 가능
+    gate_smoothing_enabled: bool = True  # Gate score EMA 스무딩 사용
+    gate_ema_alpha: float = 0.35  # EMA 계수(0~1, 클수록 최근 값 반영 비중 증가)
+    gate_ema_warmup_stages: int = 2  # EMA를 판정에 사용하기 전 최소 gate 평가 stage 수
+    gate_smoothing_use_for_phase2: bool = True  # phase2 진입 판정에 EMA score 사용
+    gate_smoothing_use_for_stop: bool = True  # adaptive stop gate 판정에 EMA pass 사용
+    # collapse 감지 시 다음 stage 다양성 주입
+    collapse_span_ratio_threshold: float = 0.22  # local span ratio가 이 값 이하이면 collapse 후보
+    collapse_anchor_streak_threshold: int = 2  # anchor spread zero streak 임계
+    collapse_min_stage: int = 2  # 최소 stage 이후 collapse 판정 활성화
+    diversity_injection_ratio: float = 0.20  # collapse 이후 다음 stage diversity quota 비율
+    diversity_injection_min_points: int = 2  # diversity quota 최소 포인트
+    diversity_injection_max_ratio: float = 0.40  # diversity quota 상한(전체 n_exec 대비)
+    diversity_boundary_floor_ratio: float = 0.12  # diversity stage에서 boundary 비율 최소값
+    # adaptive_early_stop 모드에서만 사용
+    min_additional_rounds: int = 6  # 조기 종료 허용 최소 스테이지
+    early_stop_min_used_budget_ratio: float = 0.50  # 조기 종료 허용 최소 예산 소진 비율
+    early_stop_min_usable_np_ratio: float = 20.0  # 조기 종료 허용 최소 usable N/p 비율
     stop_span_ratio_threshold: float = 0.20  # 수렴 종료 기준: span_ratio_mean
     stop_anchor_spread_streak: int = 5  # 수렴 종료 기준: anchor_spread_mean==0 연속 횟수
-    stop_min_usable_np_ratio: float = 20.0  # 종료 허용 최소 usable N/p 비율 (usable: success && feasible)
+    stop_min_usable_np_ratio: float = 20.0  # (호환용) 기존 종료 최소 usable N/p 비율
 
     # =========================
     # 10-1) Probe Stage (전역 GP 1회 탐색)

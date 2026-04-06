@@ -67,6 +67,15 @@ class AdditionalDOEOrchestrator:
         total_budget: int,
         init_ratio: float = 0.3,
         exec_ratio: float = 0.1,
+        dynamic_exec_allocation_enabled: bool = True,
+        exec_round_shares: Optional[list[float] | tuple[float, ...]] = (0.24, 0.19, 0.17, 0.15, 0.13, 0.12),
+        exec_eff_weight_gate1: float = 0.45,
+        exec_eff_weight_gate2: float = 0.55,
+        exec_eff_gain_k: float = 0.7,
+        exec_eff_clip_min: float = 0.85,
+        exec_eff_clip_max: float = 1.20,
+        exec_stage_min_ratio: float = 0.08,
+        exec_stage_max_ratio: float = 0.40,
         initial_corner_ratio: float = 0.05,
         global_random_ratio: float = 0.3,
         global_boundary_ratio: float = 0.1,
@@ -76,10 +85,30 @@ class AdditionalDOEOrchestrator:
         plan_base_k: float = 200.0,
         plan_remaining_cap: float = 3.0,
         plan_decay: float = 0.85,
+        budget_policy: str = "consume_all",
         phase1_global_ratio: Optional[float] = None,
         phase2_global_ratio: Optional[float] = None,
+        phase2_gate1_score_min: float = 0.55,
+        phase2_gate2_score_min: float = 0.75,
+        phase2_gate2_score_sticky_min: float = 0.65,
+        gate_smoothing_enabled: bool = True,
+        gate_ema_alpha: float = 0.35,
+        gate_ema_warmup_stages: int = 2,
+        gate_smoothing_use_for_phase2: bool = True,
+        gate_smoothing_use_for_stop: bool = True,
+        collapse_span_ratio_threshold: float = 0.22,
+        collapse_anchor_streak_threshold: int = 2,
+        collapse_min_stage: int = 2,
+        diversity_injection_ratio: float = 0.20,
+        diversity_injection_min_points: int = 2,
+        diversity_injection_max_ratio: float = 0.40,
+        diversity_boundary_floor_ratio: float = 0.12,
         min_additional_rounds: int = 2,
         phase2_min_usable_np_ratio: float = 15.0,
+        phase2_np_ratio_cap_scale: float = 0.75,
+        phase2_min_used_budget_ratio: float = 0.3,
+        early_stop_min_used_budget_ratio: float = 0.5,
+        early_stop_min_usable_np_ratio: float = 20.0,
         stop_span_ratio_threshold: float = 0.3,
         stop_anchor_spread_streak: int = 2,
         stop_min_usable_np_ratio: float = 20.0,
@@ -152,6 +181,30 @@ class AdditionalDOEOrchestrator:
         self.total_budget = int(total_budget)
         self.init_ratio = float(init_ratio)
         self.exec_ratio = float(exec_ratio)
+        self.dynamic_exec_allocation_enabled = bool(dynamic_exec_allocation_enabled)
+        self.exec_round_shares = self._normalize_exec_round_shares(exec_round_shares)
+        self.exec_eff_weight_gate1 = float(exec_eff_weight_gate1)
+        self.exec_eff_weight_gate2 = float(exec_eff_weight_gate2)
+        if self.exec_eff_weight_gate1 < 0.0 or self.exec_eff_weight_gate2 < 0.0:
+            raise ValueError("exec_eff_weight_gate1/2 must be >= 0")
+        if self.exec_eff_weight_gate1 == 0.0 and self.exec_eff_weight_gate2 == 0.0:
+            self.exec_eff_weight_gate1 = 0.45
+            self.exec_eff_weight_gate2 = 0.55
+        self.exec_eff_gain_k = float(exec_eff_gain_k)
+        self.exec_eff_clip_min = float(exec_eff_clip_min)
+        self.exec_eff_clip_max = float(exec_eff_clip_max)
+        if self.exec_eff_clip_min <= 0.0 or self.exec_eff_clip_max <= 0.0:
+            raise ValueError("exec_eff_clip_min/max must be > 0")
+        if self.exec_eff_clip_min > self.exec_eff_clip_max:
+            raise ValueError("exec_eff_clip_min must be <= exec_eff_clip_max")
+        self.exec_stage_min_ratio = float(exec_stage_min_ratio)
+        self.exec_stage_max_ratio = float(exec_stage_max_ratio)
+        if self.exec_stage_min_ratio < 0.0 or self.exec_stage_max_ratio < 0.0:
+            raise ValueError("exec_stage_min_ratio/max_ratio must be >= 0")
+        if self.exec_stage_min_ratio > self.exec_stage_max_ratio:
+            raise ValueError("exec_stage_min_ratio must be <= exec_stage_max_ratio")
+        self._initial_budget_used = 0
+        self._additional_budget_total = 0
         self.initial_corner_ratio = float(initial_corner_ratio)
         if not (0.0 <= self.initial_corner_ratio <= 1.0):
             raise ValueError("initial_corner_ratio must be in [0, 1]")
@@ -163,15 +216,70 @@ class AdditionalDOEOrchestrator:
         self.plan_base_k = float(plan_base_k)
         self.plan_remaining_cap = float(plan_remaining_cap)
         self.plan_decay = float(plan_decay)
+        policy = str(budget_policy).strip().lower()
+        if policy not in {"consume_all", "adaptive_early_stop"}:
+            raise ValueError("budget_policy must be one of: consume_all, adaptive_early_stop")
+        self.budget_policy = policy
         self.exec_min = 4
         if phase1_global_ratio is None or phase2_global_ratio is None:
             raise ValueError("phase1_global_ratio and phase2_global_ratio are required")
         self.phase1_global_ratio = float(phase1_global_ratio)
         self.phase2_global_ratio = float(phase2_global_ratio)
+        self.phase2_gate1_score_min = float(phase2_gate1_score_min)
+        self.phase2_gate2_score_min = float(phase2_gate2_score_min)
+        self.phase2_gate2_score_sticky_min = float(phase2_gate2_score_sticky_min)
+        if not (0.0 <= self.phase2_gate1_score_min <= 1.0):
+            raise ValueError("phase2_gate1_score_min must be in [0, 1]")
+        if not (0.0 <= self.phase2_gate2_score_min <= 1.0):
+            raise ValueError("phase2_gate2_score_min must be in [0, 1]")
+        if not (0.0 <= self.phase2_gate2_score_sticky_min <= 1.0):
+            raise ValueError("phase2_gate2_score_sticky_min must be in [0, 1]")
+        self.gate_smoothing_enabled = bool(gate_smoothing_enabled)
+        self.gate_ema_alpha = float(gate_ema_alpha)
+        if not (0.0 < self.gate_ema_alpha <= 1.0):
+            raise ValueError("gate_ema_alpha must be in (0, 1]")
+        self.gate_ema_warmup_stages = int(gate_ema_warmup_stages)
+        if self.gate_ema_warmup_stages < 0:
+            raise ValueError("gate_ema_warmup_stages must be >= 0")
+        self.gate_smoothing_use_for_phase2 = bool(gate_smoothing_use_for_phase2)
+        self.gate_smoothing_use_for_stop = bool(gate_smoothing_use_for_stop)
+        self.collapse_span_ratio_threshold = float(collapse_span_ratio_threshold)
+        if self.collapse_span_ratio_threshold < 0.0:
+            raise ValueError("collapse_span_ratio_threshold must be >= 0")
+        self.collapse_anchor_streak_threshold = int(collapse_anchor_streak_threshold)
+        if self.collapse_anchor_streak_threshold < 1:
+            raise ValueError("collapse_anchor_streak_threshold must be >= 1")
+        self.collapse_min_stage = int(collapse_min_stage)
+        if self.collapse_min_stage < 1:
+            raise ValueError("collapse_min_stage must be >= 1")
+        self.diversity_injection_ratio = float(diversity_injection_ratio)
+        if self.diversity_injection_ratio < 0.0:
+            raise ValueError("diversity_injection_ratio must be >= 0")
+        self.diversity_injection_min_points = int(diversity_injection_min_points)
+        if self.diversity_injection_min_points < 0:
+            raise ValueError("diversity_injection_min_points must be >= 0")
+        self.diversity_injection_max_ratio = float(diversity_injection_max_ratio)
+        if not (0.0 <= self.diversity_injection_max_ratio <= 1.0):
+            raise ValueError("diversity_injection_max_ratio must be in [0, 1]")
+        self.diversity_boundary_floor_ratio = float(diversity_boundary_floor_ratio)
+        if not (0.0 <= self.diversity_boundary_floor_ratio <= 1.0):
+            raise ValueError("diversity_boundary_floor_ratio must be in [0, 1]")
         self.min_additional_rounds = int(min_additional_rounds)
         self.phase2_min_usable_np_ratio = float(phase2_min_usable_np_ratio)
         if self.phase2_min_usable_np_ratio < 0.0:
             raise ValueError("phase2_min_usable_np_ratio must be >= 0")
+        self.phase2_np_ratio_cap_scale = float(phase2_np_ratio_cap_scale)
+        if self.phase2_np_ratio_cap_scale <= 0.0:
+            raise ValueError("phase2_np_ratio_cap_scale must be > 0")
+        self.phase2_min_used_budget_ratio = float(phase2_min_used_budget_ratio)
+        if not (0.0 <= self.phase2_min_used_budget_ratio <= 1.0):
+            raise ValueError("phase2_min_used_budget_ratio must be in [0, 1]")
+        self.early_stop_min_used_budget_ratio = float(early_stop_min_used_budget_ratio)
+        if not (0.0 <= self.early_stop_min_used_budget_ratio <= 1.0):
+            raise ValueError("early_stop_min_used_budget_ratio must be in [0, 1]")
+        self.early_stop_min_usable_np_ratio = float(early_stop_min_usable_np_ratio)
+        if self.early_stop_min_usable_np_ratio < 0.0:
+            raise ValueError("early_stop_min_usable_np_ratio must be >= 0")
         self.stop_span_ratio_threshold = float(stop_span_ratio_threshold)
         self.stop_anchor_spread_streak = int(stop_anchor_spread_streak)
         self.stop_min_usable_np_ratio = float(stop_min_usable_np_ratio)
@@ -186,6 +294,7 @@ class AdditionalDOEOrchestrator:
         self._anchor_spread_zero_streak = 0
         self._probe_stage_done = False
         self._ever_phase2 = False
+        self._collapse_diversity_pending = False
         self.initial_probe_multiplier = float(initial_probe_multiplier)
         self.plan_filter_safety = float(plan_filter_safety)
         self.plan_filter_r_floor = float(plan_filter_r_floor)
@@ -263,7 +372,12 @@ class AdditionalDOEOrchestrator:
         self.hpo_min_samples = 10
         self.failure_reason: str | None = None
         self.local_metrics: list[dict] = []
+        self.gate_history: list[dict] = []
         self._probe_acq = AcquisitionOptimizer()
+        self._anchor_spread_zero_streak_max = 0
+        self._gate_eval_count = 0
+        self._gate1_ema: float | None = None
+        self._gate2_ema: float | None = None
 
         # Global plan builder is fixed LHS (per your scenario)
         self.plan_builder = PlanBuilder(bounds=bounds, rng=rng)
@@ -295,6 +409,170 @@ class AdditionalDOEOrchestrator:
         )
 
         # Exec selection is handled inline (rank + random mix)
+
+    @staticmethod
+    def _normalize_exec_round_shares(
+        raw: Optional[list[float] | tuple[float, ...]],
+    ) -> list[float]:
+        default = [0.24, 0.19, 0.17, 0.15, 0.13, 0.12]
+        if raw is None:
+            return default
+        vals: list[float] = []
+        for item in raw:
+            try:
+                v = float(item)
+            except Exception:
+                continue
+            if np.isfinite(v) and v > 0.0:
+                vals.append(v)
+        if not vals:
+            return default
+        s = float(sum(vals))
+        if s <= 0.0:
+            return default
+        return [float(v / s) for v in vals]
+
+    def _estimate_exec_multiplier(self) -> tuple[float, float | None, float | None]:
+        if not self.dynamic_exec_allocation_enabled:
+            return 1.0, None, None
+
+        evaluated = [
+            g for g in self.gate_history
+            if bool(g.get("gate_evaluated", False))
+            and g.get("gate1_score") is not None
+            and g.get("gate2_score") is not None
+            and int(g.get("n_exec", 0)) > 0
+        ]
+        if len(evaluated) < 2:
+            return 1.0, None, None
+
+        w1 = float(self.exec_eff_weight_gate1)
+        w2 = float(self.exec_eff_weight_gate2)
+        w_sum = max(w1 + w2, 1e-12)
+        w1 /= w_sum
+        w2 /= w_sum
+
+        eff_series: list[float] = []
+        for i in range(1, len(evaluated)):
+            prev = evaluated[i - 1]
+            cur = evaluated[i]
+            g1_prev = float(prev.get("gate1_score"))
+            g2_prev = float(prev.get("gate2_score"))
+            g1_cur = float(cur.get("gate1_score"))
+            g2_cur = float(cur.get("gate2_score"))
+            n_cur = max(int(cur.get("n_exec", 0)), 1)
+            dg1 = max(0.0, g1_cur - g1_prev)
+            dg2 = max(0.0, g2_cur - g2_prev)
+            eff = (w1 * dg1 + w2 * dg2) / float(n_cur)
+            eff_series.append(float(eff))
+        if not eff_series:
+            return 1.0, None, None
+
+        eff_prev = float(eff_series[-1])
+        ref_window = eff_series[max(0, len(eff_series) - 3):-1] if len(eff_series) >= 2 else []
+        eff_ref = float(np.mean(ref_window)) if ref_window else float(eff_prev)
+
+        if eff_ref <= 1e-12:
+            mult = 1.0
+        else:
+            rel = (eff_prev - eff_ref) / max(eff_ref, 1e-12)
+            mult = 1.0 + float(self.exec_eff_gain_k) * float(rel)
+        mult = float(np.clip(mult, self.exec_eff_clip_min, self.exec_eff_clip_max))
+        return mult, eff_prev, eff_ref
+
+    def _compute_n_exec_for_stage(
+        self,
+        *,
+        round_idx: int,
+        remaining: int,
+    ) -> tuple[int, dict[str, float | int | str | None]]:
+        remaining_i = int(max(remaining, 0))
+        if remaining_i <= 0:
+            return 0, {
+                "alloc_source": "none",
+                "n_exec_base": 0,
+                "n_exec_preclip": 0,
+                "alloc_multiplier": 1.0,
+                "alloc_eff_prev": None,
+                "alloc_eff_ref": None,
+                "alloc_min_stage": 0,
+                "alloc_max_stage": 0,
+                "alloc_additional_budget_total": int(self._additional_budget_total),
+            }
+
+        if not self.dynamic_exec_allocation_enabled:
+            min_exec = max(int(self.total_budget * self.exec_ratio), self.exec_min)
+            n_exec = int(min(min_exec, remaining_i))
+            return n_exec, {
+                "alloc_source": "fixed_exec_ratio",
+                "n_exec_base": int(n_exec),
+                "n_exec_preclip": int(n_exec),
+                "alloc_multiplier": 1.0,
+                "alloc_eff_prev": None,
+                "alloc_eff_ref": None,
+                "alloc_min_stage": int(self.exec_min),
+                "alloc_max_stage": int(max(self.exec_min, n_exec)),
+                "alloc_additional_budget_total": int(self._additional_budget_total),
+            }
+
+        if self._additional_budget_total <= 0:
+            self._additional_budget_total = int(max(remaining_i, 1))
+
+        shares = list(self.exec_round_shares or [])
+        if not shares:
+            shares = [1.0]
+
+        if round_idx >= len(shares):
+            return int(remaining_i), {
+                "alloc_source": "dynamic_tail_all_remaining",
+                "n_exec_base": int(remaining_i),
+                "n_exec_preclip": int(remaining_i),
+                "alloc_multiplier": 1.0,
+                "alloc_eff_prev": None,
+                "alloc_eff_ref": None,
+                "alloc_min_stage": int(self.exec_min),
+                "alloc_max_stage": int(remaining_i),
+                "alloc_additional_budget_total": int(self._additional_budget_total),
+            }
+
+        base_raw = int(round(float(self._additional_budget_total) * float(shares[round_idx])))
+        if round_idx == len(shares) - 1:
+            return int(remaining_i), {
+                "alloc_source": "dynamic_last_share_all_remaining",
+                "n_exec_base": int(base_raw),
+                "n_exec_preclip": int(remaining_i),
+                "alloc_multiplier": 1.0,
+                "alloc_eff_prev": None,
+                "alloc_eff_ref": None,
+                "alloc_min_stage": int(self.exec_min),
+                "alloc_max_stage": int(remaining_i),
+                "alloc_additional_budget_total": int(self._additional_budget_total),
+            }
+
+        min_stage = max(int(self.exec_min), int(round(float(self._additional_budget_total) * self.exec_stage_min_ratio)))
+        max_stage = max(min_stage, int(round(float(self._additional_budget_total) * self.exec_stage_max_ratio)))
+        n_base = int(np.clip(base_raw, min_stage, max_stage))
+
+        mult, eff_prev, eff_ref = self._estimate_exec_multiplier()
+        n_preclip = int(round(float(n_base) * float(mult)))
+        n_clipped = int(np.clip(n_preclip, min_stage, max_stage))
+        n_exec = int(min(n_clipped, remaining_i))
+        if remaining_i < self.exec_min:
+            n_exec = int(remaining_i)
+        else:
+            n_exec = max(int(n_exec), int(self.exec_min))
+
+        return n_exec, {
+            "alloc_source": "dynamic_efficiency_weighted",
+            "n_exec_base": int(n_base),
+            "n_exec_preclip": int(n_preclip),
+            "alloc_multiplier": float(mult),
+            "alloc_eff_prev": None if eff_prev is None else float(eff_prev),
+            "alloc_eff_ref": None if eff_ref is None else float(eff_ref),
+            "alloc_min_stage": int(min_stage),
+            "alloc_max_stage": int(max_stage),
+            "alloc_additional_budget_total": int(self._additional_budget_total),
+        }
 
     def _compute_n_plan(self, *, remaining: int, round_idx: int) -> int:
         dim = len(self.bounds)
@@ -866,6 +1144,14 @@ class AdditionalDOEOrchestrator:
 
         self._fit_post_feasibility_model()
         self._update_post_lambda()
+        self._initial_budget_used = int(self.budget.used)
+        self._additional_budget_total = int(max(self.total_budget - self._initial_budget_used, 0))
+        if self.dynamic_exec_allocation_enabled:
+            print(
+                "[AdditionalDOE] dynamic_exec_allocation "
+                f"enabled=True shares={self.exec_round_shares} "
+                f"additional_budget_total={self._additional_budget_total}"
+            )
 
         # --------------------------------------------
         # Additional DOE loop
@@ -874,8 +1160,14 @@ class AdditionalDOEOrchestrator:
         phase = 1
         self._probe_stage_done = False
         self._ever_phase2 = False
+        self._collapse_diversity_pending = False
+        self._gate_eval_count = 0
+        self._gate1_ema = None
+        self._gate2_ema = None
 
-        while not self.budget.exhausted() and round_idx < self.max_additional_stages:
+        while not self.budget.exhausted() and (
+            self.budget_policy == "consume_all" or round_idx < self.max_additional_stages
+        ):
             remaining = self.budget.remaining
             if remaining <= 0:
                 break
@@ -885,11 +1177,15 @@ class AdditionalDOEOrchestrator:
             self._update_post_lambda()
             if phase == 2:
                 self._ever_phase2 = True
+            used_budget_ratio_loop = float(self.budget.used) / float(max(self.total_budget, 1))
+            probe_gate_ready = bool(
+                used_budget_ratio_loop >= self.phase2_min_used_budget_ratio
+            ) if self.budget_policy == "consume_all" else bool(round_idx + 1 >= self.min_additional_rounds)
             probe_ready = bool(
                 self.probe_stage_enabled
                 and (not self._probe_stage_done)
                 and self._ever_phase2
-                and (round_idx + 1 >= self.min_additional_rounds)
+                and probe_gate_ready
             )
             if probe_ready:
                 probe_ok = self._run_probe_stage(
@@ -917,8 +1213,10 @@ class AdditionalDOEOrchestrator:
             # -----------------------------
             # 2) Build X_plan (once per stage)
             # -----------------------------
-            min_exec = max(int(self.total_budget * self.exec_ratio), self.exec_min)
-            n_exec = min(min_exec, remaining)
+            n_exec, alloc_info = self._compute_n_exec_for_stage(
+                round_idx=round_idx,
+                remaining=remaining,
+            )
 
             # -----------------------------
             # 1) Build surrogates (bundle)
@@ -950,6 +1248,13 @@ class AdditionalDOEOrchestrator:
             n_divisions = int(base_divisions * (2 ** (stage // 2)))
             # Tighten dedup radius to keep more local samples.
             tol = 0.5 * np.sqrt(len(self.bounds)) * (1.0 / n_divisions)
+            diversity_boost_active = bool(self._collapse_diversity_pending)
+            collapse_detected = False
+            collapse_trigger_span = None
+            collapse_anchor_streak = int(self._anchor_spread_zero_streak)
+            diversity_quota = 0
+            diversity_sample_count = 0
+            diversity_hit_rate = None
 
             ratio_global = self.phase1_global_ratio if phase == 1 else self.phase2_global_ratio
             n_global = int(round(n_plan * ratio_global))
@@ -958,8 +1263,10 @@ class AdditionalDOEOrchestrator:
 
             boundary_ratio = max(0.0, min(1.0, self.global_boundary_ratio))
             boundary_ratio *= float(0.9 ** round_idx)
-            if self._anchor_spread_zero_streak >= self.stop_anchor_spread_streak:
+            if self._anchor_spread_zero_streak >= self.stop_anchor_spread_streak and (not diversity_boost_active):
                 boundary_ratio = 0.0
+            if diversity_boost_active:
+                boundary_ratio = max(boundary_ratio, float(self.diversity_boundary_floor_ratio))
 
             n_boundary = int(round(n_global * boundary_ratio))
             if n_boundary > 0 and n_global >= 2 and n_boundary < 2:
@@ -1077,6 +1384,17 @@ class AdditionalDOEOrchestrator:
                     )
                     self._log_local_metrics(stage=round_idx, metrics=metrics)
                     self._update_convergence_streak(metrics)
+                    collapse_trigger_span = (
+                        float(metrics.get("local_span_ratio_mean"))
+                        if metrics.get("local_span_ratio_mean") is not None
+                        else None
+                    )
+                    collapse_anchor_streak = int(self._anchor_spread_zero_streak)
+                    collapse_detected = self._is_local_collapse(
+                        stage=stage,
+                        span_ratio=collapse_trigger_span,
+                        anchor_streak=collapse_anchor_streak,
+                    )
                     Xl_anchors = np.asarray(local_aux.get("anchors", np.empty((0, Xg.shape[1]))), dtype=float)
                     Xl_anchor_ids = np.asarray(local_aux.get("anchor_ids", np.array([], dtype=int)))
                     tol_local = float(local_aux.get("tol_local", 0.0))
@@ -1092,6 +1410,9 @@ class AdditionalDOEOrchestrator:
                     Xl_anchors = np.empty((0, Xg.shape[1]), dtype=float)
                     Xl_anchor_ids = np.array([], dtype=int)
                     tol_local = 0.0
+                    collapse_trigger_span = None
+                    collapse_anchor_streak = int(self._anchor_spread_zero_streak)
+                    collapse_detected = False
 
                 X_plan = np.vstack([Xg, Xl]) if Xl.size else Xg
             else:
@@ -1102,15 +1423,57 @@ class AdditionalDOEOrchestrator:
                 Xl_anchor_ids = np.array([], dtype=int)
                 tol_local = 0.0
                 X_plan = Xg
+                collapse_trigger_span = None
+                collapse_anchor_streak = int(self._anchor_spread_zero_streak)
+                collapse_detected = False
 
             # -----------------------------
             # 3) Gate evaluation (on X_plan, once per stage)
             # -----------------------------
+            p_dim = max(int(len(self.bounds)), 1)
+            usable_n = int(self._usable_sample_count())
+            usable_np_ratio = float(usable_n) / float(p_dim)
+            used_budget_ratio = float(self.budget.used) / float(max(self.total_budget, 1))
+            budget_np_ratio = float(self.total_budget) / float(p_dim)
+            phase2_np_gate = float(
+                min(
+                    self.phase2_min_usable_np_ratio,
+                    self.phase2_np_ratio_cap_scale * budget_np_ratio,
+                )
+            )
+            gate1_score = None  # raw score (backward-compatible key)
+            gate2_score = None  # raw score (backward-compatible key)
+            gate1_score_raw = None
+            gate2_score_raw = None
+            gate1_score_ema = None
+            gate2_score_ema = None
+            gate1_score_used = None
+            gate2_score_used = None
+            gate1_passed = None
+            gate2_passed = None
+            gate1_pass_smoothed = None
+            gate2_pass_smoothed = None
+            gate_stop_raw = None
+            gate_stop_smoothed = None
+            gate_decision_source = "raw"
+            phase2_decision_source = "raw"
+            gate_evaluated = False
+            gate_eval_skipped_reason = None
+            can_stop_by_data = None
+            can_stop_by_round = None
+            can_stop_by_budget = None
+            converged_for_stop = None
+            can_enter_phase2_by_data = None
+            can_enter_phase2_by_budget = None
+            can_enter_phase2_by_gate1 = None
+            can_enter_phase2_by_gate2 = None
+            gate2_phase_threshold = None
             if n_exec < self.exec_min:
                 print(
                     f"[AdditionalDOE] stage={round_idx} n_exec={n_exec} < exec_min={self.exec_min}, "
                     "skip gate evaluation and run tail budget only."
                 )
+                gate_eval_skipped_reason = "exec_below_min"
                 gate_stop = False
                 next_phase = phase
             else:
@@ -1135,26 +1498,96 @@ class AdditionalDOEOrchestrator:
                     gate1_result=g1,
                     gate2_result=g2,
                 )
+                gate_evaluated = True
+                gate1_score_raw = float(g1.get("score")) if g1.get("score") is not None else None
+                gate2_score_raw = float(g2.get("score")) if g2.get("score") is not None else None
+                gate1_score = gate1_score_raw
+                gate2_score = gate2_score_raw
+                gate1_passed = bool(decision.get("gate1_passed", False))
+                gate2_passed = bool(decision.get("gate2_passed", False))
+                self._gate_eval_count += 1
+                gate1_score_ema = self._update_ema(
+                    prev=self._gate1_ema,
+                    value=gate1_score_raw,
+                    alpha=self.gate_ema_alpha,
+                )
+                gate2_score_ema = self._update_ema(
+                    prev=self._gate2_ema,
+                    value=gate2_score_raw,
+                    alpha=self.gate_ema_alpha,
+                )
+                self._gate1_ema = gate1_score_ema
+                self._gate2_ema = gate2_score_ema
+                gate1_pass_threshold = float(getattr(self.gate1, "pass_ratio", 0.5))
+                gate2_pass_threshold = float(getattr(self.gate2, "ratio_threshold", 0.8))
+                gate1_pass_smoothed = bool(
+                    gate1_score_ema is not None and gate1_score_ema >= gate1_pass_threshold
+                )
+                gate2_pass_smoothed = bool(
+                    gate2_score_ema is not None and gate2_score_ema >= gate2_pass_threshold
+                )
+                gate_stop_smoothed = bool(gate1_pass_smoothed and gate2_pass_smoothed)
+                use_ema = bool(
+                    self.gate_smoothing_enabled
+                    and self._gate_eval_count > self.gate_ema_warmup_stages
+                )
 
-                # If gates say stop, allow one final execution from current plan
-                gate_stop = bool(decision.get("gate_stop", False))
-                p_dim = max(int(len(self.bounds)), 1)
-                usable_n = int(self._usable_sample_count())
-                usable_np_ratio = float(usable_n) / float(p_dim)
-                can_stop_by_data = bool(usable_np_ratio >= self.stop_min_usable_np_ratio)
+                # Gate stop (strict) is used only in adaptive_early_stop mode.
+                gate_stop_raw = bool(decision.get("gate_stop", False))
+                stop_np_gate = float(max(self.stop_min_usable_np_ratio, self.early_stop_min_usable_np_ratio))
+                can_stop_by_data = bool(usable_np_ratio >= stop_np_gate)
                 can_stop_by_round = bool(round_idx + 1 >= self.min_additional_rounds)
+                can_stop_by_budget = bool(used_budget_ratio >= self.early_stop_min_used_budget_ratio)
+                converged_for_stop = bool(self._should_stop_by_convergence())
+                gate_stop_signal = gate_stop_raw
+                if use_ema and self.gate_smoothing_use_for_stop:
+                    gate_stop_signal = bool(gate_stop_smoothed)
+                    gate_decision_source = "ema"
+                else:
+                    gate_decision_source = "raw"
 
-                if can_stop_by_round and can_stop_by_data:
-                    if self._should_stop_by_convergence():
-                        gate_stop = True
+                if self.budget_policy == "adaptive_early_stop":
+                    gate_stop = bool(
+                        gate_stop_signal
+                        and can_stop_by_round
+                        and can_stop_by_data
+                        and can_stop_by_budget
+                        and converged_for_stop
+                    )
                 else:
                     gate_stop = False
                 if gate_stop:
                     print(f"[AdditionalDOE] gate_stop=True, executing final batch (stage={round_idx})")
 
-                g1_passed = bool(decision.get("gate1_passed", False))
-                can_enter_phase2_by_data = bool(usable_np_ratio > self.phase2_min_usable_np_ratio)
-                next_phase = 2 if (g1_passed and can_enter_phase2_by_data) else 1
+                can_enter_phase2_by_data = bool(usable_np_ratio > phase2_np_gate)
+                can_enter_phase2_by_budget = bool(used_budget_ratio >= self.phase2_min_used_budget_ratio)
+                gate1_score_for_phase2 = gate1_score_raw
+                gate2_score_for_phase2 = gate2_score_raw
+                if use_ema and self.gate_smoothing_use_for_phase2:
+                    gate1_score_for_phase2 = gate1_score_ema
+                    gate2_score_for_phase2 = gate2_score_ema
+                    phase2_decision_source = "ema"
+                else:
+                    phase2_decision_source = "raw"
+                gate1_score_used = gate1_score_for_phase2
+                gate2_score_used = gate2_score_for_phase2
+                can_enter_phase2_by_gate1 = bool(
+                    gate1_score_for_phase2 is not None
+                    and gate1_score_for_phase2 >= self.phase2_gate1_score_min
+                )
+                gate2_phase_threshold = float(
+                    self.phase2_gate2_score_sticky_min if int(phase) == 2 else self.phase2_gate2_score_min
+                )
+                can_enter_phase2_by_gate2 = bool(
+                    gate2_score_for_phase2 is not None
+                    and gate2_score_for_phase2 >= gate2_phase_threshold
+                )
+                next_phase = 2 if (
+                    can_enter_phase2_by_gate1
+                    and can_enter_phase2_by_gate2
+                    and can_enter_phase2_by_data
+                    and can_enter_phase2_by_budget
+                ) else 1
                 if next_phase == 2:
                     self._ever_phase2 = True
 
@@ -1169,12 +1602,30 @@ class AdditionalDOEOrchestrator:
                 # Final stage policy: exploit locally as much as possible.
                 n_exec_global = 0
                 n_exec_local = n_exec
+            if diversity_boost_active and (not gate_stop):
+                diversity_quota = self._resolve_diversity_quota(n_exec=n_exec)
+                if diversity_quota > 0:
+                    max_shift = max(n_exec_local - 1, 0)
+                    shifted = min(diversity_quota, max_shift)
+                    n_exec_local = int(max(n_exec_local - shifted, 0))
+                    n_exec_global = int(min(n_exec_global + shifted, n_exec))
+                    diversity_quota = int(shifted)
+                if diversity_quota > 0:
+                    print(
+                        "[AdditionalDOE] diversity_injection "
+                        f"stage={round_idx} quota={diversity_quota} "
+                        f"exec_global/local={n_exec_global}/{n_exec_local}"
+                    )
 
             print(
                 f"[AdditionalDOE] stage={round_idx} phase={phase} "
                 f"n_plan={n_plan} n_exec={n_exec} "
                 f"global/local={n_global}/{n_local} "
-                f"exec_global/local={n_exec_global}/{n_exec_local}"
+                f"exec_global/local={n_exec_global}/{n_exec_local} "
+                f"used_ratio={used_budget_ratio:.3f} policy={self.budget_policy} "
+                f"alloc={alloc_info.get('alloc_source')} "
+                f"base={alloc_info.get('n_exec_base')} "
+                f"mult={alloc_info.get('alloc_multiplier')}"
             )
 
             spans, lbs = compute_spans_lbs(self.bounds)
@@ -1299,6 +1750,14 @@ class AdditionalDOEOrchestrator:
                 n_margin_exec = min(max(n_margin_exec, 0), n_pick)
                 n_top_exec = int(round(n_pick * self.global_top_ratio))
                 n_top_exec = min(max(n_top_exec, 0), n_pick)
+                diversity_reserve = 0
+                if (
+                    diversity_boost_active
+                    and diversity_quota > 0
+                    and n_pick_override is None
+                ):
+                    diversity_reserve = min(int(diversity_quota), n_pick)
+                    n_boundary_exec = max(n_boundary_exec, diversity_reserve)
                 if n_pick > 0 and n_top_exec < 1:
                     n_top_exec = 1
 
@@ -1326,6 +1785,13 @@ class AdditionalDOEOrchestrator:
                         if len(out) >= k:
                             break
                     return out
+
+                # 0) collapse 후 diversity reserve를 경계 점에서 우선 확보
+                if diversity_reserve > 0 and boundary_work.size == Xg_work.shape[0]:
+                    boundary_order = [idx for idx in order_g.tolist() if boundary_work[idx]]
+                    picked = _take(boundary_order, diversity_reserve)
+                    selected.extend(picked)
+                    selected_set.update(picked)
 
                 # 1) margin 작은 순(제약 경계 근처)
                 if n_margin_exec > 0 and margins_work.size == Xg_work.shape[0]:
@@ -1574,7 +2040,10 @@ class AdditionalDOEOrchestrator:
                     break
                 if X_exec_l.shape[0] < n_exec_local:
                     shortage = int(n_exec_local - X_exec_l.shape[0])
-                    early_round_relax = bool((round_idx + 1) < int(self.min_additional_rounds))
+                    if self.budget_policy == "consume_all":
+                        early_round_relax = bool(used_budget_ratio < self.phase2_min_used_budget_ratio)
+                    else:
+                        early_round_relax = bool((round_idx + 1) < int(self.min_additional_rounds))
                     allow_global_backfill = bool(early_round_relax or (gate_stop and n_exec_global == 0))
 
                     filled = 0
@@ -1633,6 +2102,85 @@ class AdditionalDOEOrchestrator:
                 if X_exec_g.shape[0] < n_exec_global:
                     self._set_failure("FAILED_DEDUP", stage=round_idx)
                     break
+            selected_exec_global = int(X_exec_g.shape[0])
+            selected_exec_local = int(X_exec_l.shape[0]) if n_exec_local > 0 else 0
+            if diversity_boost_active:
+                diversity_sample_count = int(min(max(diversity_quota, 0), selected_exec_global))
+            else:
+                diversity_sample_count = 0
+            self.gate_history.append(
+                {
+                    "stage": int(round_idx),
+                    "phase": int(phase),
+                    "next_phase": int(next_phase),
+                    "n_plan": int(n_plan),
+                    "n_exec": int(n_exec),
+                    "n_exec_base": int(alloc_info.get("n_exec_base", n_exec)),
+                    "n_exec_preclip": int(alloc_info.get("n_exec_preclip", n_exec)),
+                    "alloc_source": str(alloc_info.get("alloc_source", "")),
+                    "alloc_multiplier": alloc_info.get("alloc_multiplier"),
+                    "alloc_eff_prev": alloc_info.get("alloc_eff_prev"),
+                    "alloc_eff_ref": alloc_info.get("alloc_eff_ref"),
+                    "alloc_min_stage": alloc_info.get("alloc_min_stage"),
+                    "alloc_max_stage": alloc_info.get("alloc_max_stage"),
+                    "alloc_additional_budget_total": alloc_info.get("alloc_additional_budget_total"),
+                    "n_global_plan": int(n_global),
+                    "n_local_plan": int(n_local),
+                    "n_exec_global_target": int(n_exec_global),
+                    "n_exec_local_target": int(n_exec_local),
+                    "n_exec_global_selected": int(selected_exec_global),
+                    "n_exec_local_selected": int(selected_exec_local),
+                    "usable_n": int(usable_n),
+                    "p_dim": int(p_dim),
+                    "usable_n_over_p": float(usable_np_ratio),
+                    "budget_total": int(self.total_budget),
+                    "budget_used_before_exec": int(self.budget.used),
+                    "used_budget_ratio_before_exec": float(used_budget_ratio),
+                    "budget_np_ratio": float(budget_np_ratio),
+                    "budget_policy": str(self.budget_policy),
+                    "gate_evaluated": bool(gate_evaluated),
+                    "gate_eval_skipped_reason": gate_eval_skipped_reason,
+                    "gate1_score": gate1_score,
+                    "gate1_score_raw": gate1_score_raw,
+                    "gate1_score_ema": gate1_score_ema,
+                    "gate1_score_used": gate1_score_used,
+                    "gate1_pass": gate1_passed,
+                    "gate1_pass_smoothed": gate1_pass_smoothed,
+                    "gate2_score": gate2_score,
+                    "gate2_score_raw": gate2_score_raw,
+                    "gate2_score_ema": gate2_score_ema,
+                    "gate2_score_used": gate2_score_used,
+                    "gate2_pass": gate2_passed,
+                    "gate2_pass_smoothed": gate2_pass_smoothed,
+                    "gate_decision_source": gate_decision_source,
+                    "phase2_decision_source": phase2_decision_source,
+                    "gate_stop_raw": gate_stop_raw,
+                    "gate_stop_smoothed": gate_stop_smoothed,
+                    "gate_stop_final": bool(gate_stop),
+                    "can_stop_by_data": can_stop_by_data,
+                    "can_stop_by_round": can_stop_by_round,
+                    "can_stop_by_budget": can_stop_by_budget,
+                    "converged_for_stop": converged_for_stop,
+                    "collapse_detected": bool(collapse_detected),
+                    "collapse_span_ratio": collapse_trigger_span,
+                    "collapse_anchor_streak": int(collapse_anchor_streak),
+                    "diversity_boost_active": bool(diversity_boost_active),
+                    "diversity_quota": int(diversity_quota),
+                    "diversity_sample_count": int(diversity_sample_count),
+                    "diversity_hit_rate": diversity_hit_rate,
+                    "phase2_gate1_score_min": float(self.phase2_gate1_score_min),
+                    "phase2_gate2_score_min": float(self.phase2_gate2_score_min),
+                    "phase2_gate2_score_sticky_min": float(self.phase2_gate2_score_sticky_min),
+                    "phase2_np_gate": float(phase2_np_gate),
+                    "phase2_min_used_budget_ratio": float(self.phase2_min_used_budget_ratio),
+                    "phase2_gate2_threshold_used": gate2_phase_threshold,
+                    "can_enter_phase2_by_data": can_enter_phase2_by_data,
+                    "can_enter_phase2_by_budget": can_enter_phase2_by_budget,
+                    "can_enter_phase2_by_gate1": can_enter_phase2_by_gate1,
+                    "can_enter_phase2_by_gate2": can_enter_phase2_by_gate2,
+                    "remaining_budget_before_exec": int(remaining),
+                }
+            )
 
             if X_exec_g.shape[0] == 0 and (n_exec_local <= 0 or X_exec_l.shape[0] == 0):
                 self._set_failure("FAILED_DEDUP", stage=round_idx)
@@ -1643,15 +2191,61 @@ class AdditionalDOEOrchestrator:
             # -----------------------------
             executed_ok = True
             if X_exec_g.shape[0] > 0:
-                executed_g = self._execute_points(
-                    X_exec_g,
-                    source="additional",
-                    round_idx=round_idx,
-                    exec_scope="global",
-                    constraints_payloads=constraints_exec_g,
-                    constraint_margins=margins_exec_g,
-                )
-                executed_ok = executed_ok and bool(executed_g)
+                n_div = int(min(max(diversity_sample_count, 0), X_exec_g.shape[0]))
+                if n_div > 0:
+                    X_exec_g_div = X_exec_g[:n_div]
+                    c_exec_g_div = constraints_exec_g[:n_div]
+                    m_exec_g_div = (
+                        margins_exec_g[:n_div]
+                        if np.asarray(margins_exec_g).size >= n_div
+                        else np.empty((0,), dtype=float)
+                    )
+                    pre_rows = int(len(self.store.rows))
+                    executed_g_div = self._execute_points(
+                        X_exec_g_div,
+                        source="additional",
+                        round_idx=round_idx,
+                        exec_scope="global_diversity",
+                        constraints_payloads=c_exec_g_div,
+                        constraint_margins=m_exec_g_div,
+                    )
+                    executed_ok = executed_ok and bool(executed_g_div)
+                    post_rows = int(len(self.store.rows))
+                    if post_rows > pre_rows:
+                        div_rows = self.store.rows[pre_rows:post_rows]
+                        div_hits = int(
+                            sum(
+                                1
+                                for rr in div_rows
+                                if bool(getattr(rr, "success", False)) and bool(getattr(rr, "feasible", False))
+                            )
+                        )
+                        diversity_hit_rate = float(div_hits / max(len(div_rows), 1))
+                        diversity_sample_count = int(len(div_rows))
+                    else:
+                        diversity_hit_rate = None
+                        diversity_sample_count = 0
+                    X_exec_g_main = X_exec_g[n_div:]
+                    c_exec_g_main = constraints_exec_g[n_div:]
+                    m_exec_g_main = (
+                        margins_exec_g[n_div:]
+                        if np.asarray(margins_exec_g).size >= n_div
+                        else np.empty((0,), dtype=float)
+                    )
+                else:
+                    X_exec_g_main = X_exec_g
+                    c_exec_g_main = constraints_exec_g
+                    m_exec_g_main = margins_exec_g
+                if X_exec_g_main.shape[0] > 0:
+                    executed_g = self._execute_points(
+                        X_exec_g_main,
+                        source="additional",
+                        round_idx=round_idx,
+                        exec_scope="global",
+                        constraints_payloads=c_exec_g_main,
+                        constraint_margins=m_exec_g_main,
+                    )
+                    executed_ok = executed_ok and bool(executed_g)
             if n_exec_local > 0 and X_exec_l.shape[0] > 0:
                 executed_l = self._execute_points(
                     X_exec_l,
@@ -1667,15 +2261,24 @@ class AdditionalDOEOrchestrator:
                 if self.failure_reason is None:
                     self._set_failure("FAILED_BUDGET", stage=round_idx)
                 break
+            if self.gate_history:
+                self.gate_history[-1]["diversity_sample_count"] = int(diversity_sample_count)
+                self.gate_history[-1]["diversity_hit_rate"] = diversity_hit_rate
 
             if gate_stop:
                 break
 
             # increase round only when actual execution happened
+            self._collapse_diversity_pending = bool(collapse_detected)
             round_idx += 1
             phase = next_phase
 
-        if round_idx >= self.max_additional_stages and not self.budget.exhausted() and self.failure_reason is None:
+        if (
+            self.budget_policy != "consume_all"
+            and round_idx >= self.max_additional_stages
+            and not self.budget.exhausted()
+            and self.failure_reason is None
+        ):
             self._set_failure("STOP_MAX_ADDITIONAL_STAGES", stage=round_idx)
 
         exec_used = int(self.budget.used)
@@ -1694,9 +2297,140 @@ class AdditionalDOEOrchestrator:
 
     def get_diagnostics(self) -> dict:
         n_success, n_total, success_ratio = self._success_stats()
+        p_dim = max(int(len(self.bounds)), 1)
+        usable_n = int(self._usable_sample_count())
+        usable_n_over_p = float(usable_n) / float(p_dim)
+        additional_rows = [
+            r for r in self.store.rows
+            if str(getattr(r, "source", "")).strip().lower() == "additional"
+        ]
+        gate_rows = [g for g in self.gate_history if bool(g.get("gate_evaluated", False))]
+        gate1_pass_rate = None
+        gate2_pass_rate = None
+        gate1_score_mean = None
+        gate2_score_mean = None
+        gate1_score_last = None
+        gate2_score_last = None
+        gate1_score_ema_mean = None
+        gate2_score_ema_mean = None
+        gate1_score_ema_last = None
+        gate2_score_ema_last = None
+        gate_decision_source_last = None
+        if gate_rows:
+            g1_pass_vals = [1.0 if bool(g.get("gate1_pass", False)) else 0.0 for g in gate_rows]
+            g2_pass_vals = [1.0 if bool(g.get("gate2_pass", False)) else 0.0 for g in gate_rows]
+            gate1_pass_rate = float(np.mean(g1_pass_vals))
+            gate2_pass_rate = float(np.mean(g2_pass_vals))
+
+            g1_scores = [float(g["gate1_score"]) for g in gate_rows if g.get("gate1_score") is not None]
+            g2_scores = [float(g["gate2_score"]) for g in gate_rows if g.get("gate2_score") is not None]
+            if g1_scores:
+                gate1_score_mean = float(np.mean(g1_scores))
+                gate1_score_last = float(g1_scores[-1])
+            if g2_scores:
+                gate2_score_mean = float(np.mean(g2_scores))
+                gate2_score_last = float(g2_scores[-1])
+            g1_ema_scores = [float(g["gate1_score_ema"]) for g in gate_rows if g.get("gate1_score_ema") is not None]
+            g2_ema_scores = [float(g["gate2_score_ema"]) for g in gate_rows if g.get("gate2_score_ema") is not None]
+            if g1_ema_scores:
+                gate1_score_ema_mean = float(np.mean(g1_ema_scores))
+                gate1_score_ema_last = float(g1_ema_scores[-1])
+            if g2_ema_scores:
+                gate2_score_ema_mean = float(np.mean(g2_ema_scores))
+                gate2_score_ema_last = float(g2_ema_scores[-1])
+            gate_decision_source_last = gate_rows[-1].get("gate_decision_source")
+
+        local_span_ratio_mean_last = None
+        if self.local_metrics:
+            local_span_ratio_mean_last = self.local_metrics[-1].get("local_span_ratio_mean")
+        used_budget_ratio_final = float(self.budget.used) / float(max(self.budget.total, 1))
+        phase2_np_gate_last = None
+        gate2_phase_threshold_used_last = None
+        stage_count_total = int(len(self.gate_history))
+        stage_gate_eval_count = int(
+            sum(1 for g in self.gate_history if bool(g.get("gate_evaluated", False)))
+        )
+        gate_eval_skipped_count = int(stage_count_total - stage_gate_eval_count)
+        phase2_stage_indices = [
+            int(g.get("stage"))
+            for g in self.gate_history
+            if int(g.get("next_phase", 1)) == 2
+        ]
+        phase2_first_stage = phase2_stage_indices[0] if phase2_stage_indices else None
+        phase2_stage_count = int(len(phase2_stage_indices))
+        phase2_transition_count = int(
+            sum(
+                1
+                for g in self.gate_history
+                if int(g.get("phase", 1)) == 1 and int(g.get("next_phase", 1)) == 2
+            )
+        )
+        gate_stop_raw_count = int(
+            sum(1 for g in self.gate_history if bool(g.get("gate_stop_raw", False)))
+        )
+        gate_stop_final_count = int(
+            sum(1 for g in self.gate_history if bool(g.get("gate_stop_final", False)))
+        )
+        gate_stop_blocked_count = int(
+            sum(
+                1
+                for g in self.gate_history
+                if bool(g.get("gate_stop_raw", False)) and (not bool(g.get("gate_stop_final", False)))
+            )
+        )
+        collapse_detected_count = int(
+            sum(1 for g in self.gate_history if bool(g.get("collapse_detected", False)))
+        )
+        diversity_injection_applied_count = int(
+            sum(1 for g in self.gate_history if int(g.get("diversity_quota", 0) or 0) > 0)
+        )
+        diversity_sample_count_total = int(
+            sum(int(g.get("diversity_sample_count", 0) or 0) for g in self.gate_history)
+        )
+        diversity_hit_rate_vals = [
+            float(g.get("diversity_hit_rate"))
+            for g in self.gate_history
+            if g.get("diversity_hit_rate") is not None
+        ]
+        diversity_hit_rate_mean = (
+            float(np.mean(diversity_hit_rate_vals)) if diversity_hit_rate_vals else None
+        )
+        used_budget_ratio_phase2_first = None
+        if phase2_first_stage is not None:
+            row = next(
+                (g for g in self.gate_history if int(g.get("stage", -1)) == int(phase2_first_stage)),
+                None,
+            )
+            if isinstance(row, dict):
+                used_budget_ratio_phase2_first = row.get("used_budget_ratio_before_exec")
+        if self.gate_history:
+            phase2_np_gate_last = self.gate_history[-1].get("phase2_np_gate")
+            gate2_phase_threshold_used_last = self.gate_history[-1].get("phase2_gate2_threshold_used")
+        alloc_rows = [
+            g for g in self.gate_history
+            if g.get("alloc_multiplier") is not None
+        ]
+        alloc_multiplier_last = alloc_rows[-1].get("alloc_multiplier") if alloc_rows else None
+        alloc_eff_prev_last = alloc_rows[-1].get("alloc_eff_prev") if alloc_rows else None
+        alloc_eff_ref_last = alloc_rows[-1].get("alloc_eff_ref") if alloc_rows else None
+        alloc_multiplier_mean = (
+            float(np.mean([float(g.get("alloc_multiplier")) for g in alloc_rows]))
+            if alloc_rows else None
+        )
+        alloc_dynamic_applied_count = int(
+            sum(1 for g in alloc_rows if str(g.get("alloc_source", "")).startswith("dynamic"))
+        )
+        budget_exhausted = bool(self.budget.exhausted())
+        terminated_by = (
+            str(self.failure_reason)
+            if self.failure_reason is not None
+            else ("budget_exhausted" if budget_exhausted else "completed_without_exhaustion")
+        )
         out = {
             "failure_reason": self.failure_reason,
             "local_metrics": self.local_metrics,
+            "gate_history": self.gate_history,
+            "budget_policy": str(self.budget_policy),
             "constraint_rate_hat": float(self.constraint_rate_hat),
             "post_feasible_rate_hat": float(self.post_feasible_rate_hat),
             "post_lambda": float(self.post_lambda_current),
@@ -1706,6 +2440,86 @@ class AdditionalDOEOrchestrator:
             "success_count": int(n_success),
             "success_total": int(n_total),
             "success_ratio": float(success_ratio),
+            "p_dim": int(p_dim),
+            "usable_n": int(usable_n),
+            "usable_n_over_p": float(usable_n_over_p),
+            "used_budget_ratio_final": float(used_budget_ratio_final),
+            "dynamic_exec_allocation_enabled": bool(self.dynamic_exec_allocation_enabled),
+            "exec_round_shares": [float(v) for v in self.exec_round_shares],
+            "exec_eff_weight_gate1": float(self.exec_eff_weight_gate1),
+            "exec_eff_weight_gate2": float(self.exec_eff_weight_gate2),
+            "exec_eff_gain_k": float(self.exec_eff_gain_k),
+            "exec_eff_clip_min": float(self.exec_eff_clip_min),
+            "exec_eff_clip_max": float(self.exec_eff_clip_max),
+            "exec_stage_min_ratio": float(self.exec_stage_min_ratio),
+            "exec_stage_max_ratio": float(self.exec_stage_max_ratio),
+            "alloc_multiplier_last": alloc_multiplier_last,
+            "alloc_multiplier_mean": alloc_multiplier_mean,
+            "alloc_eff_prev_last": alloc_eff_prev_last,
+            "alloc_eff_ref_last": alloc_eff_ref_last,
+            "alloc_dynamic_applied_count": alloc_dynamic_applied_count,
+            "phase2_gate1_score_min": float(self.phase2_gate1_score_min),
+            "phase2_gate2_score_min": float(self.phase2_gate2_score_min),
+            "phase2_gate2_score_sticky_min": float(self.phase2_gate2_score_sticky_min),
+            "gate_smoothing_enabled": bool(self.gate_smoothing_enabled),
+            "gate_ema_alpha": float(self.gate_ema_alpha),
+            "gate_ema_warmup_stages": int(self.gate_ema_warmup_stages),
+            "gate_smoothing_use_for_phase2": bool(self.gate_smoothing_use_for_phase2),
+            "gate_smoothing_use_for_stop": bool(self.gate_smoothing_use_for_stop),
+            "collapse_span_ratio_threshold": float(self.collapse_span_ratio_threshold),
+            "collapse_anchor_streak_threshold": int(self.collapse_anchor_streak_threshold),
+            "collapse_min_stage": int(self.collapse_min_stage),
+            "diversity_injection_ratio": float(self.diversity_injection_ratio),
+            "diversity_injection_min_points": int(self.diversity_injection_min_points),
+            "diversity_injection_max_ratio": float(self.diversity_injection_max_ratio),
+            "diversity_boundary_floor_ratio": float(self.diversity_boundary_floor_ratio),
+            "phase2_min_usable_np_ratio": float(self.phase2_min_usable_np_ratio),
+            "phase2_np_ratio_cap_scale": float(self.phase2_np_ratio_cap_scale),
+            "phase2_min_used_budget_ratio": float(self.phase2_min_used_budget_ratio),
+            "phase2_np_gate_last": phase2_np_gate_last,
+            "gate2_phase_threshold_used_last": gate2_phase_threshold_used_last,
+            "early_stop_min_used_budget_ratio": float(self.early_stop_min_used_budget_ratio),
+            "early_stop_min_usable_np_ratio": float(self.early_stop_min_usable_np_ratio),
+            "budget_used": int(self.budget.used),
+            "budget_total": int(self.budget.total),
+            "budget_exhausted": bool(budget_exhausted),
+            "stage_count_total": stage_count_total,
+            "stage_gate_eval_count": stage_gate_eval_count,
+            "gate_eval_skipped_count": gate_eval_skipped_count,
+            "phase2_first_stage": phase2_first_stage,
+            "phase2_stage_count": phase2_stage_count,
+            "phase2_transition_count": phase2_transition_count,
+            "gate_stop_raw_count": gate_stop_raw_count,
+            "gate_stop_final_count": gate_stop_final_count,
+            "gate_stop_blocked_count": gate_stop_blocked_count,
+            "collapse_detected_count": collapse_detected_count,
+            "diversity_injection_applied_count": diversity_injection_applied_count,
+            "diversity_sample_count_total": diversity_sample_count_total,
+            "diversity_hit_rate_mean": diversity_hit_rate_mean,
+            "used_budget_ratio_phase2_first": used_budget_ratio_phase2_first,
+            "terminated_by": terminated_by,
+            "doe_additional_triggered": bool(len(additional_rows) > 0),
+            "doe_added_samples": int(len(additional_rows)),
+            "doe_gate1_pass_rate": gate1_pass_rate,
+            "doe_gate2_pass_rate": gate2_pass_rate,
+            "doe_gate1_score_mean": gate1_score_mean,
+            "doe_gate2_score_mean": gate2_score_mean,
+            "doe_gate1_score_last": gate1_score_last,
+            "doe_gate2_score_last": gate2_score_last,
+            "doe_gate1_score_ema_mean": gate1_score_ema_mean,
+            "doe_gate2_score_ema_mean": gate2_score_ema_mean,
+            "doe_gate1_score_ema_last": gate1_score_ema_last,
+            "doe_gate2_score_ema_last": gate2_score_ema_last,
+            "doe_gate_decision_source_last": gate_decision_source_last,
+            "doe_collapse_detected_count": collapse_detected_count,
+            "doe_diversity_injection_applied_count": diversity_injection_applied_count,
+            "doe_diversity_sample_count_total": diversity_sample_count_total,
+            "doe_diversity_hit_rate_mean": diversity_hit_rate_mean,
+            "phase2_entered": bool(self._ever_phase2),
+            "has_pre_constraints": bool(self.has_pre_constraints),
+            "has_post_constraints": bool(self.has_post_constraints),
+            "local_span_ratio_mean_last": local_span_ratio_mean_last,
+            "anchor_spread_zero_streak_max": int(self._anchor_spread_zero_streak_max),
         }
         if self.has_pre_constraints:
             out["constraint_stats"] = {
@@ -1723,6 +2537,44 @@ class AdditionalDOEOrchestrator:
             self._anchor_spread_zero_streak += 1
         else:
             self._anchor_spread_zero_streak = 0
+        if self._anchor_spread_zero_streak > self._anchor_spread_zero_streak_max:
+            self._anchor_spread_zero_streak_max = int(self._anchor_spread_zero_streak)
+
+    @staticmethod
+    def _update_ema(*, prev: float | None, value: float | None, alpha: float) -> float | None:
+        if value is None:
+            return prev
+        if prev is None:
+            return float(value)
+        return float(alpha * float(value) + (1.0 - alpha) * float(prev))
+
+    def _is_local_collapse(
+        self,
+        *,
+        stage: int,
+        span_ratio: float | None,
+        anchor_streak: int,
+    ) -> bool:
+        if int(stage) < int(self.collapse_min_stage):
+            return False
+        if span_ratio is None:
+            return False
+        if float(span_ratio) > float(self.collapse_span_ratio_threshold):
+            return False
+        return bool(int(anchor_streak) >= int(self.collapse_anchor_streak_threshold))
+
+    def _resolve_diversity_quota(self, *, n_exec: int) -> int:
+        if n_exec <= 0:
+            return 0
+        if self.diversity_injection_ratio <= 0.0:
+            return 0
+        quota = int(round(float(n_exec) * float(self.diversity_injection_ratio)))
+        quota = max(quota, int(self.diversity_injection_min_points))
+        max_quota = int(np.floor(float(n_exec) * float(self.diversity_injection_max_ratio)))
+        if max_quota <= 0:
+            max_quota = 1
+        quota = min(quota, max_quota, int(n_exec))
+        return int(max(quota, 0))
 
     def _success_stats(self) -> tuple[int, int, float]:
         n_total = int(self.store.size)
