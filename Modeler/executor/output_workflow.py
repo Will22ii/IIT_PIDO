@@ -130,6 +130,14 @@ def save_modeler_outputs(
         "feas_model_kind": feas_model_kind,
         "workflow_info": workflow_info,
     }
+    if "forced_by_min_guard" in selected_df.columns:
+        guard_features = selected_df.loc[
+            selected_df["forced_by_min_guard"].astype(bool),
+            "feature",
+        ].astype(str).tolist()
+        resolved_params["anti_collapse_guard_activated"] = len(guard_features) > 0
+        if guard_features:
+            resolved_params["anti_collapse_guard_features"] = guard_features
     if "bootstrap_enabled_effective" in selected_df.columns:
         resolved_params["fi_bootstrap_enabled_effective"] = bool(
             selected_df["bootstrap_enabled_effective"].astype(bool).any()

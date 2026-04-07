@@ -12,7 +12,7 @@ class ExplorerUserConfig:
 @dataclass
 class ExplorerSystemConfig:
     # 샘플 수 (기본 고정값)
-    n_samples: int = 5000
+    n_samples: int = 10000
     # DOE 데이터 수 × 배수로 n_samples 계산 (값이 없으면 고정값 사용)
     sample_multiplier: float | None = 4.0
     # 배수 계산 사용 시 최소/최대 제한

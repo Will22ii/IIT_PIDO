@@ -107,6 +107,7 @@ def finalize_selected_features(
     public_dir: str,
     keep_debug: bool,
     use_score_drop: bool,
+    min_features: int = 2,
 ) -> SelectionFinalizeResult:
     selected_features = selected_df[selected_df["selected"]]["feature"].tolist()
     if not selected_features:
@@ -157,6 +158,34 @@ def finalize_selected_features(
                         ),
                     ],
                     ignore_index=True,
+                )
+
+    # Anti-collapse guard: 최소 feature 수 보장
+    if len(selected_features) < int(min_features) and "feature" in selected_df.columns:
+        score_col = "final_score_adj" if "final_score_adj" in selected_df.columns else "final_score"
+        if score_col in selected_df.columns:
+            ranked = selected_df.sort_values(by=score_col, ascending=False)
+            current_set = set(str(f) for f in selected_features)
+            n_before = len(selected_features)
+            for _, row in ranked.iterrows():
+                if len(selected_features) >= int(min_features):
+                    break
+                feat = str(row.get("feature", ""))
+                if feat and feat not in current_set:
+                    selected_features.append(feat)
+                    current_set.add(feat)
+            appended_by_guard = selected_features[n_before:]
+            if appended_by_guard:
+                selected_df = selected_df.copy()
+                if "forced_by_min_guard" not in selected_df.columns:
+                    selected_df["forced_by_min_guard"] = False
+                for feat in appended_by_guard:
+                    mask_feat = selected_df["feature"].astype(str) == str(feat)
+                    selected_df.loc[mask_feat, "selected"] = True
+                    selected_df.loc[mask_feat, "forced_by_min_guard"] = True
+                print(
+                    f"- Anti-collapse guard: {n_before}개 → {len(selected_features)}개 "
+                    f"(추가: {', '.join(appended_by_guard)})"
                 )
 
     if keep_debug and ("feature" in selected_df.columns):

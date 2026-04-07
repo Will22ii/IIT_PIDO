@@ -48,6 +48,7 @@ def select_top_clusters(
 
     X_q = X[mask]
     y_q = y[mask]
+    q_global_idx = np.where(mask)[0]
     if X_q.size == 0:
         return np.empty((0, X.shape[1]), dtype=float), np.array([], dtype=int), {}
 
@@ -78,6 +79,7 @@ def select_top_clusters(
                 "best_val": float(y_q[best_local]),
                 "points": X_q[idx],
                 "center": np.mean(X_q[idx], axis=0),
+                "indices_local": idx.astype(int),
             }
         )
 
@@ -90,6 +92,7 @@ def select_top_clusters(
                 "label": "noise_best",
                 "best_val": float(y_q[best_local_idx]),
                 "points": X_q[best_local_idx].reshape(1, -1),
+                "indices_local": np.asarray([best_local_idx], dtype=int),
             }
         else:
             best_cluster_label = int(labels[best_local_idx])
@@ -180,6 +183,18 @@ def select_top_clusters(
     X_sel = np.vstack(points) if points else np.empty((0, X.shape[1]), dtype=float)
     y_sel = np.concatenate(labels_out) if labels_out else np.array([], dtype=int)
 
+    selected_indices_global: list[int] = []
+    for c in selected:
+        idx_local = np.asarray(c.get("indices_local", np.array([], dtype=int)), dtype=int).reshape(-1)
+        if idx_local.size == 0:
+            continue
+        idx_local = idx_local[(idx_local >= 0) & (idx_local < q_global_idx.size)]
+        if idx_local.size == 0:
+            continue
+        selected_indices_global.extend(int(v) for v in q_global_idx[idx_local].tolist())
+    if selected_indices_global:
+        selected_indices_global = sorted(set(selected_indices_global))
+
     spans = []
     volumes = []
     for c in selected:
@@ -207,6 +222,7 @@ def select_top_clusters(
         "diversity_used": bool(diversity_used),
         "diversity_selected_count": int(diversity_selected_count),
         "diversity_selected_min_dist": diversity_selected_min_dist,
+        "selected_indices": selected_indices_global,
         "selected_spans": spans,
         "selected_volumes": volumes,
     }

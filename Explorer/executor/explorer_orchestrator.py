@@ -26,7 +26,11 @@ from utils.boundary_sampling import sample_boundary_corners, sample_boundary_par
 from utils.cluster_selection import select_top_clusters
 from utils.bounds_utils import compute_spans_lbs
 from utils.dbscan_utils import auto_dbscan_eps_quantile
-from DOE.executor.constraint_filter import evaluate_constraints_batch, validate_constraint_defs
+from DOE.executor.constraint_filter import (
+    evaluate_constraints_batch,
+    evaluate_constraints_point,
+    validate_constraint_defs,
+)
 from Explorer.executor.explorer_utils import (
     apply_bounds_margin,
     compute_fi_importance_weights,
@@ -180,6 +184,84 @@ def _volume_ratio_for_bounds(
         else:
             ratios.append(max(0.0, float(s_ub - s_lb) / denom))
     return float(np.prod(ratios)) if ratios else 0.0
+
+
+def _bounds_center(bounds_like: list[tuple[float, float]] | None) -> np.ndarray | None:
+    if bounds_like is None or len(bounds_like) == 0:
+        return None
+    out = []
+    for lb, ub in bounds_like:
+        lo = float(min(lb, ub))
+        hi = float(max(lb, ub))
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            return None
+        out.append(0.5 * (lo + hi))
+    return np.asarray(out, dtype=float)
+
+
+def _bounds_iou_ratio(
+    bounds_a: list[tuple[float, float]] | None,
+    bounds_b: list[tuple[float, float]] | None,
+) -> float | None:
+    if (
+        bounds_a is None
+        or bounds_b is None
+        or len(bounds_a) == 0
+        or len(bounds_b) == 0
+        or len(bounds_a) != len(bounds_b)
+    ):
+        return None
+    inter_ratio = 1.0
+    union_ratio = 1.0
+    for (a_lb, a_ub), (b_lb, b_ub) in zip(bounds_a, bounds_b):
+        a_lo = float(min(a_lb, a_ub))
+        a_hi = float(max(a_lb, a_ub))
+        b_lo = float(min(b_lb, b_ub))
+        b_hi = float(max(b_lb, b_ub))
+        if (not np.isfinite(a_lo)) or (not np.isfinite(a_hi)) or (not np.isfinite(b_lo)) or (not np.isfinite(b_hi)):
+            return None
+        inter_w = max(0.0, min(a_hi, b_hi) - max(a_lo, b_lo))
+        union_w = max(0.0, max(a_hi, b_hi) - min(a_lo, b_lo))
+        inter_ratio *= inter_w
+        union_ratio *= union_w
+    if union_ratio <= 0.0:
+        return 0.0
+    return float(np.clip(inter_ratio / union_ratio, 0.0, 1.0))
+
+
+def _recenter_bounds_keep_width(
+    *,
+    base_bounds: list[tuple[float, float]] | None,
+    global_bounds: list[tuple[float, float]],
+    target_center: np.ndarray | None,
+) -> list[tuple[float, float]] | None:
+    if (
+        base_bounds is None
+        or target_center is None
+        or len(base_bounds) != len(global_bounds)
+    ):
+        return base_bounds
+    c = np.asarray(target_center, dtype=float).reshape(-1)
+    if c.size != len(global_bounds):
+        return base_bounds
+    out: list[tuple[float, float]] = []
+    for j, ((b_lb, b_ub), (g_lb, g_ub)) in enumerate(zip(base_bounds, global_bounds)):
+        gl = float(min(g_lb, g_ub))
+        gu = float(max(g_lb, g_ub))
+        lo = float(np.clip(min(b_lb, b_ub), gl, gu))
+        hi = float(np.clip(max(b_lb, b_ub), gl, gu))
+        width = max(0.0, hi - lo)
+        width = min(width, max(gu - gl, 0.0))
+        cc = float(np.clip(c[j], gl, gu))
+        if width <= 0.0 or gu <= gl:
+            out.append((cc, cc))
+            continue
+        lo_new = float(np.clip(cc - 0.5 * width, gl, gu - width))
+        hi_new = float(lo_new + width)
+        if hi_new < lo_new:
+            lo_new, hi_new = hi_new, lo_new
+        out.append((lo_new, hi_new))
+    return out
 
 
 def _shrink_bounds_to_target_volume(
@@ -436,6 +518,7 @@ def _select_multistarts(
     objective_sense: str,
     total: int,
     rng: np.random.Generator,
+    deterministic_fraction: float = 0.5,
 ) -> np.ndarray:
     pts = _dedup_rows(np.asarray(points, dtype=float))
     vals = np.asarray(values, dtype=float).reshape(-1)
@@ -451,7 +534,8 @@ def _select_multistarts(
     n_total = max(int(total), 0)
     if n_total == 0:
         return np.empty((0, pts.shape[1]), dtype=float)
-    n_det = min(n_total // 2, n)
+    det_frac = float(np.clip(float(deterministic_fraction), 0.0, 1.0))
+    n_det = min(int(round(float(n_total) * det_frac)), n_total, n)
     det_idx = order[:n_det]
     remain = order[n_det:]
     n_rand = min(n_total - n_det, remain.size)
@@ -1232,6 +1316,22 @@ class ExplorerOrchestrator:
         pred_stats = {}
         obj_stats = {}
         strategy_params = dict(self.config.system.strategy_params or {})
+        strategy_mode_hint = str(strategy_params.get("mode", "")).strip().lower()
+        strategy_alias_hint = _resolve_strategy_alias(strategy_id=strategy_id, mode=strategy_mode_hint)
+        pred_uq_target_enabled = strategy_alias_hint in {"s4", "s8", "s4_pred", "s8_pred"}
+        pred_cluster_beta = float(np.clip(float(strategy_params.get("pred_cluster_beta", 0.2)), 0.0, 2.0))
+        pred_cluster_beta_used = float(pred_cluster_beta) if pred_uq_target_enabled else 0.0
+        pred_cluster_signal_mode = "score"
+        pred_cluster_confidence = None
+        pred_cluster_selected_count = 0
+        pred_cluster_sigma_mean_selected = None
+        pred_refine_shift_norm = None
+        pred_obj_miss_case = None
+        pred_obj_iou = None
+        pred_obj_center_l1_norm = None
+        pred_multistart_det_fraction_used = None
+        pred_refine_bounds_scale_used = None
+        pred_n_starts_used = None
         obj_div_extra = int(max(0, int(strategy_params.get("obj_diversity_extra_clusters", 0))))
         obj_div_weight = float(strategy_params.get("obj_diversity_weight", 0.35))
         obj_div_min_dist = float(strategy_params.get("obj_diversity_min_distance", 0.22))
@@ -1244,9 +1344,16 @@ class ExplorerOrchestrator:
         try:
             # (1) Model prediction clusters from LHC
             min_samples = dbscan_min_samples or max(5, 2 * len(selected_features))
+            pred_cluster_values = np.asarray(score, dtype=float).reshape(-1)
+            if pred_uq_target_enabled and pred_cluster_beta_used > 0.0:
+                if objective_sense == "max":
+                    pred_cluster_values = np.asarray(score, dtype=float).reshape(-1) + pred_cluster_beta_used * np.asarray(y_std, dtype=float).reshape(-1)
+                else:
+                    pred_cluster_values = np.asarray(score, dtype=float).reshape(-1) - pred_cluster_beta_used * np.asarray(y_std, dtype=float).reshape(-1)
+                pred_cluster_signal_mode = "score_beta_sigma"
             X_pred_sel, labels_pred, pred_stats = select_top_clusters(
                 X=X,
-                y=score,
+                y=pred_cluster_values,
                 objective_sense=objective_sense,
                 quantile_threshold=quantile_threshold,
                 min_samples=min_samples,
@@ -1302,6 +1409,21 @@ class ExplorerOrchestrator:
                 diversity_close_penalty=obj_div_close_penalty,
                 diversity_min_dim=obj_div_min_dim,
             )
+
+            try:
+                sel_idx = np.asarray(pred_stats.get("selected_indices", []), dtype=int).reshape(-1)
+                sel_idx = sel_idx[(sel_idx >= 0) & (sel_idx < y_std.shape[0])]
+                pred_cluster_selected_count = int(sel_idx.size)
+                if sel_idx.size > 0:
+                    sigma_all = np.asarray(y_std, dtype=float).reshape(-1)
+                    sigma_sel = sigma_all[sel_idx]
+                    pred_cluster_sigma_mean_selected = float(np.mean(np.maximum(sigma_sel, 0.0)))
+                    sigma_ref = float(np.nanmedian(np.abs(sigma_all[np.isfinite(sigma_all)]))) if np.isfinite(sigma_all).any() else 0.0
+                    sigma_ref = max(sigma_ref, 1e-12)
+                    conf = 1.0 / (1.0 + float(np.mean(np.maximum(sigma_sel, 0.0) / sigma_ref)))
+                    pred_cluster_confidence = float(np.clip(conf, 0.0, 1.0))
+            except Exception:
+                pred_cluster_confidence = None
         except Exception as exc:
             print(f"[Explorer] Dual cluster selection failed: {exc}")
             X_pred_sel = np.empty((0, len(selected_features)))
@@ -1341,6 +1463,26 @@ class ExplorerOrchestrator:
         selected_bounds = base_selected_bounds
         strategy_mode = str((self.config.system.strategy_params or {}).get("mode", "")).strip().lower()
         strategy_alias = _resolve_strategy_alias(strategy_id=strategy_id, mode=strategy_mode)
+        refine_pre_filter_applied = bool(has_pre_constraints)
+        refine_pre_removed_pred = 0
+        refine_pre_removed_obj = 0
+        refine_pre_removed_selected = 0
+        dual_policy_mode = None
+        dual_total_starts_target = None
+        dual_total_starts_used = None
+        dual_np_ratio_used = None
+        dual_pred_ratio_used = None
+        dual_obj_ratio_used = None
+        dual_n_pred_starts = None
+        dual_n_obj_starts = None
+        dual_disagreement_center_l1_norm = None
+        dual_disagreement_iou = None
+        dual_disagreement_triggered = False
+        dual_center_bias_used = None
+        dual_center_tilt_strength_base = None
+        dual_center_tilt_strength_used_mean = None
+        dual_center_tilt_applied = False
+        dual_center_hint = None
 
         if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred", "s4_obj", "s8_obj"}:
             source_mode = "dual"
@@ -1357,9 +1499,114 @@ class ExplorerOrchestrator:
             kappa = float((self.config.system.strategy_params or {}).get("lcb_kappa", 0.35))
             ei_xi = float((self.config.system.strategy_params or {}).get("ei_xi", 0.01))
             acq = AcquisitionOptimizer()
+            strategy_params_local = dict(self.config.system.strategy_params or {})
+            pred_family_alias = strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}
+            pred_multistart_det_fraction = float(
+                np.clip(
+                    float(strategy_params_local.get("pred_multistart_det_fraction", 0.35 if pred_family_alias else 0.5)),
+                    0.0,
+                    1.0,
+                )
+            )
+            obj_multistart_det_fraction = float(
+                np.clip(
+                    float(strategy_params_local.get("obj_multistart_det_fraction", 0.5)),
+                    0.0,
+                    1.0,
+                )
+            )
+            pred_refine_bounds_scale = float(
+                max(
+                    float(strategy_params_local.get("pred_refine_bounds_scale", 1.30 if pred_family_alias else 1.15)),
+                    1.0,
+                )
+            )
+            obj_refine_bounds_scale = float(
+                max(float(strategy_params_local.get("obj_refine_bounds_scale", 1.15)), 1.0)
+            )
+            pred_multistart_det_fraction_used = float(pred_multistart_det_fraction)
+            pred_refine_bounds_scale_used = float(pred_refine_bounds_scale)
             if source_mode == "dual":
-                n_pred_starts = 20
-                n_obj_starts = 20
+                dual_policy_mode = str(strategy_params_local.get("dual_policy_mode", "np_dim_disagreement_v1")).strip().lower()
+                dual_total_starts_target = int(max(4, int(strategy_params_local.get("dual_total_starts", 40))))
+                dual_total_starts_used = int(dual_total_starts_target)
+                dual_np_ratio_used = (
+                    float(base_n) / float(max(d, 1))
+                    if d > 0
+                    else None
+                )
+
+                obj_ratio_low_np = float(strategy_params_local.get("dual_obj_ratio_low_np", 0.62))
+                obj_ratio_mid_np = float(strategy_params_local.get("dual_obj_ratio_mid_np", 0.50))
+                obj_ratio_high_np = float(strategy_params_local.get("dual_obj_ratio_high_np", 0.42))
+                np_ratio_low = float(strategy_params_local.get("dual_np_ratio_low", 12.0))
+                np_ratio_high = float(strategy_params_local.get("dual_np_ratio_high", 24.0))
+                high_dim_threshold = int(max(1, int(strategy_params_local.get("dual_high_dim_threshold", 6))))
+                high_dim_obj_bonus = float(strategy_params_local.get("dual_high_dim_obj_bonus", 0.08))
+                disagree_l1_threshold = float(strategy_params_local.get("dual_disagree_l1_threshold", 0.35))
+                disagree_iou_threshold = float(strategy_params_local.get("dual_disagree_iou_threshold", 0.30))
+                disagree_obj_bonus = float(strategy_params_local.get("dual_disagree_obj_bonus", 0.08))
+                ratio_min = float(strategy_params_local.get("dual_obj_ratio_min", 0.25))
+                ratio_max = float(strategy_params_local.get("dual_obj_ratio_max", 0.75))
+                dual_center_tilt_strength_base = float(
+                    np.clip(
+                        float(strategy_params_local.get("dual_center_tilt_strength", 0.45)),
+                        0.0,
+                        1.0,
+                    )
+                )
+
+                obj_ratio = float(obj_ratio_mid_np)
+                if dual_policy_mode in {"fixed", "fixed50"}:
+                    obj_ratio = float(obj_ratio_mid_np)
+                else:
+                    np_ratio_now = float(dual_np_ratio_used) if dual_np_ratio_used is not None else 0.0
+                    if np_ratio_now <= np_ratio_low:
+                        obj_ratio = float(obj_ratio_low_np)
+                    elif np_ratio_now >= np_ratio_high:
+                        obj_ratio = float(obj_ratio_high_np)
+                    else:
+                        width = max(np_ratio_high - np_ratio_low, 1e-9)
+                        t = float((np_ratio_now - np_ratio_low) / width)
+                        obj_ratio = float((1.0 - t) * obj_ratio_low_np + t * obj_ratio_high_np)
+
+                    if d >= high_dim_threshold:
+                        obj_ratio += float(high_dim_obj_bonus)
+
+                    pred_center = _bounds_center(pred_bounds)
+                    obj_center = _bounds_center(obj_bounds)
+                    if pred_center is not None and obj_center is not None:
+                        spans = np.array(
+                            [max(float(ub) - float(lb), 1e-12) for lb, ub in bounds],
+                            dtype=float,
+                        )
+                        dual_disagreement_center_l1_norm = float(
+                            np.mean(np.abs(obj_center - pred_center) / spans)
+                        )
+                    dual_disagreement_iou = _bounds_iou_ratio(pred_bounds, obj_bounds)
+                    dual_disagreement_triggered = bool(
+                        (
+                            dual_disagreement_center_l1_norm is not None
+                            and dual_disagreement_center_l1_norm >= float(disagree_l1_threshold)
+                        )
+                        or (
+                            dual_disagreement_iou is not None
+                            and dual_disagreement_iou <= float(disagree_iou_threshold)
+                        )
+                    )
+                    if dual_disagreement_triggered:
+                        obj_ratio += float(disagree_obj_bonus)
+
+                obj_ratio = float(np.clip(obj_ratio, ratio_min, ratio_max))
+                pred_ratio = float(np.clip(1.0 - obj_ratio, 0.0, 1.0))
+                dual_obj_ratio_used = float(obj_ratio)
+                dual_pred_ratio_used = float(pred_ratio)
+                dual_center_bias_used = float(obj_ratio)
+
+                total = int(max(int(dual_total_starts_target), 2))
+                n_obj_starts = int(round(total * obj_ratio))
+                n_obj_starts = int(np.clip(n_obj_starts, 1, total - 1))
+                n_pred_starts = int(total - n_obj_starts)
             elif source_mode == "pred":
                 n_pred_starts = 40
                 n_obj_starts = 0
@@ -1385,6 +1632,32 @@ class ExplorerOrchestrator:
                     return float(np.clip(p, 0.0, 1.0))
                 except Exception:
                     return 1.0
+
+            def _is_pre_feasible_row(x_row: np.ndarray) -> bool:
+                if not has_pre_constraints:
+                    return True
+                try:
+                    _payload, ok, _margin = evaluate_constraints_point(
+                        x=np.asarray(x_row, dtype=float).reshape(-1),
+                        var_names=selected_features,
+                        constraint_defs=pre_constraint_defs,
+                        scope="pre",
+                    )
+                    return bool(ok)
+                except Exception:
+                    return False
+
+            def _filter_points_pre_feasible(points: np.ndarray) -> tuple[np.ndarray, int]:
+                pts = np.asarray(points, dtype=float)
+                if pts.ndim != 2 or pts.shape[0] == 0:
+                    return np.empty((0, d), dtype=float), 0
+                if not has_pre_constraints:
+                    return pts, 0
+                keep = np.array([_is_pre_feasible_row(row) for row in pts], dtype=bool)
+                removed = int(pts.shape[0] - int(keep.sum()))
+                if int(keep.sum()) <= 0:
+                    return np.empty((0, d), dtype=float), removed
+                return pts[keep], removed
 
             def _score_points(points: np.ndarray) -> np.ndarray:
                 pts = np.asarray(points, dtype=float)
@@ -1580,6 +1853,7 @@ class ExplorerOrchestrator:
                 *,
                 starts: np.ndarray,
                 region_bounds: list[tuple[float, float]] | None,
+                expand_scale: float = 1.15,
             ) -> tuple[np.ndarray, np.ndarray]:
                 base = _bounds_from_points(starts) if starts.ndim == 2 and starts.shape[0] > 0 else None
                 if base is None:
@@ -1592,7 +1866,7 @@ class ExplorerOrchestrator:
                 b = _expand_bounds_around_center(
                     base_bounds=base,
                     global_bounds=bounds,
-                    scale=1.15,
+                    scale=float(max(expand_scale, 1.0)),
                     center=center,
                     min_half_ratio=0.01,
                 )
@@ -1607,6 +1881,7 @@ class ExplorerOrchestrator:
                 starts: np.ndarray,
                 y_train: np.ndarray,
                 region_bounds: list[tuple[float, float]] | None,
+                expand_scale: float = 1.15,
             ) -> np.ndarray:
                 if gp_model is None or starts.ndim != 2 or starts.shape[0] == 0 or y_train.size == 0:
                     return np.empty((0, d), dtype=float)
@@ -1614,7 +1889,11 @@ class ExplorerOrchestrator:
                     y_best = float(np.max(y_train))
                 else:
                     y_best = float(np.min(y_train))
-                lb_opt, ub_opt = _opt_bounds_from_starts(starts=starts, region_bounds=region_bounds)
+                lb_opt, ub_opt = _opt_bounds_from_starts(
+                    starts=starts,
+                    region_bounds=region_bounds,
+                    expand_scale=float(expand_scale),
+                )
                 out: list[np.ndarray] = []
                 for x0 in starts:
                     x_opt = acq.optimize(
@@ -1627,20 +1906,29 @@ class ExplorerOrchestrator:
                         acq_type=acq_type,
                         kappa=float(kappa),
                         xi=float(ei_xi),
+                        pre_feasible_fn=_is_pre_feasible_row if has_pre_constraints else None,
                         post_feasible_prob_fn=_post_prob_fn if has_post_penalty else None,
                         post_penalty_lambda=float(post_lambda if has_post_penalty else 0.0),
                     )
                     if x_opt is not None:
+                        if has_pre_constraints and (not _is_pre_feasible_row(np.asarray(x_opt, dtype=float).reshape(-1))):
+                            continue
                         out.append(np.asarray(x_opt, dtype=float).reshape(-1))
                 if not out:
                     return np.empty((0, d), dtype=float)
                 return _dedup_rows(np.vstack(out))
 
             pred_seed_pool = np.asarray(X_pred_sel, dtype=float)
+            pred_seed_rank_values = np.asarray(score, dtype=float).reshape(-1)
+            if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"} and pred_cluster_signal_mode == "score_beta_sigma":
+                if objective_sense == "max":
+                    pred_seed_rank_values = np.asarray(score, dtype=float).reshape(-1) + float(pred_cluster_beta_used) * np.asarray(y_std, dtype=float).reshape(-1)
+                else:
+                    pred_seed_rank_values = np.asarray(score, dtype=float).reshape(-1) - float(pred_cluster_beta_used) * np.asarray(y_std, dtype=float).reshape(-1)
             if not use_pred_model:
                 pred_seed_pool = np.empty((0, d), dtype=float)
             elif pred_seed_pool.ndim != 2 or pred_seed_pool.shape[0] == 0:
-                order = np.argsort(score)
+                order = np.argsort(pred_seed_rank_values)
                 if objective_sense == "max":
                     order = order[::-1]
                 pred_seed_pool = X[order[: min(80, len(order))]]
@@ -1657,6 +1945,50 @@ class ExplorerOrchestrator:
             if not use_obj_model:
                 obj_seed_pool = np.empty((0, d), dtype=float)
 
+            if source_mode == "dual":
+                total_target = int(max(int(dual_total_starts_target or 40), 2))
+                has_pred_pool = pred_seed_pool.ndim == 2 and pred_seed_pool.shape[0] > 0
+                has_obj_pool = obj_seed_pool.ndim == 2 and obj_seed_pool.shape[0] > 0
+                if (not has_pred_pool) and has_obj_pool:
+                    n_pred_starts = 0
+                    n_obj_starts = int(total_target)
+                elif has_pred_pool and (not has_obj_pool):
+                    n_pred_starts = int(total_target)
+                    n_obj_starts = 0
+                elif has_pred_pool and has_obj_pool:
+                    # keep both sides alive in dual mode
+                    n_pred_starts = int(max(int(n_pred_starts), 1))
+                    n_obj_starts = int(max(int(n_obj_starts), 1))
+                    extra = int(n_pred_starts + n_obj_starts - total_target)
+                    if extra > 0:
+                        if n_obj_starts >= n_pred_starts:
+                            n_obj_starts = int(max(1, n_obj_starts - extra))
+                        else:
+                            n_pred_starts = int(max(1, n_pred_starts - extra))
+                        if (n_pred_starts + n_obj_starts) > total_target:
+                            n_pred_starts = int(max(1, total_target - n_obj_starts))
+                    elif extra < 0:
+                        if (dual_obj_ratio_used or 0.5) >= 0.5:
+                            n_obj_starts += int(-extra)
+                        else:
+                            n_pred_starts += int(-extra)
+                else:
+                    n_pred_starts = 0
+                    n_obj_starts = 0
+
+                used_total = int(max(n_pred_starts + n_obj_starts, 0))
+                dual_total_starts_used = int(used_total)
+                if used_total > 0:
+                    dual_pred_ratio_used = float(n_pred_starts) / float(used_total)
+                    dual_obj_ratio_used = float(n_obj_starts) / float(used_total)
+                    dual_center_bias_used = float(dual_obj_ratio_used)
+                else:
+                    dual_pred_ratio_used = None
+                    dual_obj_ratio_used = None
+                    dual_center_bias_used = None
+                dual_n_pred_starts = int(n_pred_starts)
+                dual_n_obj_starts = int(n_obj_starts)
+
             pred_scores = _score_points(pred_seed_pool) if use_pred_model else np.array([], dtype=float)
             obj_scores = _objective_values(obj_seed_pool) if use_obj_model else np.array([], dtype=float)
 
@@ -1668,7 +2000,9 @@ class ExplorerOrchestrator:
                     objective_sense=objective_sense,
                     total=n_pred_starts,
                     rng=rng,
+                    deterministic_fraction=pred_multistart_det_fraction,
                 )
+            pred_n_starts_used = int(pred_starts.shape[0]) if pred_starts.ndim == 2 else 0
             obj_starts = np.empty((0, d), dtype=float)
             if n_obj_starts > 0 and use_obj_model and obj_seed_pool.shape[0] > 0:
                 obj_starts = _select_multistarts(
@@ -1677,6 +2011,7 @@ class ExplorerOrchestrator:
                     objective_sense=objective_sense,
                     total=n_obj_starts,
                     rng=rng,
+                    deterministic_fraction=obj_multistart_det_fraction,
                 )
 
             pred_region = _bounds_from_points(X_pred_sel)
@@ -1731,7 +2066,18 @@ class ExplorerOrchestrator:
                     starts=pred_starts,
                     y_train=y_pred_train,
                     region_bounds=pred_region_used,
+                    expand_scale=pred_refine_bounds_scale,
                 )
+                ref_pred, removed_pred = _filter_points_pre_feasible(ref_pred)
+                refine_pre_removed_pred += int(removed_pred)
+                if ref_pred.shape[0] > 0 and pred_starts.shape[0] > 0:
+                    try:
+                        spans_eval = spans_global.reshape(1, 1, -1)
+                        diff = (ref_pred[:, None, :] - pred_starts[None, :, :]) / spans_eval
+                        dmat = np.linalg.norm(diff, axis=2) / np.sqrt(float(max(d, 1)))
+                        pred_refine_shift_norm = float(np.mean(np.min(dmat, axis=1)))
+                    except Exception:
+                        pred_refine_shift_norm = None
             ref_obj = np.empty((0, d), dtype=float)
             if use_obj_model:
                 ref_obj = _refine_with_gp(
@@ -1739,7 +2085,10 @@ class ExplorerOrchestrator:
                     starts=obj_starts,
                     y_train=y_obj_train,
                     region_bounds=obj_region_used,
+                    expand_scale=obj_refine_bounds_scale,
                 )
+                ref_obj, removed_obj = _filter_points_pre_feasible(ref_obj)
+                refine_pre_removed_obj += int(removed_obj)
 
             if source_mode == "dual":
                 selected_points = _safe_stack([ref_pred, ref_obj, X_pred_sel, X_obj_sel], n_dim=len(selected_features))
@@ -1752,7 +2101,95 @@ class ExplorerOrchestrator:
                     selected_points = _safe_stack([X_obj_sel], n_dim=len(selected_features))
                 else:
                     selected_points = _safe_stack([X_pred_sel], n_dim=len(selected_features))
+            selected_points, removed_sel = _filter_points_pre_feasible(selected_points)
+            refine_pre_removed_selected += int(removed_sel)
+            if selected_points.shape[0] == 0:
+                if source_mode in {"dual", "obj"}:
+                    selected_points = _safe_stack([X_obj_sel], n_dim=len(selected_features))
+                else:
+                    selected_points = _safe_stack([X_pred_sel], n_dim=len(selected_features))
             selected_bounds = _bounds_from_points(selected_points, q_low=0.01, q_high=0.99)
+            if source_mode == "dual" and selected_bounds is not None:
+                strategy_params_local = dict(self.config.system.strategy_params or {})
+                pred_center = _bounds_center(pred_bounds)
+                obj_center = _bounds_center(obj_bounds)
+                cur_center = _bounds_center(selected_bounds)
+                if pred_center is not None and obj_center is not None and cur_center is not None:
+                    bias_obj = float(
+                        np.clip(
+                            float(
+                                strategy_params_local.get(
+                                    "dual_center_bias_obj_ratio_weight",
+                                    dual_obj_ratio_used if dual_obj_ratio_used is not None else 0.5,
+                                )
+                            ),
+                            0.0,
+                            1.0,
+                        )
+                    )
+                    dual_center_bias_used = float(bias_obj)
+                    target_center = (1.0 - bias_obj) * pred_center + bias_obj * obj_center
+                    spans = np.array([max(float(ub) - float(lb), 1e-12) for lb, ub in bounds], dtype=float)
+                    disagreement = np.abs(obj_center - pred_center) / spans
+                    mean_disagreement = float(max(np.mean(disagreement), 1e-9))
+                    aniso_gamma = float(strategy_params_local.get("dual_center_tilt_aniso_gamma", 0.6))
+                    base_tilt = float(
+                        np.clip(
+                            float(
+                                dual_center_tilt_strength_base
+                                if dual_center_tilt_strength_base is not None
+                                else strategy_params_local.get("dual_center_tilt_strength", 0.45)
+                            ),
+                            0.0,
+                            1.0,
+                        )
+                    )
+                    tilt_weights = np.clip(
+                        base_tilt
+                        * (
+                            1.0
+                            + aniso_gamma * ((disagreement / mean_disagreement) - 1.0)
+                        ),
+                        0.0,
+                        1.0,
+                    )
+                    dual_center_tilt_strength_used_mean = float(np.mean(tilt_weights))
+                    blended_center = (1.0 - tilt_weights) * cur_center + tilt_weights * target_center
+                    selected_bounds_tilt = _recenter_bounds_keep_width(
+                        base_bounds=selected_bounds,
+                        global_bounds=bounds,
+                        target_center=blended_center,
+                    )
+                    if selected_bounds_tilt is not None:
+                        selected_bounds = selected_bounds_tilt
+                        dual_center_hint = blended_center
+                        dual_center_tilt_applied = True
+
+            if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}:
+                pred_obj_iou = _bounds_iou_ratio(pred_bounds, obj_bounds)
+                pred_center = _bounds_center(pred_bounds)
+                obj_center = _bounds_center(obj_bounds)
+                center_l1 = None
+                if pred_center is not None and obj_center is not None:
+                    spans = np.array([max(float(ub) - float(lb), 1e-12) for lb, ub in bounds], dtype=float)
+                    center_l1 = float(np.mean(np.abs(pred_center - obj_center) / spans))
+                pred_obj_center_l1_norm = center_l1
+                conf_low = float(np.clip(float(strategy_params_local.get("pred_cluster_confidence_low", 0.42)), 0.0, 1.0))
+                shift_hi = float(max(float(strategy_params_local.get("pred_refine_shift_high", 0.35)), 0.0))
+                if pred_bounds is None:
+                    pred_obj_miss_case = "pred_bounds_empty"
+                elif obj_bounds is None:
+                    pred_obj_miss_case = "obj_bounds_unavailable"
+                elif pred_obj_iou is not None and pred_obj_iou < 0.05:
+                    pred_obj_miss_case = "pred_obj_disjoint"
+                elif center_l1 is not None and center_l1 >= 0.45:
+                    pred_obj_miss_case = "pred_obj_center_shift"
+                elif pred_cluster_confidence is not None and pred_cluster_confidence <= conf_low:
+                    pred_obj_miss_case = "pred_low_confidence"
+                elif pred_refine_shift_norm is not None and pred_refine_shift_norm >= shift_hi:
+                    pred_obj_miss_case = "pred_refine_large_shift"
+                else:
+                    pred_obj_miss_case = "pred_obj_aligned_or_unknown"
 
         if selected_bounds is None:
             if strategy_alias in {"s4_pred", "s8_pred"} and pred_bounds is not None:
@@ -1855,7 +2292,9 @@ class ExplorerOrchestrator:
                         and dual_volume_ratio_before_cap > dual_volume_cap_target
                     ):
                         center_hint = None
-                        if isinstance(selected_points, np.ndarray) and selected_points.ndim == 2 and selected_points.shape[0] > 0:
+                        if isinstance(dual_center_hint, np.ndarray) and dual_center_hint.size == len(bounds):
+                            center_hint = np.asarray(dual_center_hint, dtype=float).reshape(-1)
+                        elif isinstance(selected_points, np.ndarray) and selected_points.ndim == 2 and selected_points.shape[0] > 0:
                             center_hint = np.mean(selected_points, axis=0)
                         selected_bounds_cap = _shrink_bounds_to_target_volume(
                             selected_bounds=selected_bounds,
@@ -2058,12 +2497,43 @@ class ExplorerOrchestrator:
             "post_lambda": float(post_lambda),
             "post_lambda_source": post_lambda_source,
             "pre_filter_disabled_reason": pre_filter_disabled_reason,
+            "refine_pre_filter_applied": bool(refine_pre_filter_applied),
+            "refine_pre_removed_pred": int(refine_pre_removed_pred),
+            "refine_pre_removed_obj": int(refine_pre_removed_obj),
+            "refine_pre_removed_selected": int(refine_pre_removed_selected),
             "feas_model_kind_used": feasibility_model_kind_used,
             "feas_model_path_used": feasibility_model_path_used,
             "selected_bounds_volume_ratio": vol_ratio,
             "strategy_id": strategy_id,
             "strategy_alias": strategy_alias,
             "strategy_mode": strategy_mode,
+            "pred_cluster_signal_mode": pred_cluster_signal_mode,
+            "pred_cluster_beta_used": pred_cluster_beta_used,
+            "pred_cluster_confidence": pred_cluster_confidence,
+            "pred_cluster_selected_count": pred_cluster_selected_count,
+            "pred_cluster_sigma_mean_selected": pred_cluster_sigma_mean_selected,
+            "pred_refine_shift_norm": pred_refine_shift_norm,
+            "pred_obj_miss_case": pred_obj_miss_case,
+            "pred_obj_iou": pred_obj_iou,
+            "pred_obj_center_l1_norm": pred_obj_center_l1_norm,
+            "pred_multistart_det_fraction_used": pred_multistart_det_fraction_used,
+            "pred_refine_bounds_scale_used": pred_refine_bounds_scale_used,
+            "pred_n_starts_used": pred_n_starts_used,
+            "dual_policy_mode": dual_policy_mode,
+            "dual_total_starts_target": dual_total_starts_target,
+            "dual_total_starts_used": dual_total_starts_used,
+            "dual_np_ratio_used": dual_np_ratio_used,
+            "dual_pred_ratio_used": dual_pred_ratio_used,
+            "dual_obj_ratio_used": dual_obj_ratio_used,
+            "dual_n_pred_starts": dual_n_pred_starts,
+            "dual_n_obj_starts": dual_n_obj_starts,
+            "dual_disagreement_center_l1_norm": dual_disagreement_center_l1_norm,
+            "dual_disagreement_iou": dual_disagreement_iou,
+            "dual_disagreement_triggered": bool(dual_disagreement_triggered),
+            "dual_center_bias_used": dual_center_bias_used,
+            "dual_center_tilt_strength_base": dual_center_tilt_strength_base,
+            "dual_center_tilt_strength_used_mean": dual_center_tilt_strength_used_mean,
+            "dual_center_tilt_applied": bool(dual_center_tilt_applied),
             "dual_volume_cap_target": dual_volume_cap_target,
             "dual_volume_ratio_before_cap": dual_volume_ratio_before_cap,
             "dual_volume_cap_applied": bool(dual_volume_cap_applied),
@@ -2095,9 +2565,40 @@ class ExplorerOrchestrator:
             "obj_mean_volume": obj_mean_vol,
             "strategy_id": strategy_id,
             "strategy_alias": strategy_alias,
+            "pred_cluster_signal_mode": pred_cluster_signal_mode,
+            "pred_cluster_beta_used": pred_cluster_beta_used,
+            "pred_cluster_confidence": pred_cluster_confidence,
+            "pred_cluster_selected_count": pred_cluster_selected_count,
+            "pred_cluster_sigma_mean_selected": pred_cluster_sigma_mean_selected,
+            "pred_refine_shift_norm": pred_refine_shift_norm,
+            "pred_obj_miss_case": pred_obj_miss_case,
+            "pred_obj_iou": pred_obj_iou,
+            "pred_obj_center_l1_norm": pred_obj_center_l1_norm,
+            "pred_multistart_det_fraction_used": pred_multistart_det_fraction_used,
+            "pred_refine_bounds_scale_used": pred_refine_bounds_scale_used,
+            "pred_n_starts_used": pred_n_starts_used,
+            "dual_policy_mode": dual_policy_mode,
+            "dual_total_starts_target": dual_total_starts_target,
+            "dual_total_starts_used": dual_total_starts_used,
+            "dual_np_ratio_used": dual_np_ratio_used,
+            "dual_pred_ratio_used": dual_pred_ratio_used,
+            "dual_obj_ratio_used": dual_obj_ratio_used,
+            "dual_n_pred_starts": dual_n_pred_starts,
+            "dual_n_obj_starts": dual_n_obj_starts,
+            "dual_disagreement_center_l1_norm": dual_disagreement_center_l1_norm,
+            "dual_disagreement_iou": dual_disagreement_iou,
+            "dual_disagreement_triggered": bool(dual_disagreement_triggered),
+            "dual_center_bias_used": dual_center_bias_used,
+            "dual_center_tilt_strength_base": dual_center_tilt_strength_base,
+            "dual_center_tilt_strength_used_mean": dual_center_tilt_strength_used_mean,
+            "dual_center_tilt_applied": bool(dual_center_tilt_applied),
             "dual_volume_cap_target": dual_volume_cap_target,
             "dual_volume_ratio_before_cap": dual_volume_ratio_before_cap,
             "dual_volume_cap_applied": bool(dual_volume_cap_applied),
+            "refine_pre_filter_applied": bool(refine_pre_filter_applied),
+            "refine_pre_removed_pred": int(refine_pre_removed_pred),
+            "refine_pre_removed_obj": int(refine_pre_removed_obj),
+            "refine_pre_removed_selected": int(refine_pre_removed_selected),
         }
 
         public_artifacts = {}

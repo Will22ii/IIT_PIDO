@@ -79,7 +79,7 @@ class FeatureSelectionConfig:
     gap_threshold_very_low_data: float = 0.10
     gap_threshold_normal: float = 0.12
     gap_global_floor: float = 0.70
-    gap_global_floor_very_low_data: float = 0.85
+    gap_global_floor_very_low_data: float = 0.60
     gap_global_floor_p_le_4: float = 0.85
     gap_global_floor_p_ge_8: float = 0.75
     gap_min_retain: int = 2
@@ -93,7 +93,7 @@ class FeatureSelectionConfig:
     null_alpha_normal: float = 0.12
     null_apply_to: str = "both"
     null_pre_elite_ratio: float = 0.5
-    bootstrap_min_freq_very_low_data: float = 0.65
+    bootstrap_min_freq_very_low_data: float = 0.45
     # bootstrap rescue (very_low_data)
     fi_bootstrap_rescue_global_floor: float = 0.83
     fi_bootstrap_rescue_very_low_data_only: bool = True
