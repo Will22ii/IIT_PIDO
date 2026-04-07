@@ -50,6 +50,7 @@ def run_bootstrap_stability(
     use_elite_scale = str(fs_config.elite_mode).strip().lower() != "off"
     print(f"[Bootstrap] rounds={n_rounds}, sample={n_sub}/{n_total}, min_freq={min_freq}")
 
+    success_count = 0
     for r_idx in range(n_rounds):
         seed_r = base_seed + 7000 + r_idx
         indices = rng.choice(n_total, size=n_sub, replace=False)
@@ -152,13 +153,14 @@ def run_bootstrap_stability(
         except Exception:
             continue
 
+        success_count += 1
         sub_sel = sub_result["selected_features"]
         for feat in sub_sel.loc[sub_sel["selected"] == True, "feature"].astype(str):
             if feat in freq:
                 freq[feat] += 1
 
     # 빈도 계산 및 필터
-    valid_rounds = max(1, n_rounds)
+    valid_rounds = max(1, success_count)
     out = selected_df.copy()
     freq_series = out["feature"].astype(str).map(lambda f: freq.get(f, 0) / valid_rounds)
     out["bootstrap_freq"] = freq_series.values

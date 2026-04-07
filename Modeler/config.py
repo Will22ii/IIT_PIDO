@@ -119,7 +119,7 @@ class ModelerSystemConfig:
     fi_stability_very_low_data_n_threshold: int = 55
     fi_stability_rule_very_low_data: str = "and"
     fi_stability_perm_min_rate_very_low_data: float = 0.60
-    fi_stability_drop_min_rate_very_low_data: float = 0.42
+    fi_stability_drop_min_rate_very_low_data: float = 0.35
     fi_stability_rule_low_data: str = "and"
     fi_stability_perm_min_rate_low_data: float = 0.60
     fi_stability_drop_min_rate_low_data: float = 0.44
@@ -146,6 +146,11 @@ class ModelerSystemConfig:
     fi_gap_global_floor: float = 0.79  # global_score가 이 값 미만인 feature만 제거 대상
     # very_low_data에서는 더 보수적으로 tail을 제거하기 위해 별도 floor 사용
     fi_gap_global_floor_very_low_data: float = 0.85
+    # p_dim 기반 adaptive gap floor:
+    # - 저차원(<=4): dummy 억제를 위해 floor를 더 엄격하게 사용(max)
+    # - 고차원(>=8): real 과삭제 방지를 위해 floor를 완화(min)
+    fi_gap_global_floor_p_le_4: float = 0.85
+    fi_gap_global_floor_p_ge_8: float = 0.75
     fi_gap_min_retain: int = 2         # 제거 후 최소 유지 feature 수
     # very_low_data drop veto: drop_rate가 극도로 낮은 feature를 perm 점수와 무관하게 기각
     fi_drop_veto_enabled: bool = True
@@ -163,6 +168,7 @@ class ModelerSystemConfig:
     fi_bootstrap_rounds: int = 15             # 반복 횟수
     fi_bootstrap_sample_ratio: float = 0.8    # 서브샘플 비율
     fi_bootstrap_min_freq: float = 0.73       # 최소 선택 빈도 (미만이면 제거)
+    fi_bootstrap_min_freq_very_low_data: float = 0.65  # very_low_data 전용 완화 임계값
     # very_low_data 구제: bootstrap_freq < min_freq여도 global_score가 이 값 이상이면 유지
     fi_bootstrap_rescue_global_floor: float = 0.83
     fi_bootstrap_rescue_very_low_data_only: bool = True  # very_low_data에서만 구제 적용
@@ -300,6 +306,8 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         gap_threshold_normal=system.fi_gap_threshold_normal,
         gap_global_floor=system.fi_gap_global_floor,
         gap_global_floor_very_low_data=system.fi_gap_global_floor_very_low_data,
+        gap_global_floor_p_le_4=system.fi_gap_global_floor_p_le_4,
+        gap_global_floor_p_ge_8=system.fi_gap_global_floor_p_ge_8,
         gap_min_retain=system.fi_gap_min_retain,
         # null importance
         null_enabled=system.fi_null_enabled,
@@ -313,6 +321,7 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         null_pre_elite_ratio=system.fi_null_pre_elite_ratio,
         # quantile policy
         # bootstrap rescue
+        bootstrap_min_freq_very_low_data=system.fi_bootstrap_min_freq_very_low_data,
         fi_bootstrap_rescue_global_floor=system.fi_bootstrap_rescue_global_floor,
         fi_bootstrap_rescue_very_low_data_only=system.fi_bootstrap_rescue_very_low_data_only,
         quantile_top_ratio_default=system.fi_quantile_top_ratio_default,

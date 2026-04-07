@@ -872,6 +872,7 @@ class LocalSampler:
             n_draw = max(remain * 4, 8)
             z = self.rng.normal(0.0, 1.0, size=(n_draw, 1))
             eta = self.rng.normal(0.0, sigma_perp_use.reshape(1, -1), size=(n_draw, dim))
+            eta -= (eta @ u).reshape(-1, 1) * u.reshape(1, -1)
             raw = center.reshape(1, -1) + z * sigma_par_use * u.reshape(1, -1) + eta
             mask = np.all((raw >= lb.reshape(1, -1)) & (raw <= ub.reshape(1, -1)), axis=1)
             accepted = raw[mask]

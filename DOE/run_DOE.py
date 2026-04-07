@@ -21,6 +21,46 @@ def _normalize_debug_level(value: str | None) -> str:
     return level
 
 
+def _resolve_initial_corner_ratio(
+    *,
+    system: DOESystemConfig,
+    n_samples: int,
+    p_dim: int,
+) -> tuple[float, str, dict]:
+    base_ratio = float(system.initial_corner_ratio)
+    effective_ratio = float(max(0.0, min(1.0, base_ratio)))
+    policy = "fixed"
+
+    p_dim_eff = max(int(p_dim), 1)
+    np_ratio = float(n_samples) / float(p_dim_eff)
+    context = {
+        "base_ratio": float(base_ratio),
+        "effective_ratio": float(effective_ratio),
+        "np_ratio": float(np_ratio),
+        "p_dim": int(p_dim_eff),
+    }
+
+    if not bool(getattr(system, "initial_corner_adaptive_enabled", False)):
+        return effective_ratio, policy, context
+
+    np_ratio_max = float(getattr(system, "initial_corner_adaptive_np_ratio_max", 10.0))
+    low_dim_max = int(getattr(system, "initial_corner_adaptive_low_dim_max", 6))
+    low_dim_ratio = float(getattr(system, "initial_corner_adaptive_ratio_low_dim", 0.05))
+
+    if np_ratio <= np_ratio_max:
+        if p_dim_eff <= low_dim_max:
+            effective_ratio = min(effective_ratio, low_dim_ratio)
+            policy = "adaptive_p_le_6_low_np"
+        else:
+            policy = "adaptive_p_gt_6_keep"
+    else:
+        policy = "adaptive_np_high_keep"
+
+    effective_ratio = float(max(0.0, min(1.0, effective_ratio)))
+    context["effective_ratio"] = float(effective_ratio)
+    return effective_ratio, policy, context
+
+
 def _resolve_existing_cae_metadata_path(
     *,
     config: DOEConfig,
@@ -173,6 +213,12 @@ def run_doe(*, config: DOEConfig, run_context: RunContext | None = None) -> dict
         )
         print(f"- ERROR: {msg}")
         raise ValueError(msg)
+    p_dim = int(len(variables))
+    initial_corner_ratio_eff, initial_corner_policy, initial_corner_context = _resolve_initial_corner_ratio(
+        system=config.system,
+        n_samples=n_samples,
+        p_dim=p_dim,
+    )
 
     use_timestamp = (
         config.cae.system.use_timestamp if config.cae is not None else False
@@ -184,7 +230,11 @@ def run_doe(*, config: DOEConfig, run_context: RunContext | None = None) -> dict
         "debug_level": _normalize_debug_level(config.system.debug_level),
         "success_rate_floor": config.system.success_rate_floor,
         "force_baseline_initial": config.system.force_baseline_initial,
-        "initial_corner_ratio": config.system.initial_corner_ratio,
+        "initial_corner_ratio": initial_corner_ratio_eff,
+        "initial_corner_ratio_base": float(config.system.initial_corner_ratio),
+        "initial_corner_ratio_policy": initial_corner_policy,
+        "initial_corner_np_ratio": initial_corner_context["np_ratio"],
+        "initial_corner_p_dim": p_dim,
         "initial_probe_multiplier": config.system.additional_initial_probe_multiplier,
         "plan_filter_safety": config.system.plan_filter_safety,
         "plan_filter_r_floor": config.system.plan_filter_r_floor,
@@ -204,7 +254,11 @@ def run_doe(*, config: DOEConfig, run_context: RunContext | None = None) -> dict
             "exec_eff_clip_max": config.system.exec_eff_clip_max,
             "exec_stage_min_ratio": config.system.exec_stage_min_ratio,
             "exec_stage_max_ratio": config.system.exec_stage_max_ratio,
-            "initial_corner_ratio": config.system.initial_corner_ratio,
+            "initial_corner_ratio": initial_corner_ratio_eff,
+            "initial_corner_ratio_base": float(config.system.initial_corner_ratio),
+            "initial_corner_ratio_policy": initial_corner_policy,
+            "initial_corner_np_ratio": initial_corner_context["np_ratio"],
+            "initial_corner_p_dim": p_dim,
             "initial_probe_multiplier": config.system.additional_initial_probe_multiplier,
             "success_rate_floor": config.system.success_rate_floor,
             "global_boundary_ratio": config.system.global_boundary_ratio,

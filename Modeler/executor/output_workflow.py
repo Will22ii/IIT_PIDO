@@ -113,6 +113,13 @@ def save_modeler_outputs(
         "fi_global_score_floor": float(config_system.fi_global_score_floor),
         "fi_use_score_drop": bool(config_system.fi_use_score_drop),
         "fi_drop_metric": str(config_system.fi_drop_metric),
+        "fi_stability_drop_min_rate_very_low_data": float(config_system.fi_stability_drop_min_rate_very_low_data),
+        "fi_gap_global_floor": float(config_system.fi_gap_global_floor),
+        "fi_gap_global_floor_very_low_data": float(config_system.fi_gap_global_floor_very_low_data),
+        "fi_gap_global_floor_p_le_4": float(config_system.fi_gap_global_floor_p_le_4),
+        "fi_gap_global_floor_p_ge_8": float(config_system.fi_gap_global_floor_p_ge_8),
+        "fi_bootstrap_min_freq": float(config_system.fi_bootstrap_min_freq),
+        "fi_bootstrap_min_freq_very_low_data": float(config_system.fi_bootstrap_min_freq_very_low_data),
         "use_primary_selection": bool(config_system.use_primary_selection),
         "use_secondary_selection": bool(config_user.use_secondary_selection),
         "secondary_target_kr": int(config_system.secondary_target_kr),
@@ -123,6 +130,14 @@ def save_modeler_outputs(
         "feas_model_kind": feas_model_kind,
         "workflow_info": workflow_info,
     }
+    if "bootstrap_enabled_effective" in selected_df.columns:
+        resolved_params["fi_bootstrap_enabled_effective"] = bool(
+            selected_df["bootstrap_enabled_effective"].astype(bool).any()
+        )
+    if "bootstrap_min_freq_effective" in selected_df.columns:
+        vals = pd.to_numeric(selected_df["bootstrap_min_freq_effective"], errors="coerce").dropna()
+        if not vals.empty:
+            resolved_params["fi_bootstrap_min_freq_effective"] = float(vals.iloc[0])
     results_summary = {
         "n_models": int(models_count),
         "n_features_selected": int(len(selected_features)),

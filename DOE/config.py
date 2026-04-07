@@ -18,7 +18,14 @@ class DOESystemConfig:
     # =========================
     n_samples: int = 120  # DOE 전체 샘플 수 (추가 DOE면 total_budget)
     force_baseline_initial: bool = False  # 초기 DOE에서 기준점 강제 포함 여부
-    initial_corner_ratio: float = 0.08  # 초기 DOE에서 corner 샘플 비율
+    initial_corner_ratio: float = 0.06  # 초기 DOE에서 corner 샘플 비율
+    # initial corner ratio adaptive policy (low N/p 구간에서만 완화)
+    initial_corner_adaptive_enabled: bool = True
+    initial_corner_adaptive_np_ratio_max: float = 10.0
+    initial_corner_adaptive_low_dim_max: int = 6
+    initial_corner_adaptive_mid_dim_max: int = 6
+    initial_corner_adaptive_ratio_low_dim: float = 0.05
+    initial_corner_adaptive_ratio_mid_dim: float = 0.05
 
     # =========================
     # 2) 추가 DOE: 단계/비율
@@ -40,7 +47,7 @@ class DOESystemConfig:
     # global_random_ratio는 현재 전달/적용하지 않습니다.
     # 전역 X_exec은 boundary/margin/top 버킷을 우선 배정하고,
     # 남은 슬롯을 random으로 채우는 정책을 사용합니다.
-    global_boundary_ratio: float = 0.25  # 전역 X_plan/X_exec 경계 샘플 비율
+    global_boundary_ratio: float = 0.21  # 전역 X_plan/X_exec 경계 샘플 비율
     global_margin_ratio: float = 0.2  # 전역 X_exec 중 제약 경계(margin) 버킷 비율
     global_top_ratio: float = 0.2  # 전역 X_exec 중 top-k 버킷 비율
     global_boundary_corner_ratio: float = 0.4  # 경계 샘플 중 코너 조합 비율

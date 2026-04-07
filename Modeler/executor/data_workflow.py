@@ -268,6 +268,11 @@ def prepare_modeler_data_policy(
         print(f"- Feasible 필터 적용: {n_before} -> {n_after}")
         if n_after == 0:
             raise RuntimeError("No feasible rows available for Modeler training.")
+        if n_after < 10:
+            raise RuntimeError(
+                f"사용 가능한 데이터가 {n_after}개로 10개 미만이므로 "
+                "모델 학습을 위한 데이터가 부족합니다. DOE n_samples를 늘려주세요."
+            )
 
     if variables:
         feature_cols = [v["name"] for v in variables]

@@ -52,7 +52,7 @@ class FeatureSelectionConfig:
     stability_very_low_data_n_threshold: int = 50
     stability_rule_very_low_data: str = "and"
     stability_perm_min_rate_very_low_data: float = 0.60
-    stability_drop_min_rate_very_low_data: float = 0.45
+    stability_drop_min_rate_very_low_data: float = 0.35
     stability_rule_low_data: str = "and"
     stability_perm_min_rate_low_data: float = 0.60
     stability_drop_min_rate_low_data: float = 0.44
@@ -80,6 +80,8 @@ class FeatureSelectionConfig:
     gap_threshold_normal: float = 0.12
     gap_global_floor: float = 0.70
     gap_global_floor_very_low_data: float = 0.85
+    gap_global_floor_p_le_4: float = 0.85
+    gap_global_floor_p_ge_8: float = 0.75
     gap_min_retain: int = 2
     # null-importance soft gate
     null_enabled: bool = True
@@ -91,6 +93,7 @@ class FeatureSelectionConfig:
     null_alpha_normal: float = 0.12
     null_apply_to: str = "both"
     null_pre_elite_ratio: float = 0.5
+    bootstrap_min_freq_very_low_data: float = 0.65
     # bootstrap rescue (very_low_data)
     fi_bootstrap_rescue_global_floor: float = 0.83
     fi_bootstrap_rescue_very_low_data_only: bool = True
@@ -298,6 +301,25 @@ class FeatureSelector:
         if p_dim <= 12:
             return float(np.clip(self.config.quantile_top_ratio_p_le_12, 0.05, 1.0))
         return float(np.clip(self.config.quantile_top_ratio_p_gt_12, 0.05, 1.0))
+
+    def _resolve_gap_global_floor(self, *, is_very_low_data: bool, p_dim: int) -> float:
+        if is_very_low_data:
+            base_floor = float(
+                getattr(
+                    self.config,
+                    "gap_global_floor_very_low_data",
+                    getattr(self.config, "gap_global_floor", 0.70),
+                )
+            )
+        else:
+            base_floor = float(getattr(self.config, "gap_global_floor", 0.70))
+
+        floor = float(base_floor)
+        if int(p_dim) <= 4:
+            floor = max(floor, float(getattr(self.config, "gap_global_floor_p_le_4", floor)))
+        elif int(p_dim) >= 8:
+            floor = min(floor, float(getattr(self.config, "gap_global_floor_p_ge_8", floor)))
+        return float(np.clip(floor, 0.0, 1.0))
 
     def _normalize_vote_weights(self) -> tuple[float, float, float]:
         w_abs = float(self.config.weight_abs)
@@ -1091,23 +1113,18 @@ class FeatureSelector:
         # 갭 아래의 저점수 feature를 제거 (dummy 과잉 선택 방지)
         gap_enabled = bool(getattr(self.config, "gap_filter_enabled", False))
         out["gap_filtered"] = False
+        out["gap_global_floor_effective"] = np.nan
         if gap_enabled:
             gap_thr = (
                 float(getattr(self.config, "gap_threshold_very_low_data", 0.10))
                 if is_very_low_data
                 else float(getattr(self.config, "gap_threshold_normal", 0.12))
             )
-            gap_g_floor = (
-                float(
-                    getattr(
-                        self.config,
-                        "gap_global_floor_very_low_data",
-                        getattr(self.config, "gap_global_floor", 0.70),
-                    )
-                )
-                if is_very_low_data
-                else float(getattr(self.config, "gap_global_floor", 0.70))
+            gap_g_floor = self._resolve_gap_global_floor(
+                is_very_low_data=bool(is_very_low_data),
+                p_dim=int(p_dim),
             )
+            out["gap_global_floor_effective"] = float(gap_g_floor)
             gap_min_retain = int(getattr(self.config, "gap_min_retain", 2))
 
             sel_mask = out["selected"].astype(bool)

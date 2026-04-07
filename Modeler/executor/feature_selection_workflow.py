@@ -229,6 +229,14 @@ def run_fi_selection_workflow(
         and not bootstrap_df.empty
         and int(bootstrap_rounds) > 0
     )
+    very_low_n_thr = int(getattr(fs_config, "stability_very_low_data_n_threshold", 55))
+    is_very_low_data = bool(low_data) and int(n_samples) < very_low_n_thr
+    bootstrap_min_freq_eff = float(bootstrap_min_freq)
+    if is_very_low_data:
+        bootstrap_min_freq_eff = float(
+            getattr(fs_config, "bootstrap_min_freq_very_low_data", bootstrap_min_freq_eff)
+        )
+
     if _bs_active:
         selected_df = run_bootstrap_stability(
             selected_df=selected_df,
@@ -237,7 +245,7 @@ def run_fi_selection_workflow(
             target_col=bootstrap_target_col,
             n_rounds=int(bootstrap_rounds),
             sample_ratio=float(bootstrap_sample_ratio),
-            min_freq=float(bootstrap_min_freq),
+            min_freq=float(bootstrap_min_freq_eff),
             base_seed=int(base_seed),
             model_name=bootstrap_model_name,
             model_params=bootstrap_model_params or {},
@@ -257,6 +265,11 @@ def run_fi_selection_workflow(
             rescue_very_low_data_only=bool(fs_config.fi_bootstrap_rescue_very_low_data_only),
             very_low_data_n_threshold=int(fs_config.stability_very_low_data_n_threshold),
         )
+        selected_df["bootstrap_enabled_effective"] = True
+        selected_df["bootstrap_min_freq_effective"] = float(bootstrap_min_freq_eff)
+    else:
+        selected_df["bootstrap_enabled_effective"] = False
+        selected_df["bootstrap_min_freq_effective"] = np.nan
 
     processed_path = os.path.join(meta_dir, "importance_processed.csv")
     processed_df.to_csv(processed_path, index=False)
