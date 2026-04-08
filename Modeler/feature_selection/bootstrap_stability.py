@@ -207,4 +207,25 @@ def run_bootstrap_stability(
     elif not rescued:
         print("[Bootstrap] all selected features passed stability check")
 
+    # E: Bootstrap-null compound gate
+    # 부트스트랩 통과(freq >= min_freq) + null importance 양쪽 채널 모두 실패인 feature를 제거.
+    # low-data에서 spurious dummy가 일관적으로 선택되는 패턴을 차단.
+    null_compound_removed = []
+    if "null_pass" in out.columns:
+        for idx, row in out.iterrows():
+            if (
+                row["selected"]
+                and row["bootstrap_freq"] >= min_freq
+                and not bool(row.get("null_pass", True))
+                and not bool(row.get("bootstrap_rescue_core", False))
+            ):
+                out.at[idx, "selected"] = False
+                out.at[idx, "reason"] = "bootstrap_null_compound_fail"
+                null_compound_removed.append(
+                    f"{row['feature']}(freq={row['bootstrap_freq']:.2f},"
+                    f"null_pass=False)"
+                )
+    if null_compound_removed:
+        print(f"[Bootstrap] null compound removed: {', '.join(null_compound_removed)}")
+
     return out

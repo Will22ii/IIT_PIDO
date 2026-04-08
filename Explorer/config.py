@@ -38,9 +38,9 @@ class ExplorerSystemConfig:
     bounds_weight_clip_max: float = 2.0
 
     # 상위/하위 분위수 기준
-    quantile_threshold: float = 0.90
+    quantile_threshold: float = 0.85  # I: 0.90→0.85, top-k 범위 확대로 optimum 포함률 향상
     # 최소 top-k 보장 개수
-    min_topk_count: int = 20
+    min_topk_count: int = 30  # I: 20→30, 최소 top-k 보장 수 증가
 
     # DBSCAN 설정값
     dbscan_min_samples: int = 2

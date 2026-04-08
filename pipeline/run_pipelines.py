@@ -136,7 +136,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
                 "obj_diversity_min_dim": 4,
             },
             "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.94,
+            "quantile_threshold": 0.89,  # I: 0.94→0.89
             "bounds_margin_ratio": 0.02,
             "dbscan_eps_quantile": 0.88,
         },
@@ -174,7 +174,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
                 "obj_diversity_min_dim": 4,
             },
             "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.94,
+            "quantile_threshold": 0.89,  # I: 0.94→0.89
             "bounds_margin_ratio": 0.02,
             "dbscan_eps_quantile": 0.88,
         },
@@ -184,6 +184,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
         {
             "strategy_params": {
                 "mode": "pred_refine_ei",
+                "max_volume_ratio_target": 0.249,  # K: pred 전략 volume clamp 추가
                 "pred_cluster_beta": 0.20,
                 "pred_refine_bounds_scale": 1.30,
                 "pred_multistart_det_fraction": 0.35,
@@ -199,6 +200,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
         {
             "strategy_params": {
                 "mode": "pred_refine_lcb",
+                "max_volume_ratio_target": 0.249,  # K: pred 전략 volume clamp 추가
                 "pred_cluster_beta": 0.20,
                 "pred_refine_bounds_scale": 1.30,
                 "pred_multistart_det_fraction": 0.35,
@@ -221,7 +223,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
                 "obj_diversity_min_dim": 4,
             },
             "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.90,
+            "quantile_threshold": 0.85,  # I: 0.90→0.85
             "bounds_margin_ratio": 0.03,
             "dbscan_eps_quantile": 0.90,
         },
@@ -238,7 +240,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
                 "obj_diversity_min_dim": 4,
             },
             "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.90,
+            "quantile_threshold": 0.85,  # I: 0.90→0.85
             "bounds_margin_ratio": 0.03,
             "dbscan_eps_quantile": 0.90,
         },

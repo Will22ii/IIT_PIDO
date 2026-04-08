@@ -915,13 +915,16 @@ class FeatureSelector:
                 rd_drop_ceil = float(getattr(self.config, "redundancy_drop_ceil", 0.40))
                 rd_factor = float(np.clip(getattr(self.config, "redundancy_dampening_factor", 0.5), 0.0, 1.0))
                 redundancy_suspect = (
-                    (p_dim > 8)
-                    & (out["perm_selection_rate"] >= rd_perm_floor)
+                    (out["perm_selection_rate"] >= rd_perm_floor)
                     & (out["drop_selection_rate"] < rd_drop_ceil)
                 )
                 dampening = np.where(redundancy_suspect, rd_factor, 1.0)
                 dp_penalty = dp_penalty * dampening
                 out["redundancy_suspect"] = redundancy_suspect
+
+            # D: Perm-dominant override — perm ≥ 0.90인 feature는 disagreement penalty 50% 감면
+            perm_dominant = out["perm_selection_rate"] >= 0.90
+            dp_penalty = dp_penalty * np.where(perm_dominant, 0.5, 1.0)
 
             out["disagreement"] = disagreement
             out["disagreement_penalty"] = dp_penalty
@@ -1088,6 +1091,13 @@ class FeatureSelector:
             np.where(l3_force_and, and_pass, base_stability_pass),
             index=out.index,
         ).astype(bool)
+
+        # D: Perm-dominant override — perm_vote ≥ 0.90이면 stability 강제 통과
+        # 근거: perm importance가 매우 높은 feature는 실질적 영향력이 있다는 강한 증거.
+        # drop 채널의 낮은 점수는 다중공선성(다른 correlated feature가 보상)일 가능성이 높음.
+        perm_dominant_override = out["perm_selection_rate"] >= 0.90
+        stability_pass = stability_pass | perm_dominant_override
+        out["perm_dominant_override"] = perm_dominant_override
 
         out["stability_enabled"] = bool(stability_enabled)
         out["stability_rule"] = str(stability_rule)

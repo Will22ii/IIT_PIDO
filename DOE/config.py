@@ -47,9 +47,9 @@ class DOESystemConfig:
     # global_random_ratio는 현재 전달/적용하지 않습니다.
     # 전역 X_exec은 boundary/margin/top 버킷을 우선 배정하고,
     # 남은 슬롯을 random으로 채우는 정책을 사용합니다.
-    global_boundary_ratio: float = 0.21  # 전역 X_plan/X_exec 경계 샘플 비율
+    global_boundary_ratio: float = 0.15  # 전역 X_plan/X_exec 경계 샘플 비율 (G: 0.21→0.15, top-k 비율 상향에 따른 조정)
     global_margin_ratio: float = 0.2  # 전역 X_exec 중 제약 경계(margin) 버킷 비율
-    global_top_ratio: float = 0.2  # 전역 X_exec 중 top-k 버킷 비율
+    global_top_ratio: float = 0.28  # 전역 X_exec 중 top-k 버킷 비율 (G: 0.20→0.28, optimum 근방 집중도 향상)
     global_boundary_corner_ratio: float = 0.4  # 경계 샘플 중 코너 조합 비율
 
     # =========================
@@ -92,7 +92,7 @@ class DOESystemConfig:
     # 6) Local Planner: 샘플 스케일
     # =========================
     local_radius_ratio_phase1: float = 0.25  # 1단계 로컬 반경 비율
-    local_radius_ratio_phase2: float = 0.18  # 2단계 로컬 반경 비율
+    local_radius_ratio_phase2: float = 0.15  # 2단계 로컬 반경 비율 (F: 0.18→0.15, 더 집중적 local 탐색)
     local_min_radius_ratio: float = 0.08  # 로컬 최소 반경 비율 (전역 span 기준)
     local_tol_ratio: float = 0.3  # 로컬 중복 제거 허용치 비율 (반경 평균 대비)
 
@@ -136,7 +136,7 @@ class DOESystemConfig:
     # - adaptive_early_stop: 종료 조건 충족 시 조기 종료 허용
     budget_policy: str = "consume_all"
     phase1_global_ratio: float = 0.8  # 1단계 전역 비율
-    phase2_global_ratio: float = 0.35  # 2단계 전역 비율
+    phase2_global_ratio: float = 0.25  # 2단계 전역 비율 (F: 0.35→0.25, local/optimum 근방 집중 강화)
     # Phase2 진입 임계값 (stop 임계값과 분리)
     phase2_gate1_score_min: float = 0.55  # phase2 진입용 Gate1 score 최소값
     phase2_gate2_score_min: float = 0.75  # phase2 진입용 Gate2 score 최소값

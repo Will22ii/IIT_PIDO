@@ -2275,7 +2275,7 @@ class ExplorerOrchestrator:
 
             strategy_params = dict(self.config.system.strategy_params or {})
             dual_cap_raw = strategy_params.get("max_volume_ratio_target", None)
-            if strategy_alias in {"s4", "s8"} and dual_cap_raw is not None:
+            if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"} and dual_cap_raw is not None:  # K: pred 전략에도 volume cap 적용
                 try:
                     dual_volume_cap_target = float(dual_cap_raw)
                 except Exception:

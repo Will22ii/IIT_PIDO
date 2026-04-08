@@ -131,12 +131,12 @@ class ModelerSystemConfig:
     # perm/drop 불일치가 클수록 final_score 감산
     fi_disagreement_penalty_enabled: bool = True
     fi_disagreement_threshold: float = 0.25   # 이 이상 불일치면 패널티 시작
-    fi_disagreement_penalty_scale: float = 0.55  # 패널티 강도
+    fi_disagreement_penalty_scale: float = 0.40  # 패널티 강도 (B: 0.55→0.40, 과도한 감점 완화)
     # Redundancy-aware disagreement dampening (L1)
     # perm이 높지만 drop이 매우 낮은 경우 (변수 간 정보 중복 의심) disagreement penalty 감면
     fi_redundancy_dampening_enabled: bool = True
     fi_redundancy_perm_floor: float = 0.85   # perm_rate >= 이 값
-    fi_redundancy_drop_ceil: float = 0.40    # drop_rate < 이 값
+    fi_redundancy_drop_ceil: float = 0.50    # drop_rate < 이 값 (A: 0.40→0.50, 다중공선성 감지 범위 확대)
     fi_redundancy_dampening_factor: float = 0.5  # penalty에 곱할 감면 계수
     # Adaptive score gap filter (L2)
     # 선택된 feature 간 점수 갭이 클 때, 갭 아래의 저점수 feature를 제거
@@ -157,7 +157,7 @@ class ModelerSystemConfig:
     fi_drop_veto_threshold: float = 0.03  # 이 미만이면 veto (very_low_data에서만 동작)
     # very_low_data perm vote variance penalty: fold간 perm vote 분산이 높은 feature에 패널티
     fi_perm_var_penalty_very_low_data_enabled: bool = True
-    fi_perm_var_penalty_very_low_data_scale: float = 0.20
+    fi_perm_var_penalty_very_low_data_scale: float = 0.35  # E: 0.20→0.35, very_low_data dummy 분산 패널티 강화
 
     # -----------------------------
     # Bootstrap Stability Selection
@@ -167,7 +167,7 @@ class ModelerSystemConfig:
     fi_bootstrap_np_threshold: float = 10.0   # N/p ≤ 이 값일 때 발동
     fi_bootstrap_rounds: int = 15             # 반복 횟수
     fi_bootstrap_sample_ratio: float = 0.8    # 서브샘플 비율
-    fi_bootstrap_min_freq: float = 0.73       # 최소 선택 빈도 (미만이면 제거)
+    fi_bootstrap_min_freq: float = 0.80       # 최소 선택 빈도 (미만이면 제거) (E: 0.73→0.80, 일관성 기준 강화)
     fi_bootstrap_min_freq_very_low_data: float = 0.45  # very_low_data 전용 완화 임계값
     # very_low_data 구제: bootstrap_freq < min_freq여도 global_score가 이 값 이상이면 유지
     fi_bootstrap_rescue_global_floor: float = 0.83
@@ -181,12 +181,12 @@ class ModelerSystemConfig:
     # null 모드: soft | hard | off (권장: soft)
     fi_null_mode: str = "soft"
     # null 비교 분위수(예: 0.90 = null90)
-    fi_null_quantile: float = 0.85
+    fi_null_quantile: float = 0.90  # C: 0.85→0.90, null 기준 상향으로 dummy 억제 강화
     # null 셔플 반복 수(low-data / normal)
     fi_null_shuffle_runs_low_data: int = 50
     fi_null_shuffle_runs_normal: int = 30
     # soft penalty 강도(low-data / normal)
-    fi_null_alpha_low_data: float = 0.45
+    fi_null_alpha_low_data: float = 0.55  # C: 0.45→0.55, low-data dummy 감점 강화
     fi_null_alpha_normal: float = 0.12
     # null 기준 점수 축: global_score | final_score | both
     # both: global_score에 pre-elite penalty 적용 + 이후 final_score에도 적용
