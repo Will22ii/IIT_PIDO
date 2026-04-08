@@ -14,10 +14,21 @@ DEFAULT_XGB_SEARCH_SPACE: dict[str, tuple[float, float]] = {
     "n_estimators": (300, 800),
     "learning_rate": (0.01, 0.1),
     "max_depth": (3, 9),
-    "min_child_weight": (1, 10),
+    "min_child_weight": (0.5, 12.0),
     "subsample": (0.7, 1.0),
     "colsample_bytree": (0.6, 1.0),
     "gamma": (0.0, 0.3),
+}
+DEFAULT_HPO_SAMPLER = "tpe"
+
+
+DEFAULT_PRUNING_CONFIG: dict[str, float | int | bool] = {
+    "enabled": False,
+    "percentile": 85.0,
+    "n_startup_trials": 12,
+    "n_warmup_steps": 4,
+    "interval_steps": 1,
+    "min_completed_trials": 8,
 }
 
 
@@ -104,27 +115,72 @@ def make_xgb_search_space(
     cols_high = max(float(cols_high), cols_low)
     gamma_low = max(float(gamma_low), 0.0)
     gamma_high = max(float(gamma_high), gamma_low)
+    child_low = max(float(child_low), 1e-6)
+    child_high = max(float(child_high), child_low)
 
     # integer params need valid integer bounds with low <= high.
     n_est_low_i = max(int(round(n_est_low)), 1)
     n_est_high_i = max(int(round(n_est_high)), n_est_low_i)
     depth_low_i = max(int(round(depth_low)), 1)
     depth_high_i = max(int(round(depth_high)), depth_low_i)
-    child_low_i = max(int(round(child_low)), 1)
-    child_high_i = max(int(round(child_high)), child_low_i)
 
     def _search_space_fn(trial: optuna.Trial) -> Dict:
         return {
             "n_estimators": trial.suggest_int("n_estimators", n_est_low_i, n_est_high_i),
             "learning_rate": trial.suggest_float("learning_rate", lr_low, lr_high, log=True),
             "max_depth": trial.suggest_int("max_depth", depth_low_i, depth_high_i),
-            "min_child_weight": trial.suggest_int("min_child_weight", child_low_i, child_high_i),
+            "min_child_weight": trial.suggest_float("min_child_weight", child_low, child_high, log=True),
             "subsample": trial.suggest_float("subsample", subs_low, subs_high),
             "colsample_bytree": trial.suggest_float("colsample_bytree", cols_low, cols_high),
             "gamma": trial.suggest_float("gamma", gamma_low, gamma_high),
         }
 
     return _search_space_fn
+
+
+def _resolve_pruning_config(config: dict[str, Any] | None) -> dict[str, float | int | bool]:
+    cfg = dict(DEFAULT_PRUNING_CONFIG)
+    if isinstance(config, dict):
+        cfg.update(config)
+
+    try:
+        percentile = float(cfg.get("percentile", DEFAULT_PRUNING_CONFIG["percentile"]))
+    except (TypeError, ValueError):
+        percentile = float(DEFAULT_PRUNING_CONFIG["percentile"])
+    percentile = float(np.clip(percentile, 50.0, 99.9))
+
+    def _to_int(key: str, default: int, *, min_value: int = 0) -> int:
+        try:
+            out = int(cfg.get(key, default))
+        except (TypeError, ValueError):
+            out = int(default)
+        return max(out, int(min_value))
+
+    return {
+        "enabled": bool(cfg.get("enabled", DEFAULT_PRUNING_CONFIG["enabled"])),
+        "percentile": float(percentile),
+        "n_startup_trials": int(_to_int("n_startup_trials", int(DEFAULT_PRUNING_CONFIG["n_startup_trials"]), min_value=0)),
+        "n_warmup_steps": int(_to_int("n_warmup_steps", int(DEFAULT_PRUNING_CONFIG["n_warmup_steps"]), min_value=1)),
+        "interval_steps": int(_to_int("interval_steps", int(DEFAULT_PRUNING_CONFIG["interval_steps"]), min_value=1)),
+        "min_completed_trials": int(_to_int("min_completed_trials", int(DEFAULT_PRUNING_CONFIG["min_completed_trials"]), min_value=1)),
+    }
+
+
+def _resolve_sampler_name(value: Any) -> str:
+    raw = str(value or DEFAULT_HPO_SAMPLER).strip().lower()
+    if raw in {"tpe", "cmaes"}:
+        return raw
+    return DEFAULT_HPO_SAMPLER
+
+
+def _build_sampler(*, sampler_name: str, base_random_seed: int):
+    resolved = _resolve_sampler_name(sampler_name)
+    if resolved == "cmaes":
+        try:
+            return optuna.samplers.CmaEsSampler(seed=base_random_seed)
+        except Exception as exc:
+            print(f"[HPO] CmaEsSampler unavailable ({exc}). Fallback to TPESampler.")
+    return optuna.samplers.TPESampler(seed=base_random_seed)
 
 
 # =====================================================
@@ -150,12 +206,16 @@ class HPORunner:
         show_optuna_log: bool = False,
         search_space: dict[str, Any] | None = None,
         hpo_mode: str = "default",
+        pruning_config: dict[str, Any] | None = None,
+        sampler_name: str = DEFAULT_HPO_SAMPLER,
     ):
         self.n_trials = n_trials
         self.lambda_std = lambda_std
         self.show_optuna_log = bool(show_optuna_log)
         self.search_space = dict(search_space) if isinstance(search_space, dict) else None
         self.hpo_mode = str(hpo_mode)
+        self.pruning_config = _resolve_pruning_config(pruning_config)
+        self.sampler_name = _resolve_sampler_name(sampler_name)
 
     # -------------------------------------------------
     # Main entry
@@ -182,8 +242,22 @@ class HPORunner:
         else:
             optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-        sampler = optuna.samplers.TPESampler(seed=base_random_seed)
-        study = optuna.create_study(direction="minimize", sampler=sampler)
+        sampler = _build_sampler(
+            sampler_name=self.sampler_name,
+            base_random_seed=base_random_seed,
+        )
+        if bool(self.pruning_config["enabled"]):
+            pruner = optuna.pruners.PercentilePruner(
+                percentile=float(self.pruning_config["percentile"]),
+                n_startup_trials=int(self.pruning_config["n_startup_trials"]),
+                n_warmup_steps=int(self.pruning_config["n_warmup_steps"]),
+                interval_steps=int(self.pruning_config["interval_steps"]),
+                n_min_trials=int(self.pruning_config["min_completed_trials"]),
+            )
+        else:
+            pruner = optuna.pruners.NopPruner()
+
+        study = optuna.create_study(direction="minimize", sampler=sampler, pruner=pruner)
 
         objective = make_robust_objective(
             X=X,
@@ -192,6 +266,8 @@ class HPORunner:
             search_space_fn=make_xgb_search_space(search_space=self.search_space),
             lambda_std=self.lambda_std,
             kfold_splits=kfold_splits,
+            pruning_enabled=bool(self.pruning_config["enabled"]),
+            pruning_warmup_steps=int(self.pruning_config["n_warmup_steps"]),
         )
 
         study.optimize(objective, n_trials=self.n_trials)

@@ -87,6 +87,23 @@ def save_modeler_outputs(
         "workflow_info": workflow_info,
     }
     modeler_analysis_meta = {
+        # Identity/context (analysis-only 파싱 지원)
+        "run_id": run_context.run_id if run_context is not None else None,
+        "problem": problem_name,
+        "model_name": model_name,
+        # Operational mirror
+        "selected_features": selected_features,
+        "use_primary_selection": bool(config_system.use_primary_selection),
+        "use_secondary_selection": bool(config_user.use_secondary_selection),
+        "fi_low_data_mode": bool(cv_policy["low_data"]),
+        "fi_np_ratio": float(cv_policy["np_ratio"]),
+        "has_post_constraints": bool(has_post_constraints),
+        "workflow_info": workflow_info,
+        # Defaults for stable schema
+        "anti_collapse_guard_activated": False,
+        "anti_collapse_guard_features": [],
+        "fi_bootstrap_enabled_effective": False,
+        "fi_bootstrap_min_freq_effective": None,
         "hpo_used": hpo_params_used,
         "hpo_mode": str(hpo_mode),
         "hpo_n_trials_effective": (
@@ -116,8 +133,7 @@ def save_modeler_outputs(
             "feature",
         ].astype(str).tolist()
         modeler_analysis_meta["anti_collapse_guard_activated"] = len(guard_features) > 0
-        if guard_features:
-            modeler_analysis_meta["anti_collapse_guard_features"] = guard_features
+        modeler_analysis_meta["anti_collapse_guard_features"] = guard_features
     if "bootstrap_enabled_effective" in selected_df.columns:
         modeler_analysis_meta["fi_bootstrap_enabled_effective"] = bool(
             selected_df["bootstrap_enabled_effective"].astype(bool).any()

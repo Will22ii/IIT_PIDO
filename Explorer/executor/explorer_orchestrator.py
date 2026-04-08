@@ -2509,6 +2509,25 @@ class ExplorerOrchestrator:
 
         # --- Analysis metadata (artifacts/meta/analysis_<strategy>.json) ---
         _explorer_analysis_meta = {
+            # Identity/context (analysis-only 파싱 지원)
+            "run_id": self.run_context.run_id if self.run_context is not None else None,
+            "problem": doe_problem_name,
+            "seed": int(rng_seed),
+            "objective_sense": objective_sense,
+            "strategy_id": strategy_id,
+            "strategy_alias": strategy_alias,
+            "strategy_mode": strategy_mode,
+            # Operational mirror
+            "p_dim": int(len(selected_features)),
+            "usable_n": int(base_n),
+            "usable_n_over_p": (
+                float(base_n) / float(max(len(selected_features), 1))
+                if len(selected_features) > 0 else None
+            ),
+            "has_pre_constraints": bool(has_pre_constraints),
+            "has_post_constraints": bool(has_post_constraints),
+            "selected_bounds_volume_ratio": vol_ratio,
+            "dual_volume_cap_applied": bool(dual_volume_cap_applied),
             "post_penalty_active": bool(has_post_penalty),
             "post_lambda": float(post_lambda),
             "generated_total_raw": int(pre_generated),
@@ -2516,6 +2535,8 @@ class ExplorerOrchestrator:
             "generated_boundary": int(X_boundary_raw.shape[0]),
             "r_used": float(r_used),
             # Pred
+            "pred_cluster_signal_mode": pred_cluster_signal_mode,
+            "pred_cluster_beta_used": pred_cluster_beta_used,
             "pred_cluster_confidence": pred_cluster_confidence,
             "pred_cluster_selected_count": pred_cluster_selected_count,
             "pred_cluster_sigma_mean_selected": pred_cluster_sigma_mean_selected,
@@ -2523,8 +2544,12 @@ class ExplorerOrchestrator:
             "pred_obj_miss_case": pred_obj_miss_case,
             "pred_obj_iou": pred_obj_iou,
             "pred_obj_center_l1_norm": pred_obj_center_l1_norm,
+            "pred_multistart_det_fraction_used": pred_multistart_det_fraction_used,
+            "pred_refine_bounds_scale_used": pred_refine_bounds_scale_used,
             "pred_n_starts_used": pred_n_starts_used,
             # Dual
+            "dual_policy_mode": dual_policy_mode,
+            "dual_total_starts_target": dual_total_starts_target,
             "dual_total_starts_used": dual_total_starts_used,
             "dual_np_ratio_used": dual_np_ratio_used,
             "dual_pred_ratio_used": dual_pred_ratio_used,
@@ -2535,6 +2560,7 @@ class ExplorerOrchestrator:
             "dual_disagreement_iou": dual_disagreement_iou,
             "dual_disagreement_triggered": bool(dual_disagreement_triggered),
             "dual_center_bias_used": dual_center_bias_used,
+            "dual_center_tilt_strength_base": dual_center_tilt_strength_base,
             "dual_center_tilt_strength_used_mean": dual_center_tilt_strength_used_mean,
             "dual_center_tilt_applied": bool(dual_center_tilt_applied),
             "dual_volume_cap_target": dual_volume_cap_target,

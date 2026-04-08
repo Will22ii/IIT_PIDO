@@ -27,6 +27,7 @@ class ModelerSystemConfig:
     # - low_data_constrained_enabled: low-data constrained HPO 활성화 (기본 True)
     # - low_data_n_trials: low-data 모드 trial 수 (기본 10)
     # - low_data_lambda_std: low-data 모드 lambda_std (기본 lambda_std와 동일)
+    # - sampler: HPO sampler 선택 (tpe|cmaes, 기본 tpe)
     # - search_space: normal 모드 탐색공간 override(dict)
     # - low_data_search_space: low-data 모드 탐색공간 override(dict)
     hpo_config: dict | None = None

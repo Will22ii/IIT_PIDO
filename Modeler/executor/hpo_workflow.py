@@ -12,7 +12,7 @@ from Modeler.executor.hpo_runner import HPORunner
 XGB_PARAM_TYPES = {
     "n_estimators": int,
     "max_depth": int,
-    "min_child_weight": int,
+    "min_child_weight": float,
     "subsample": float,
     "colsample_bytree": float,
     "learning_rate": float,
@@ -22,11 +22,15 @@ XGB_PARAM_TYPES = {
 DEFAULT_HPO_N_TRIALS = 20
 DEFAULT_HPO_LAMBDA_STD = 0.5
 DEFAULT_LOW_DATA_HPO_N_TRIALS = 10
+DEFAULT_PRUNING_PERCENTILE = 85.0
+DEFAULT_PRUNING_STARTUP_TRIALS = 12
+DEFAULT_PRUNING_MIN_COMPLETED_TRIALS = 8
+DEFAULT_PRUNING_INTERVAL_STEPS = 1
 DEFAULT_LOW_DATA_XGB_SEARCH_SPACE: dict[str, tuple[float, float]] = {
     "n_estimators": (250, 600),
     "learning_rate": (0.02, 0.08),
     "max_depth": (3, 5),
-    "min_child_weight": (4, 10),
+    "min_child_weight": (1.0, 8.0),
     "subsample": (0.7, 0.9),
     "colsample_bytree": (0.6, 0.9),
     "gamma": (0.05, 0.3),
@@ -123,6 +127,72 @@ def _resolve_hpo_policy(
     return mode, int(n_trials), float(lambda_std), search_space
 
 
+def _resolve_pruning_policy(
+    *,
+    hpo_config: dict | None,
+    low_data: bool,
+    n_trials: int,
+    kfold_splits: int,
+) -> dict[str, int | float | bool]:
+    cfg = hpo_config or {}
+
+    if bool(low_data):
+        enabled = bool(cfg.get("low_data_pruning_enabled", False))
+    else:
+        enabled = bool(cfg.get("pruning_enabled", True))
+
+    percentile = _safe_float(
+        cfg.get("pruning_percentile", DEFAULT_PRUNING_PERCENTILE),
+        default=DEFAULT_PRUNING_PERCENTILE,
+        min_value=50.0,
+    )
+    percentile = float(min(percentile, 99.9))
+
+    startup_default = min(int(DEFAULT_PRUNING_STARTUP_TRIALS), max(int(n_trials) - 1, 0))
+    startup_trials = _safe_int(
+        cfg.get("pruning_startup_trials", startup_default),
+        default=startup_default,
+        min_value=0,
+    )
+
+    min_completed_default = min(int(DEFAULT_PRUNING_MIN_COMPLETED_TRIALS), max(int(n_trials) - 1, 1))
+    min_completed_trials = _safe_int(
+        cfg.get("pruning_min_completed_trials", min_completed_default),
+        default=min_completed_default,
+        min_value=1,
+    )
+
+    warmup_default = max(int(kfold_splits) - 1, 1)
+    warmup_steps = _safe_int(
+        cfg.get("pruning_warmup_steps", warmup_default),
+        default=warmup_default,
+        min_value=1,
+    )
+
+    interval_steps = _safe_int(
+        cfg.get("pruning_interval_steps", DEFAULT_PRUNING_INTERVAL_STEPS),
+        default=DEFAULT_PRUNING_INTERVAL_STEPS,
+        min_value=1,
+    )
+
+    return {
+        "enabled": bool(enabled),
+        "percentile": float(percentile),
+        "n_startup_trials": int(startup_trials),
+        "n_warmup_steps": int(warmup_steps),
+        "interval_steps": int(interval_steps),
+        "min_completed_trials": int(min_completed_trials),
+    }
+
+
+def _resolve_sampler_policy(*, hpo_config: dict | None) -> str:
+    cfg = hpo_config or {}
+    raw = str(cfg.get("sampler", "tpe")).strip().lower()
+    if raw in {"tpe", "cmaes"}:
+        return raw
+    return "tpe"
+
+
 def resolve_hpo_params(
     *,
     use_hpo: bool,
@@ -155,8 +225,17 @@ def resolve_hpo_params(
             hpo_config=hpo_config,
             low_data=bool(low_data),
         )
+        hpo_pruning_policy = _resolve_pruning_policy(
+            hpo_config=hpo_config,
+            low_data=bool(low_data),
+            n_trials=int(hpo_n_trials_effective),
+            kfold_splits=int(kfold_splits),
+        )
+        hpo_sampler_name = _resolve_sampler_policy(hpo_config=hpo_config)
     else:
         hpo_search_space = None
+        hpo_pruning_policy = {"enabled": False}
+        hpo_sampler_name = "tpe"
 
     if use_hpo:
         hpo_runner = HPORunner(
@@ -165,12 +244,15 @@ def resolve_hpo_params(
             use_timestamp=use_timestamp,
             search_space=hpo_search_space,
             hpo_mode=hpo_mode,
+            pruning_config=hpo_pruning_policy,
+            sampler_name=hpo_sampler_name,
         )
         print(
             "- HPO policy: "
             f"mode={hpo_mode} "
             f"n_trials={hpo_n_trials_effective} "
-            f"lambda_std={hpo_lambda_std_effective}"
+            f"lambda_std={hpo_lambda_std_effective} "
+            f"sampler={hpo_sampler_name}"
         )
 
         hpo_result = hpo_runner.run_xgb(

@@ -19,6 +19,8 @@ def make_robust_objective(
     search_space_fn: Callable,
     lambda_std: float,
     kfold_splits: int = 5,
+    pruning_enabled: bool = False,
+    pruning_warmup_steps: int = 1,
 ):
     """
     Robust objective:
@@ -37,6 +39,7 @@ def make_robust_objective(
 
         valid_rmses = []
         train_rmses = []
+        prune_after_step = max(int(pruning_warmup_steps), 1)
 
         for run_id, train_idx, valid_idx in splitter.split(X):
             model_seed = base_random_seed + (run_id + 1)
@@ -66,6 +69,15 @@ def make_robust_objective(
             valid_err = y[valid_idx] - y_valid_pred
             valid_rmse = float(np.sqrt(np.mean(valid_err ** 2)))
             valid_rmses.append(valid_rmse)
+
+            if bool(pruning_enabled):
+                step = int(run_id) + 1
+                partial_mean = float(np.mean(valid_rmses))
+                partial_std = float(np.std(valid_rmses))
+                partial_score = partial_mean + float(lambda_std) * partial_std
+                trial.report(partial_score, step=step)
+                if step >= prune_after_step and trial.should_prune():
+                    raise optuna.TrialPruned()
 
         # -------------------------
         # Aggregate
