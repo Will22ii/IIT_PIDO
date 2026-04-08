@@ -205,11 +205,19 @@ def apply_bounds_margin(
     margin_ratio: float,
     min_volume_ratio: float = 0.20,
     dim_weights: np.ndarray | None = None,
+    center_hint: np.ndarray | None = None,
 ) -> list[Tuple[float, float]]:
     if not selected_bounds or not bounds or len(selected_bounds) != len(bounds):
         return selected_bounds
 
     min_v = float(np.clip(min_volume_ratio, 0.0, 1.0))
+
+    # EXP-1: center_hint 유효성 검증
+    _center = None
+    if center_hint is not None:
+        _c = np.asarray(center_hint, dtype=float).ravel()
+        if _c.shape[0] == len(bounds) and np.all(np.isfinite(_c)):
+            _center = _c
 
     def _volume_ratio(
         *,
@@ -233,6 +241,7 @@ def apply_bounds_margin(
         gl: float,
         gu: float,
         target_width: float,
+        center_j: float | None = None,
     ) -> tuple[float, float]:
         gl = float(gl)
         gu = float(gu)
@@ -251,8 +260,20 @@ def apply_bounds_margin(
         left_room = max(lo - gl, 0.0)
         right_room = max(gu - hi, 0.0)
 
-        add_left = min(left_room, 0.5 * need)
-        add_right = min(right_room, 0.5 * need)
+        # EXP-1: center hint 기반 비대칭 확장
+        # center가 bounds 중심보다 왼쪽이면 left를 더 확장, 오른쪽이면 right를 더 확장
+        left_ratio = 0.5
+        if center_j is not None and cur_w > 1e-12:
+            mid = (lo + hi) * 0.5
+            g_span = max(gu - gl, 1e-12)
+            # center가 bounds 밖이면 해당 방향으로 더 강하게 확장
+            offset = float(np.clip((center_j - mid) / g_span, -0.5, 0.5))
+            # offset > 0 → center가 오른쪽 → right 확장 비율 증가
+            # 0.5 + offset: [0.0, 1.0] 범위, 기본 0.5에서 center 방향으로 최대 ±0.15 bias
+            left_ratio = float(np.clip(0.5 - offset * 0.3, 0.2, 0.8))
+
+        add_left = min(left_room, left_ratio * need)
+        add_right = min(right_room, (1.0 - left_ratio) * need)
         lo -= add_left
         hi += add_right
         need -= (add_left + add_right)
@@ -307,7 +328,7 @@ def apply_bounds_margin(
         target_ratios: list[float],
     ) -> list[Tuple[float, float]]:
         out: list[Tuple[float, float]] = []
-        for (s_lb, s_ub), (g_lb, g_ub), t_ratio in zip(base_bounds, bounds, target_ratios):
+        for j, ((s_lb, s_ub), (g_lb, g_ub), t_ratio) in enumerate(zip(base_bounds, bounds, target_ratios)):
             gl = float(g_lb)
             gu = float(g_ub)
             g_span = max(gu - gl, 0.0)
@@ -320,6 +341,7 @@ def apply_bounds_margin(
                 gl=gl,
                 gu=gu,
                 target_width=target_w,
+                center_j=float(_center[j]) if _center is not None else None,
             )
             out.append((lo_new, hi_new))
         return out
@@ -337,7 +359,7 @@ def apply_bounds_margin(
         m = base_margin * max(min_v - raw_v, 0.0) / min_v
         if m > 0.0:
             expanded_try = []
-            for (s_lb, s_ub), (g_lb, g_ub) in zip(expanded, bounds):
+            for j, ((s_lb, s_ub), (g_lb, g_ub)) in enumerate(zip(expanded, bounds)):
                 gl = float(g_lb)
                 gu = float(g_ub)
                 g_span = max(gu - gl, 1e-12)
@@ -350,6 +372,7 @@ def apply_bounds_margin(
                     gl=gl,
                     gu=gu,
                     target_width=target_w,
+                    center_j=float(_center[j]) if _center is not None else None,
                 )
                 if not np.isfinite(lo) or not np.isfinite(hi) or hi < lo:
                     return selected_bounds

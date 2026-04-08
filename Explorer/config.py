@@ -34,8 +34,8 @@ class ExplorerSystemConfig:
     # - "fi_aware": FI score 기반 가중 확장(실패 시 uniform fallback)
     bounds_expansion_mode: str = "uniform"
     # fi_aware / uncertainty_aware 차원별 가중치 clip 범위 [min, max]
-    bounds_weight_clip_min: float = 0.5
-    bounds_weight_clip_max: float = 2.0
+    bounds_weight_clip_min: float = 0.7   # EXP-3: 0.5→0.7, fi_aware 과축소 방지
+    bounds_weight_clip_max: float = 1.5   # EXP-3: 2.0→1.5, 균등에 가깝게 보수화
 
     # 상위/하위 분위수 기준
     quantile_threshold: float = 0.85  # I: 0.90→0.85, top-k 범위 확대로 optimum 포함률 향상

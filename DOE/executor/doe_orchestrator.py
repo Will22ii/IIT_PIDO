@@ -239,6 +239,7 @@ def _save_doe_results(
     resolved_params_extra: dict | None = None,
     results_extra: dict | None = None,
     extra_metadata: dict | None = None,
+    meta_artifacts_extra: dict | None = None,
     task_name: str = "DOE",
     constraint_defs: list[dict] | None = None,
     debug_level: str = "off",
@@ -320,29 +321,13 @@ def _save_doe_results(
         "constraint_defs": constraint_defs or [],
     }
     resolved_params = {
-        "n_samples": len(df_public),
         "seed": seed,
         "objective_sense": objective_sense,
         "additional_doe": additional_doe,
-        "constraint_scope_schema": "pre_post_only",
-        "debug_level": debug_level,
-        "constraint_column_schema": "constraint_<id>_{value|feasible}",
-        "constraint_columns": [
-            {
-                "constraint_id": cid,
-                "value_col": f"constraint_{token}_value",
-                "feasible_col": f"constraint_{token}_feasible",
-            }
-            for cid, token in constraint_column_map.items()
-        ],
         "workflow_info": workflow_info,
     }
     if resolved_params_extra:
         resolved_params.update(resolved_params_extra)
-    if extra_metadata:
-        extra_context = dict(extra_metadata)
-        if extra_context:
-            resolved_params["extra_context"] = extra_context
 
     results_summary = {
         "n_samples_total": len(df_public),
@@ -354,6 +339,8 @@ def _save_doe_results(
             results_summary[key] = value
     public_artifacts = {}
     meta_artifacts = {}
+    if meta_artifacts_extra:
+        meta_artifacts.update(meta_artifacts_extra)
     debug_artifacts = {}
     if keep_debug:
         debug_artifacts["results_internal_csv"] = os.path.join(
@@ -881,100 +868,78 @@ def run_doe_orchestrator(
         objective_sense=objective_sense,
     )
     diagnostics = orchestrator.get_diagnostics()
+    # --- gate_history 축약: stage당 69→15 keys ---
+    _gate_history_keep = {
+        "stage", "phase", "next_phase", "n_exec",
+        "n_exec_global_selected", "n_exec_local_selected",
+        "gate1_score", "gate1_score_ema", "gate1_pass",
+        "gate2_score", "gate2_score_ema", "gate2_pass",
+        "usable_n", "collapse_detected", "diversity_boost_active",
+    }
+    _raw_gh = diagnostics.get("gate_history") or []
+    _slim_gh = [
+        {k: v for k, v in entry.items() if k in _gate_history_keep}
+        for entry in _raw_gh
+    ] if isinstance(_raw_gh, list) else _raw_gh
+
+    # --- Operational metadata: downstream task + try_stats 집계용 ---
     diagnostic_meta = {
-        "failure_reason": diagnostics.get("failure_reason"),
-        "doe_config_hash": cfg_hash,
-        "budget_policy": diagnostics.get("budget_policy"),
-        "initial_corner_ratio": cfg.get("initial_corner_ratio"),
-        "initial_corner_ratio_base": cfg.get("initial_corner_ratio_base"),
-        "initial_corner_ratio_policy": cfg.get("initial_corner_ratio_policy"),
-        "initial_corner_np_ratio": cfg.get("initial_corner_np_ratio"),
-        "initial_corner_p_dim": cfg.get("initial_corner_p_dim"),
-        "constraint_rate_hat": diagnostics.get("constraint_rate_hat"),
-        "post_feasible_rate_hat": diagnostics.get("post_feasible_rate_hat"),
-        "post_lambda": diagnostics.get("post_lambda"),
-        "post_model_active": diagnostics.get("post_model_active"),
-        "success_rate_floor": diagnostics.get("success_rate_floor"),
-        "success_count": diagnostics.get("success_count"),
-        "success_total": diagnostics.get("success_total"),
-        "success_ratio": diagnostics.get("success_ratio"),
-        "used_budget_ratio_final": diagnostics.get("used_budget_ratio_final"),
-        "dynamic_exec_allocation_enabled": diagnostics.get("dynamic_exec_allocation_enabled"),
-        "exec_round_shares": diagnostics.get("exec_round_shares"),
-        "exec_eff_weight_gate1": diagnostics.get("exec_eff_weight_gate1"),
-        "exec_eff_weight_gate2": diagnostics.get("exec_eff_weight_gate2"),
-        "exec_eff_gain_k": diagnostics.get("exec_eff_gain_k"),
-        "exec_eff_clip_min": diagnostics.get("exec_eff_clip_min"),
-        "exec_eff_clip_max": diagnostics.get("exec_eff_clip_max"),
-        "exec_stage_min_ratio": diagnostics.get("exec_stage_min_ratio"),
-        "exec_stage_max_ratio": diagnostics.get("exec_stage_max_ratio"),
-        "alloc_multiplier_last": diagnostics.get("alloc_multiplier_last"),
-        "alloc_multiplier_mean": diagnostics.get("alloc_multiplier_mean"),
-        "alloc_eff_prev_last": diagnostics.get("alloc_eff_prev_last"),
-        "alloc_eff_ref_last": diagnostics.get("alloc_eff_ref_last"),
-        "alloc_dynamic_applied_count": diagnostics.get("alloc_dynamic_applied_count"),
         "p_dim": diagnostics.get("p_dim"),
         "usable_n": diagnostics.get("usable_n"),
         "usable_n_over_p": diagnostics.get("usable_n_over_p"),
-        "phase2_gate1_score_min": diagnostics.get("phase2_gate1_score_min"),
-        "phase2_gate2_score_min": diagnostics.get("phase2_gate2_score_min"),
-        "phase2_gate2_score_sticky_min": diagnostics.get("phase2_gate2_score_sticky_min"),
-        "gate_smoothing_enabled": diagnostics.get("gate_smoothing_enabled"),
-        "gate_ema_alpha": diagnostics.get("gate_ema_alpha"),
-        "gate_ema_warmup_stages": diagnostics.get("gate_ema_warmup_stages"),
-        "gate_smoothing_use_for_phase2": diagnostics.get("gate_smoothing_use_for_phase2"),
-        "gate_smoothing_use_for_stop": diagnostics.get("gate_smoothing_use_for_stop"),
+        "has_pre_constraints": diagnostics.get("has_pre_constraints"),
+        "has_post_constraints": diagnostics.get("has_post_constraints"),
+        "budget_used": diagnostics.get("budget_used"),
+        "budget_total": diagnostics.get("budget_total"),
+        "budget_policy": diagnostics.get("budget_policy"),
+        "terminated_by": diagnostics.get("terminated_by"),
+        "success_ratio": diagnostics.get("success_ratio"),
+        "doe_additional_triggered": diagnostics.get("doe_additional_triggered"),
+        "doe_added_samples": diagnostics.get("doe_added_samples"),
+        "doe_gate1_pass_rate": diagnostics.get("doe_gate1_pass_rate"),
+        "doe_gate2_pass_rate": diagnostics.get("doe_gate2_pass_rate"),
+        "phase2_entered": diagnostics.get("phase2_entered"),
+        "post_lambda": diagnostics.get("post_lambda"),
+        "post_model_active": diagnostics.get("post_model_active"),
+    }
+
+    # --- Analysis metadata: 패턴 분석 + 개선안 도출용 (artifacts/meta/analysis.json) ---
+    _doe_analysis_meta = {
+        "failure_reason": diagnostics.get("failure_reason"),
+        # Gate scores
+        "doe_gate1_score_mean": diagnostics.get("doe_gate1_score_mean"),
+        "doe_gate2_score_mean": diagnostics.get("doe_gate2_score_mean"),
+        "doe_gate1_score_last": diagnostics.get("doe_gate1_score_last"),
+        "doe_gate2_score_last": diagnostics.get("doe_gate2_score_last"),
         "doe_gate1_score_ema_mean": diagnostics.get("doe_gate1_score_ema_mean"),
         "doe_gate2_score_ema_mean": diagnostics.get("doe_gate2_score_ema_mean"),
         "doe_gate1_score_ema_last": diagnostics.get("doe_gate1_score_ema_last"),
         "doe_gate2_score_ema_last": diagnostics.get("doe_gate2_score_ema_last"),
         "doe_gate_decision_source_last": diagnostics.get("doe_gate_decision_source_last"),
-        "collapse_span_ratio_threshold": diagnostics.get("collapse_span_ratio_threshold"),
-        "collapse_anchor_streak_threshold": diagnostics.get("collapse_anchor_streak_threshold"),
-        "collapse_min_stage": diagnostics.get("collapse_min_stage"),
-        "diversity_injection_ratio": diagnostics.get("diversity_injection_ratio"),
-        "diversity_injection_min_points": diagnostics.get("diversity_injection_min_points"),
-        "diversity_injection_max_ratio": diagnostics.get("diversity_injection_max_ratio"),
-        "diversity_boundary_floor_ratio": diagnostics.get("diversity_boundary_floor_ratio"),
-        "doe_collapse_detected_count": diagnostics.get("doe_collapse_detected_count"),
-        "doe_diversity_injection_applied_count": diagnostics.get("doe_diversity_injection_applied_count"),
-        "doe_diversity_sample_count_total": diagnostics.get("doe_diversity_sample_count_total"),
-        "doe_diversity_hit_rate_mean": diagnostics.get("doe_diversity_hit_rate_mean"),
-        "phase2_min_usable_np_ratio": diagnostics.get("phase2_min_usable_np_ratio"),
-        "phase2_np_ratio_cap_scale": diagnostics.get("phase2_np_ratio_cap_scale"),
-        "phase2_min_used_budget_ratio": diagnostics.get("phase2_min_used_budget_ratio"),
-        "phase2_np_gate_last": diagnostics.get("phase2_np_gate_last"),
-        "gate2_phase_threshold_used_last": diagnostics.get("gate2_phase_threshold_used_last"),
-        "early_stop_min_used_budget_ratio": diagnostics.get("early_stop_min_used_budget_ratio"),
-        "early_stop_min_usable_np_ratio": diagnostics.get("early_stop_min_usable_np_ratio"),
-        "budget_used": diagnostics.get("budget_used"),
-        "budget_total": diagnostics.get("budget_total"),
-        "budget_exhausted": diagnostics.get("budget_exhausted"),
-        "stage_count_total": diagnostics.get("stage_count_total"),
-        "stage_gate_eval_count": diagnostics.get("stage_gate_eval_count"),
-        "gate_eval_skipped_count": diagnostics.get("gate_eval_skipped_count"),
+        # Phase transition
         "phase2_first_stage": diagnostics.get("phase2_first_stage"),
         "phase2_stage_count": diagnostics.get("phase2_stage_count"),
         "phase2_transition_count": diagnostics.get("phase2_transition_count"),
-        "gate_stop_raw_count": diagnostics.get("gate_stop_raw_count"),
-        "gate_stop_final_count": diagnostics.get("gate_stop_final_count"),
-        "gate_stop_blocked_count": diagnostics.get("gate_stop_blocked_count"),
+        "phase2_np_gate_last": diagnostics.get("phase2_np_gate_last"),
+        "used_budget_ratio_final": diagnostics.get("used_budget_ratio_final"),
         "used_budget_ratio_phase2_first": diagnostics.get("used_budget_ratio_phase2_first"),
-        "terminated_by": diagnostics.get("terminated_by"),
-        "doe_additional_triggered": diagnostics.get("doe_additional_triggered"),
-        "doe_added_samples": diagnostics.get("doe_added_samples"),
-        "doe_gate1_pass_rate": diagnostics.get("doe_gate1_pass_rate"),
-        "doe_gate2_pass_rate": diagnostics.get("doe_gate2_pass_rate"),
-        "doe_gate1_score_mean": diagnostics.get("doe_gate1_score_mean"),
-        "doe_gate2_score_mean": diagnostics.get("doe_gate2_score_mean"),
-        "doe_gate1_score_last": diagnostics.get("doe_gate1_score_last"),
-        "doe_gate2_score_last": diagnostics.get("doe_gate2_score_last"),
-        "phase2_entered": diagnostics.get("phase2_entered"),
-        "has_pre_constraints": diagnostics.get("has_pre_constraints"),
-        "has_post_constraints": diagnostics.get("has_post_constraints"),
+        # Stage summary
+        "stage_count_total": diagnostics.get("stage_count_total"),
+        "stage_gate_eval_count": diagnostics.get("stage_gate_eval_count"),
+        "gate_stop_raw_count": diagnostics.get("gate_stop_raw_count"),
+        "gate_stop_blocked_count": diagnostics.get("gate_stop_blocked_count"),
+        # Collapse/diversity
+        "doe_collapse_detected_count": diagnostics.get("doe_collapse_detected_count"),
+        "doe_diversity_injection_applied_count": diagnostics.get("doe_diversity_injection_applied_count"),
         "local_span_ratio_mean_last": diagnostics.get("local_span_ratio_mean_last"),
         "anchor_spread_zero_streak_max": diagnostics.get("anchor_spread_zero_streak_max"),
-        "gate_history": diagnostics.get("gate_history"),
+        # Alloc/constraint
+        "alloc_multiplier_mean": diagnostics.get("alloc_multiplier_mean"),
+        "constraint_rate_hat": diagnostics.get("constraint_rate_hat"),
+        "initial_corner_ratio": cfg.get("initial_corner_ratio"),
+        "initial_corner_ratio_policy": cfg.get("initial_corner_ratio_policy"),
+        # Gate history (축약)
+        "gate_history": _slim_gh,
     }
 
     system_snapshot = {
@@ -982,6 +947,14 @@ def run_doe_orchestrator(
         "use_timestamp": run_cfg.get("use_timestamp"),
         "additional_cfg": cfg,
     }
+    # Analysis metadata를 별도 파일로 저장하고 metadata.json에서 참조한다.
+    _analysis_path = os.path.join(
+        run_context.run_root, task_name, "artifacts", "meta", "analysis.json"
+    )
+    os.makedirs(os.path.dirname(_analysis_path), exist_ok=True)
+    with open(_analysis_path, "w", encoding="utf-8") as _af:
+        json.dump(_doe_analysis_meta, _af, ensure_ascii=False, indent=2, default=str)
+
     save_out = _save_doe_results(
         results=results,
         variables=variables,
@@ -996,45 +969,18 @@ def run_doe_orchestrator(
         task_name=task_name,
         resolved_params_extra=diagnostic_meta,
         results_extra={
-            "doe_config_hash": cfg_hash,
-            "budget_policy": diagnostics.get("budget_policy"),
-            "initial_corner_ratio": cfg.get("initial_corner_ratio"),
-            "initial_corner_ratio_base": cfg.get("initial_corner_ratio_base"),
-            "initial_corner_ratio_policy": cfg.get("initial_corner_ratio_policy"),
-            "initial_corner_np_ratio": cfg.get("initial_corner_np_ratio"),
-            "initial_corner_p_dim": cfg.get("initial_corner_p_dim"),
             "doe_additional_triggered": diagnostics.get("doe_additional_triggered"),
             "doe_added_samples": diagnostics.get("doe_added_samples"),
-            "doe_gate1_pass_rate": diagnostics.get("doe_gate1_pass_rate"),
-            "doe_gate2_pass_rate": diagnostics.get("doe_gate2_pass_rate"),
-            "doe_gate1_score_mean": diagnostics.get("doe_gate1_score_mean"),
-            "doe_gate2_score_mean": diagnostics.get("doe_gate2_score_mean"),
-            "doe_gate1_score_last": diagnostics.get("doe_gate1_score_last"),
-            "doe_gate2_score_last": diagnostics.get("doe_gate2_score_last"),
-            "used_budget_ratio_final": diagnostics.get("used_budget_ratio_final"),
-            "dynamic_exec_allocation_enabled": diagnostics.get("dynamic_exec_allocation_enabled"),
-            "exec_round_shares": diagnostics.get("exec_round_shares"),
-            "alloc_multiplier_last": diagnostics.get("alloc_multiplier_last"),
-            "alloc_multiplier_mean": diagnostics.get("alloc_multiplier_mean"),
-            "alloc_dynamic_applied_count": diagnostics.get("alloc_dynamic_applied_count"),
             "budget_used": diagnostics.get("budget_used"),
             "budget_total": diagnostics.get("budget_total"),
-            "budget_exhausted": diagnostics.get("budget_exhausted"),
-            "phase2_first_stage": diagnostics.get("phase2_first_stage"),
-            "phase2_stage_count": diagnostics.get("phase2_stage_count"),
-            "phase2_transition_count": diagnostics.get("phase2_transition_count"),
-            "gate_stop_raw_count": diagnostics.get("gate_stop_raw_count"),
-            "gate_stop_final_count": diagnostics.get("gate_stop_final_count"),
-            "gate_stop_blocked_count": diagnostics.get("gate_stop_blocked_count"),
             "terminated_by": diagnostics.get("terminated_by"),
             "usable_n": diagnostics.get("usable_n"),
             "p_dim": diagnostics.get("p_dim"),
-            "usable_n_over_p": diagnostics.get("usable_n_over_p"),
             "phase2_entered": diagnostics.get("phase2_entered"),
         },
-        extra_metadata=diagnostic_meta,
         constraint_defs=constraint_defs,
         debug_level=str(run_cfg.get("debug_level", "off")),
+        meta_artifacts_extra={"analysis": os.path.join("artifacts", "meta", "analysis.json")},
     )
 
     print("\n===================================")

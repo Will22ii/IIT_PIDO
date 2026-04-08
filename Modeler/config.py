@@ -167,7 +167,7 @@ class ModelerSystemConfig:
     fi_bootstrap_np_threshold: float = 10.0   # N/p ≤ 이 값일 때 발동
     fi_bootstrap_rounds: int = 15             # 반복 횟수
     fi_bootstrap_sample_ratio: float = 0.8    # 서브샘플 비율
-    fi_bootstrap_min_freq: float = 0.80       # 최소 선택 빈도 (미만이면 제거) (E: 0.73→0.80, 일관성 기준 강화)
+    fi_bootstrap_min_freq: float = 0.73       # 최소 선택 빈도 (미만이면 제거) (E: 0.80→0.73 원복, real variable 과제거 방지)
     fi_bootstrap_min_freq_very_low_data: float = 0.45  # very_low_data 전용 완화 임계값
     # very_low_data 구제: bootstrap_freq < min_freq여도 global_score가 이 값 이상이면 유지
     fi_bootstrap_rescue_global_floor: float = 0.83

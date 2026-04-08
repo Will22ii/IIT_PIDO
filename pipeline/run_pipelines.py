@@ -50,13 +50,13 @@ PROBLEM_SUITE: list[ProblemCase] = [
         problem_name="cantilever_beam",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         n_samples=90,
-        repeats=25,
+        repeats=20,
     ),
     ProblemCase(
         problem_name="goldstein_price",
         known_optimum={"x1": 0.0, "x2": -1.0},
         n_samples=150,
-        repeats=50,
+        repeats=20,
     ),
 
     ProblemCase(
@@ -66,7 +66,7 @@ PROBLEM_SUITE: list[ProblemCase] = [
             {"x1": -0.0898, "x2": 0.7126},
         ],
         n_samples=50,
-        repeats=25,
+        repeats=20,
     ),
 
     # ProblemCase(
@@ -216,6 +216,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
         {
             "strategy_params": {
                 "mode": "obj_refine_ei",
+                "max_volume_ratio_target": 0.249,  # K: obj 전략 volume clamp 추가
                 "obj_diversity_extra_clusters": 1,
                 "obj_diversity_weight": 0.35,
                 "obj_diversity_min_distance": 0.22,
@@ -223,7 +224,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
                 "obj_diversity_min_dim": 4,
             },
             "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.85,  # I: 0.90→0.85
+            "quantile_threshold": 0.88,  # I: 0.90→0.88 (over_wide 방지 부분 롤백)
             "bounds_margin_ratio": 0.03,
             "dbscan_eps_quantile": 0.90,
         },
@@ -233,6 +234,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
         {
             "strategy_params": {
                 "mode": "obj_refine_lcb",
+                "max_volume_ratio_target": 0.249,  # K: obj 전략 volume clamp 추가
                 "obj_diversity_extra_clusters": 1,
                 "obj_diversity_weight": 0.35,
                 "obj_diversity_min_distance": 0.22,
@@ -240,7 +242,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
                 "obj_diversity_min_dim": 4,
             },
             "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.85,  # I: 0.90→0.85
+            "quantile_threshold": 0.88,  # I: 0.90→0.88 (over_wide 방지 부분 롤백)
             "bounds_margin_ratio": 0.03,
             "dbscan_eps_quantile": 0.90,
         },
@@ -481,17 +483,54 @@ def _read_json_file(path: str | None) -> dict[str, Any]:
         return {}
 
 
+def _read_task_analysis_metadata(
+    task_metadata_path: str | None,
+    task_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    if not task_metadata_path or not isinstance(task_metadata, dict):
+        return {}
+    artifacts = task_metadata.get("artifacts", {})
+    if not isinstance(artifacts, dict):
+        return {}
+    meta_artifacts = artifacts.get("meta", {})
+    if not isinstance(meta_artifacts, dict):
+        return {}
+
+    analysis_ref = None
+    if isinstance(meta_artifacts.get("analysis"), str):
+        analysis_ref = meta_artifacts.get("analysis")
+    else:
+        for k, v in meta_artifacts.items():
+            if isinstance(k, str) and k.startswith("analysis") and isinstance(v, str):
+                analysis_ref = v
+                break
+
+    if not isinstance(analysis_ref, str) or not analysis_ref.strip():
+        return {}
+
+    base_dir = os.path.dirname(task_metadata_path)
+    analysis_path = (
+        analysis_ref
+        if os.path.isabs(analysis_ref)
+        else os.path.normpath(os.path.join(base_dir, analysis_ref))
+    )
+    return _read_json_file(analysis_path)
+
+
 def _extract_doe_router_metadata(doe_metadata_path: str | None) -> dict[str, Any]:
     meta = _read_json_file(doe_metadata_path)
     resolved = meta.get("resolved_params", {}) if isinstance(meta.get("resolved_params"), dict) else {}
     results = meta.get("results", {}) if isinstance(meta.get("results"), dict) else {}
     extra = resolved.get("extra_context", {}) if isinstance(resolved.get("extra_context"), dict) else {}
+    analysis = _read_task_analysis_metadata(doe_metadata_path, meta)
 
     def _pick(key: str) -> Any:
         if key in resolved:
             return resolved.get(key)
         if key in extra:
             return extra.get(key)
+        if key in analysis:
+            return analysis.get(key)
         if key in results:
             return results.get(key)
         return None
@@ -578,43 +617,52 @@ def _extract_doe_router_metadata(doe_metadata_path: str | None) -> dict[str, Any
 def _extract_explorer_router_metadata(explorer_metadata_path: str | None) -> dict[str, Any]:
     meta = _read_json_file(explorer_metadata_path)
     resolved = meta.get("resolved_params", {}) if isinstance(meta.get("resolved_params"), dict) else {}
+    analysis = _read_task_analysis_metadata(explorer_metadata_path, meta)
+
+    def _pick(key: str) -> Any:
+        if key in resolved:
+            return resolved.get(key)
+        if key in analysis:
+            return analysis.get(key)
+        return None
+
     return {
-        "explorer_strategy_alias": resolved.get("strategy_alias"),
-        "explorer_strategy_mode": resolved.get("strategy_mode"),
-        "explorer_p_dim": resolved.get("p_dim"),
-        "explorer_usable_n": resolved.get("usable_n"),
-        "explorer_usable_n_over_p": resolved.get("usable_n_over_p"),
-        "explorer_selected_bounds_volume_ratio": resolved.get("selected_bounds_volume_ratio"),
-        "explorer_pred_cluster_signal_mode": resolved.get("pred_cluster_signal_mode"),
-        "explorer_pred_cluster_beta_used": resolved.get("pred_cluster_beta_used"),
-        "explorer_pred_cluster_confidence": resolved.get("pred_cluster_confidence"),
-        "explorer_pred_cluster_selected_count": resolved.get("pred_cluster_selected_count"),
-        "explorer_pred_cluster_sigma_mean_selected": resolved.get("pred_cluster_sigma_mean_selected"),
-        "explorer_pred_refine_shift_norm": resolved.get("pred_refine_shift_norm"),
-        "explorer_pred_obj_miss_case": resolved.get("pred_obj_miss_case"),
-        "explorer_pred_obj_iou": resolved.get("pred_obj_iou"),
-        "explorer_pred_obj_center_l1_norm": resolved.get("pred_obj_center_l1_norm"),
-        "explorer_pred_multistart_det_fraction_used": resolved.get("pred_multistart_det_fraction_used"),
-        "explorer_pred_refine_bounds_scale_used": resolved.get("pred_refine_bounds_scale_used"),
-        "explorer_pred_n_starts_used": resolved.get("pred_n_starts_used"),
-        "explorer_dual_policy_mode": resolved.get("dual_policy_mode"),
-        "explorer_dual_total_starts_target": resolved.get("dual_total_starts_target"),
-        "explorer_dual_total_starts_used": resolved.get("dual_total_starts_used"),
-        "explorer_dual_np_ratio_used": resolved.get("dual_np_ratio_used"),
-        "explorer_dual_pred_ratio_used": resolved.get("dual_pred_ratio_used"),
-        "explorer_dual_obj_ratio_used": resolved.get("dual_obj_ratio_used"),
-        "explorer_dual_n_pred_starts": resolved.get("dual_n_pred_starts"),
-        "explorer_dual_n_obj_starts": resolved.get("dual_n_obj_starts"),
-        "explorer_dual_disagreement_center_l1_norm": resolved.get("dual_disagreement_center_l1_norm"),
-        "explorer_dual_disagreement_iou": resolved.get("dual_disagreement_iou"),
-        "explorer_dual_disagreement_triggered": resolved.get("dual_disagreement_triggered"),
-        "explorer_dual_center_bias_used": resolved.get("dual_center_bias_used"),
-        "explorer_dual_center_tilt_strength_base": resolved.get("dual_center_tilt_strength_base"),
-        "explorer_dual_center_tilt_strength_used_mean": resolved.get("dual_center_tilt_strength_used_mean"),
-        "explorer_dual_center_tilt_applied": resolved.get("dual_center_tilt_applied"),
-        "explorer_dual_volume_cap_target": resolved.get("dual_volume_cap_target"),
-        "explorer_dual_volume_ratio_before_cap": resolved.get("dual_volume_ratio_before_cap"),
-        "explorer_dual_volume_cap_applied": resolved.get("dual_volume_cap_applied"),
+        "explorer_strategy_alias": _pick("strategy_alias"),
+        "explorer_strategy_mode": _pick("strategy_mode"),
+        "explorer_p_dim": _pick("p_dim"),
+        "explorer_usable_n": _pick("usable_n"),
+        "explorer_usable_n_over_p": _pick("usable_n_over_p"),
+        "explorer_selected_bounds_volume_ratio": _pick("selected_bounds_volume_ratio"),
+        "explorer_pred_cluster_signal_mode": _pick("pred_cluster_signal_mode"),
+        "explorer_pred_cluster_beta_used": _pick("pred_cluster_beta_used"),
+        "explorer_pred_cluster_confidence": _pick("pred_cluster_confidence"),
+        "explorer_pred_cluster_selected_count": _pick("pred_cluster_selected_count"),
+        "explorer_pred_cluster_sigma_mean_selected": _pick("pred_cluster_sigma_mean_selected"),
+        "explorer_pred_refine_shift_norm": _pick("pred_refine_shift_norm"),
+        "explorer_pred_obj_miss_case": _pick("pred_obj_miss_case"),
+        "explorer_pred_obj_iou": _pick("pred_obj_iou"),
+        "explorer_pred_obj_center_l1_norm": _pick("pred_obj_center_l1_norm"),
+        "explorer_pred_multistart_det_fraction_used": _pick("pred_multistart_det_fraction_used"),
+        "explorer_pred_refine_bounds_scale_used": _pick("pred_refine_bounds_scale_used"),
+        "explorer_pred_n_starts_used": _pick("pred_n_starts_used"),
+        "explorer_dual_policy_mode": _pick("dual_policy_mode"),
+        "explorer_dual_total_starts_target": _pick("dual_total_starts_target"),
+        "explorer_dual_total_starts_used": _pick("dual_total_starts_used"),
+        "explorer_dual_np_ratio_used": _pick("dual_np_ratio_used"),
+        "explorer_dual_pred_ratio_used": _pick("dual_pred_ratio_used"),
+        "explorer_dual_obj_ratio_used": _pick("dual_obj_ratio_used"),
+        "explorer_dual_n_pred_starts": _pick("dual_n_pred_starts"),
+        "explorer_dual_n_obj_starts": _pick("dual_n_obj_starts"),
+        "explorer_dual_disagreement_center_l1_norm": _pick("dual_disagreement_center_l1_norm"),
+        "explorer_dual_disagreement_iou": _pick("dual_disagreement_iou"),
+        "explorer_dual_disagreement_triggered": _pick("dual_disagreement_triggered"),
+        "explorer_dual_center_bias_used": _pick("dual_center_bias_used"),
+        "explorer_dual_center_tilt_strength_base": _pick("dual_center_tilt_strength_base"),
+        "explorer_dual_center_tilt_strength_used_mean": _pick("dual_center_tilt_strength_used_mean"),
+        "explorer_dual_center_tilt_applied": _pick("dual_center_tilt_applied"),
+        "explorer_dual_volume_cap_target": _pick("dual_volume_cap_target"),
+        "explorer_dual_volume_ratio_before_cap": _pick("dual_volume_ratio_before_cap"),
+        "explorer_dual_volume_cap_applied": _pick("dual_volume_cap_applied"),
     }
 
 

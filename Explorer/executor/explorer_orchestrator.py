@@ -2265,17 +2265,23 @@ class ExplorerOrchestrator:
                     "→ uniform fallback"
                 )
 
+            # EXP-1: selected_points의 중심을 center_hint로 전달하여 비대칭 확장
+            _center_hint_arr = None
+            if isinstance(selected_points, np.ndarray) and selected_points.ndim == 2 and selected_points.shape[0] > 0:
+                _center_hint_arr = np.median(selected_points, axis=0)
+
             selected_bounds = apply_bounds_margin(
                 selected_bounds=selected_bounds,
                 bounds=bounds,
                 margin_ratio=float(self.config.system.bounds_margin_ratio),
                 min_volume_ratio=float(self.config.system.bounds_min_volume_ratio),
                 dim_weights=dim_weights,
+                center_hint=_center_hint_arr,
             )
 
             strategy_params = dict(self.config.system.strategy_params or {})
             dual_cap_raw = strategy_params.get("max_volume_ratio_target", None)
-            if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"} and dual_cap_raw is not None:  # K: pred 전략에도 volume cap 적용
+            if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred", "s4_obj", "s8_obj"} and dual_cap_raw is not None:  # K: pred/obj 전략에도 volume cap 적용
                 try:
                     dual_volume_cap_target = float(dual_cap_raw)
                 except Exception:
@@ -2292,9 +2298,24 @@ class ExplorerOrchestrator:
                         and dual_volume_ratio_before_cap > dual_volume_cap_target
                     ):
                         center_hint = None
-                        if isinstance(dual_center_hint, np.ndarray) and dual_center_hint.size == len(bounds):
+                        # EXP-2: pred/obj bounds의 intersection 중심을 우선 사용
+                        # intersection 중심이 optimum에 더 가까울 확률이 높음
+                        if pred_bounds is not None and obj_bounds is not None:
+                            _isect_center = []
+                            _isect_valid = True
+                            for (p_lb, p_ub), (o_lb, o_ub) in zip(pred_bounds, obj_bounds):
+                                i_lb = max(float(p_lb), float(o_lb))
+                                i_ub = min(float(p_ub), float(o_ub))
+                                if i_lb <= i_ub:
+                                    _isect_center.append((i_lb + i_ub) * 0.5)
+                                else:
+                                    _isect_valid = False
+                                    break
+                            if _isect_valid and _isect_center:
+                                center_hint = np.array(_isect_center, dtype=float)
+                        if center_hint is None and isinstance(dual_center_hint, np.ndarray) and dual_center_hint.size == len(bounds):
                             center_hint = np.asarray(dual_center_hint, dtype=float).reshape(-1)
-                        elif isinstance(selected_points, np.ndarray) and selected_points.ndim == 2 and selected_points.shape[0] > 0:
+                        elif center_hint is None and isinstance(selected_points, np.ndarray) and selected_points.ndim == 2 and selected_points.shape[0] > 0:
                             center_hint = np.mean(selected_points, axis=0)
                         selected_bounds_cap = _shrink_bounds_to_target_volume(
                             selected_bounds=selected_bounds,
@@ -2469,46 +2490,32 @@ class ExplorerOrchestrator:
             "model_path_input": modeler_pkl_path,
             "doe_csv_input": doe_csv_path,
         }
+        # --- Operational metadata ---
         resolved_params = {
-            "seed": int(rng_seed),
-            "objective_sense": objective_sense,
             "p_dim": int(len(selected_features)),
-            "threshold_value": threshold,
-            "dbscan_eps_used": eps_used,
-            "dbscan_min_samples_used": dbscan_min_samples,
-            "base_n_success_feasible": int(base_n),
             "usable_n": int(base_n),
             "usable_n_over_p": (
                 float(base_n) / float(max(len(selected_features), 1))
                 if len(selected_features) > 0 else None
             ),
-            "nominal_n": int(nominal_n),
-            "target_n_generated": int(n_samples),
-            "generated_boundary": int(X_boundary_raw.shape[0]),
-            "generated_lhc": int(X_lhc_raw.shape[0]),
-            "generated_total_raw": int(pre_generated),
-            "generated_total_after_pre": int(X.shape[0]),
-            "pre_filter_kept": int(pre_kept),
-            "r_used": float(r_used),
-            "r_used_source": r_used_source,
             "has_pre_constraints": bool(has_pre_constraints),
             "has_post_constraints": bool(has_post_constraints),
-            "post_penalty_active": bool(has_post_penalty),
-            "post_lambda": float(post_lambda),
-            "post_lambda_source": post_lambda_source,
-            "pre_filter_disabled_reason": pre_filter_disabled_reason,
-            "refine_pre_filter_applied": bool(refine_pre_filter_applied),
-            "refine_pre_removed_pred": int(refine_pre_removed_pred),
-            "refine_pre_removed_obj": int(refine_pre_removed_obj),
-            "refine_pre_removed_selected": int(refine_pre_removed_selected),
-            "feas_model_kind_used": feasibility_model_kind_used,
-            "feas_model_path_used": feasibility_model_path_used,
             "selected_bounds_volume_ratio": vol_ratio,
             "strategy_id": strategy_id,
             "strategy_alias": strategy_alias,
             "strategy_mode": strategy_mode,
-            "pred_cluster_signal_mode": pred_cluster_signal_mode,
-            "pred_cluster_beta_used": pred_cluster_beta_used,
+            "dual_volume_cap_applied": bool(dual_volume_cap_applied),
+        }
+
+        # --- Analysis metadata (artifacts/meta/analysis_<strategy>.json) ---
+        _explorer_analysis_meta = {
+            "post_penalty_active": bool(has_post_penalty),
+            "post_lambda": float(post_lambda),
+            "generated_total_raw": int(pre_generated),
+            "generated_total_after_pre": int(X.shape[0]),
+            "generated_boundary": int(X_boundary_raw.shape[0]),
+            "r_used": float(r_used),
+            # Pred
             "pred_cluster_confidence": pred_cluster_confidence,
             "pred_cluster_selected_count": pred_cluster_selected_count,
             "pred_cluster_sigma_mean_selected": pred_cluster_sigma_mean_selected,
@@ -2516,11 +2523,8 @@ class ExplorerOrchestrator:
             "pred_obj_miss_case": pred_obj_miss_case,
             "pred_obj_iou": pred_obj_iou,
             "pred_obj_center_l1_norm": pred_obj_center_l1_norm,
-            "pred_multistart_det_fraction_used": pred_multistart_det_fraction_used,
-            "pred_refine_bounds_scale_used": pred_refine_bounds_scale_used,
             "pred_n_starts_used": pred_n_starts_used,
-            "dual_policy_mode": dual_policy_mode,
-            "dual_total_starts_target": dual_total_starts_target,
+            # Dual
             "dual_total_starts_used": dual_total_starts_used,
             "dual_np_ratio_used": dual_np_ratio_used,
             "dual_pred_ratio_used": dual_pred_ratio_used,
@@ -2531,15 +2535,17 @@ class ExplorerOrchestrator:
             "dual_disagreement_iou": dual_disagreement_iou,
             "dual_disagreement_triggered": bool(dual_disagreement_triggered),
             "dual_center_bias_used": dual_center_bias_used,
-            "dual_center_tilt_strength_base": dual_center_tilt_strength_base,
             "dual_center_tilt_strength_used_mean": dual_center_tilt_strength_used_mean,
             "dual_center_tilt_applied": bool(dual_center_tilt_applied),
             "dual_volume_cap_target": dual_volume_cap_target,
             "dual_volume_ratio_before_cap": dual_volume_ratio_before_cap,
-            "dual_volume_cap_applied": bool(dual_volume_cap_applied),
-            "probe_multistart": int(self.config.system.probe_multistart),
-            "workflow_info": workflow_info,
         }
+        _safe_strategy_id = _normalize_strategy_id(strategy_id)
+        _analysis_filename = f"analysis_{_safe_strategy_id}.json" if _safe_strategy_id else "analysis.json"
+        _analysis_path = os.path.join(task_dir, "artifacts", "meta", _analysis_filename)
+        os.makedirs(os.path.dirname(_analysis_path), exist_ok=True)
+        with open(_analysis_path, "w", encoding="utf-8") as _af:
+            json.dump(_explorer_analysis_meta, _af, ensure_ascii=False, indent=2, default=str)
         n_q_samples = int(mask.sum())
         n_clusters = 0
         cluster_sizes = []
@@ -2552,57 +2558,15 @@ class ExplorerOrchestrator:
             "n_q_samples": n_q_samples,
             "n_clusters": n_clusters,
             "cluster_sizes": cluster_sizes,
-            "p_dim": int(len(selected_features)),
-            "usable_n": int(base_n),
-            "usable_n_over_p": (
-                float(base_n) / float(max(len(selected_features), 1))
-                if len(selected_features) > 0 else None
-            ),
-            "n_generated_raw": int(pre_generated),
-            "n_generated_after_pre": int(X.shape[0]),
-            "post_penalty_active": bool(has_post_penalty),
             "pred_mean_volume": pred_mean_vol,
             "obj_mean_volume": obj_mean_vol,
             "strategy_id": strategy_id,
-            "strategy_alias": strategy_alias,
-            "pred_cluster_signal_mode": pred_cluster_signal_mode,
-            "pred_cluster_beta_used": pred_cluster_beta_used,
-            "pred_cluster_confidence": pred_cluster_confidence,
-            "pred_cluster_selected_count": pred_cluster_selected_count,
-            "pred_cluster_sigma_mean_selected": pred_cluster_sigma_mean_selected,
-            "pred_refine_shift_norm": pred_refine_shift_norm,
-            "pred_obj_miss_case": pred_obj_miss_case,
-            "pred_obj_iou": pred_obj_iou,
-            "pred_obj_center_l1_norm": pred_obj_center_l1_norm,
-            "pred_multistart_det_fraction_used": pred_multistart_det_fraction_used,
-            "pred_refine_bounds_scale_used": pred_refine_bounds_scale_used,
-            "pred_n_starts_used": pred_n_starts_used,
-            "dual_policy_mode": dual_policy_mode,
-            "dual_total_starts_target": dual_total_starts_target,
-            "dual_total_starts_used": dual_total_starts_used,
-            "dual_np_ratio_used": dual_np_ratio_used,
-            "dual_pred_ratio_used": dual_pred_ratio_used,
-            "dual_obj_ratio_used": dual_obj_ratio_used,
-            "dual_n_pred_starts": dual_n_pred_starts,
-            "dual_n_obj_starts": dual_n_obj_starts,
-            "dual_disagreement_center_l1_norm": dual_disagreement_center_l1_norm,
-            "dual_disagreement_iou": dual_disagreement_iou,
-            "dual_disagreement_triggered": bool(dual_disagreement_triggered),
-            "dual_center_bias_used": dual_center_bias_used,
-            "dual_center_tilt_strength_base": dual_center_tilt_strength_base,
-            "dual_center_tilt_strength_used_mean": dual_center_tilt_strength_used_mean,
-            "dual_center_tilt_applied": bool(dual_center_tilt_applied),
-            "dual_volume_cap_target": dual_volume_cap_target,
-            "dual_volume_ratio_before_cap": dual_volume_ratio_before_cap,
-            "dual_volume_cap_applied": bool(dual_volume_cap_applied),
-            "refine_pre_filter_applied": bool(refine_pre_filter_applied),
-            "refine_pre_removed_pred": int(refine_pre_removed_pred),
-            "refine_pre_removed_obj": int(refine_pre_removed_obj),
-            "refine_pre_removed_selected": int(refine_pre_removed_selected),
         }
 
         public_artifacts = {}
-        meta_artifacts = {}
+        meta_artifacts = {
+            "analysis": os.path.relpath(_analysis_path, task_dir),
+        }
         debug_artifacts = {}
         if bounds_path:
             public_artifacts["selected_bounds"] = os.path.relpath(bounds_path, task_dir)

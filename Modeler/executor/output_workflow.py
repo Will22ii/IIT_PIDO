@@ -1,3 +1,4 @@
+import json
 import os
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -77,6 +78,15 @@ def save_modeler_outputs(
     }
     resolved_params = {
         "model_name": model_name,
+        "selected_features": selected_features,
+        "use_primary_selection": bool(config_system.use_primary_selection),
+        "use_secondary_selection": bool(config_user.use_secondary_selection),
+        "fi_low_data_mode": bool(cv_policy["low_data"]),
+        "fi_np_ratio": float(cv_policy["np_ratio"]),
+        "has_post_constraints": bool(has_post_constraints),
+        "workflow_info": workflow_info,
+    }
+    modeler_analysis_meta = {
         "hpo_used": hpo_params_used,
         "hpo_mode": str(hpo_mode),
         "hpo_n_trials_effective": (
@@ -85,67 +95,37 @@ def save_modeler_outputs(
         "hpo_lambda_std_effective": (
             float(hpo_lambda_std_effective) if hpo_lambda_std_effective is not None else None
         ),
-        "selected_features": selected_features,
         "kfold_splits": int(kfold_splits),
         "kfold_repeats": int(kfold_repeats),
-        "cv_dynamic_policy": bool(cv_policy["dynamic"]),
-        "cv_min_valid_size": int(cv_policy["min_valid_target"]),
         "cv_valid_min_est": int(cv_policy["valid_min_est"]),
-        "fi_low_data_mode": bool(cv_policy["low_data"]),
-        "fi_np_ratio": float(cv_policy["np_ratio"]),
-        "fi_shap_gain_hard_gate": False,
         "fi_elite_ratio_effective": float(elite_ratio_eff),
         "fi_n_elite": int(n_elite),
-        "fi_elite_min_samples": int(config_system.fi_elite_min_samples),
-        "fi_elite_small_threshold": int(config_system.fi_elite_small_threshold),
-        "fi_elite_rich_threshold": int(config_system.fi_elite_rich_threshold),
-        "fi_vote_weight_abs": float(config_system.fi_weight_abs),
-        "fi_vote_weight_quantile": float(config_system.fi_weight_quantile),
-        "fi_vote_weight_rank": float(config_system.fi_weight_rank),
-        "fi_channel_weight_perm": float(config_system.fi_weight_perm),
-        "fi_channel_weight_drop": float(config_system.fi_weight_drop),
-        "fi_scale_weight_global_default": float(config_system.fi_weight_global_default),
-        "fi_scale_weight_global_low": float(config_system.fi_weight_global_low),
-        "fi_scale_weight_global_rich": float(config_system.fi_weight_global_rich),
         "fi_elite_mode": str(config_system.fi_elite_mode),
         "fi_elite_bonus_beta": float(config_system.fi_elite_bonus_beta),
         "fi_final_score_threshold": float(config_system.fi_final_score_threshold),
         "fi_global_score_floor": float(config_system.fi_global_score_floor),
         "fi_use_score_drop": bool(config_system.fi_use_score_drop),
-        "fi_drop_metric": str(config_system.fi_drop_metric),
-        "fi_stability_drop_min_rate_very_low_data": float(config_system.fi_stability_drop_min_rate_very_low_data),
-        "fi_gap_global_floor": float(config_system.fi_gap_global_floor),
-        "fi_gap_global_floor_very_low_data": float(config_system.fi_gap_global_floor_very_low_data),
-        "fi_gap_global_floor_p_le_4": float(config_system.fi_gap_global_floor_p_le_4),
-        "fi_gap_global_floor_p_ge_8": float(config_system.fi_gap_global_floor_p_ge_8),
+        "fi_channel_weight_perm": float(config_system.fi_weight_perm),
+        "fi_channel_weight_drop": float(config_system.fi_weight_drop),
         "fi_bootstrap_min_freq": float(config_system.fi_bootstrap_min_freq),
-        "fi_bootstrap_min_freq_very_low_data": float(config_system.fi_bootstrap_min_freq_very_low_data),
-        "use_primary_selection": bool(config_system.use_primary_selection),
-        "use_secondary_selection": bool(config_user.use_secondary_selection),
-        "secondary_target_kr": int(config_system.secondary_target_kr),
-        "secondary_min_repeats": int(config_system.secondary_min_repeats),
-        "secondary_min_delta_r2": float(config_system.secondary_min_delta_r2),
-        "secondary_min_freq": float(config_system.secondary_min_freq),
-        "has_post_constraints": bool(has_post_constraints),
         "feas_model_kind": feas_model_kind,
-        "workflow_info": workflow_info,
     }
     if "forced_by_min_guard" in selected_df.columns:
         guard_features = selected_df.loc[
             selected_df["forced_by_min_guard"].astype(bool),
             "feature",
         ].astype(str).tolist()
-        resolved_params["anti_collapse_guard_activated"] = len(guard_features) > 0
+        modeler_analysis_meta["anti_collapse_guard_activated"] = len(guard_features) > 0
         if guard_features:
-            resolved_params["anti_collapse_guard_features"] = guard_features
+            modeler_analysis_meta["anti_collapse_guard_features"] = guard_features
     if "bootstrap_enabled_effective" in selected_df.columns:
-        resolved_params["fi_bootstrap_enabled_effective"] = bool(
+        modeler_analysis_meta["fi_bootstrap_enabled_effective"] = bool(
             selected_df["bootstrap_enabled_effective"].astype(bool).any()
         )
     if "bootstrap_min_freq_effective" in selected_df.columns:
         vals = pd.to_numeric(selected_df["bootstrap_min_freq_effective"], errors="coerce").dropna()
         if not vals.empty:
-            resolved_params["fi_bootstrap_min_freq_effective"] = float(vals.iloc[0])
+            modeler_analysis_meta["fi_bootstrap_min_freq_effective"] = float(vals.iloc[0])
     results_summary = {
         "n_models": int(models_count),
         "n_features_selected": int(len(selected_features)),
@@ -160,6 +140,11 @@ def save_modeler_outputs(
         public_artifacts["feas_model_path"] = os.path.relpath(feas_model_path, task_dir)
 
     meta_artifacts = {}
+    analysis_path = os.path.join(task_dir, "artifacts", "meta", "analysis.json")
+    os.makedirs(os.path.dirname(analysis_path), exist_ok=True)
+    with open(analysis_path, "w", encoding="utf-8") as af:
+        json.dump(modeler_analysis_meta, af, ensure_ascii=False, indent=2, default=str)
+    meta_artifacts["analysis"] = os.path.relpath(analysis_path, task_dir)
     if processed_path:
         meta_artifacts["importance_processed"] = os.path.relpath(processed_path, task_dir)
     if processed_drop_df is not None and not processed_drop_df.empty and processed_drop_path:

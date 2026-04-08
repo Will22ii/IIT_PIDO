@@ -210,6 +210,7 @@ def run_bootstrap_stability(
     # E: Bootstrap-null compound gate
     # 부트스트랩 통과(freq >= min_freq) + null importance 양쪽 채널 모두 실패인 feature를 제거.
     # low-data에서 spurious dummy가 일관적으로 선택되는 패턴을 차단.
+    # 단, perm_dominant_override=True인 feature는 면제 (real variable 과제거 방지).
     null_compound_removed = []
     if "null_pass" in out.columns:
         for idx, row in out.iterrows():
@@ -218,6 +219,7 @@ def run_bootstrap_stability(
                 and row["bootstrap_freq"] >= min_freq
                 and not bool(row.get("null_pass", True))
                 and not bool(row.get("bootstrap_rescue_core", False))
+                and not bool(row.get("perm_dominant_override", False))
             ):
                 out.at[idx, "selected"] = False
                 out.at[idx, "reason"] = "bootstrap_null_compound_fail"
