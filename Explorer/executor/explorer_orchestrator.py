@@ -314,7 +314,20 @@ def _shrink_bounds_to_target_volume(
     alpha = float((float(target_volume_ratio) / float(current_volume)) ** (1.0 / float(active_dims)))
     alpha = float(np.clip(alpha, 0.0, 1.0))
 
-    # Pass 1: center-anchored uniform shrink.
+    # 대안A: 경계 인접 감지 — 축소 전 selected_bounds가 설계공간 경계에 닿아 있으면
+    # 해당 면을 고정(pin)하고 반대쪽만 축소하여 corner-solution optimum 보존
+    _bnd_tol = 0.02
+    pin_lo: list[bool] = []
+    pin_hi: list[bool] = []
+    for j, ((lo, hi), (gl, gu), span) in enumerate(zip(out, glb, spans)):
+        if span <= 0.0:
+            pin_lo.append(False)
+            pin_hi.append(False)
+        else:
+            pin_lo.append((lo - gl) < _bnd_tol * span)
+            pin_hi.append((gu - hi) < _bnd_tol * span)
+
+    # Pass 1: boundary-aware uniform shrink.
     pass1: list[tuple[float, float]] = []
     for j, ((lo, hi), (gl, gu), span) in enumerate(zip(out, glb, spans)):
         if span <= 0.0:
@@ -322,10 +335,17 @@ def _shrink_bounds_to_target_volume(
             continue
         cur_w = max(hi - lo, 0.0)
         tgt_w = min(cur_w * alpha, span)
-        cc = float(c[j]) if c is not None else 0.5 * (lo + hi)
-        cc = float(np.clip(cc, gl, gu))
-        lo_new = float(np.clip(cc - 0.5 * tgt_w, gl, gu - tgt_w))
-        hi_new = float(lo_new + tgt_w)
+        if pin_lo[j] and not pin_hi[j]:
+            lo_new = gl
+            hi_new = float(np.clip(gl + tgt_w, gl, gu))
+        elif pin_hi[j] and not pin_lo[j]:
+            hi_new = gu
+            lo_new = float(np.clip(gu - tgt_w, gl, gu))
+        else:
+            cc = float(c[j]) if c is not None else 0.5 * (lo + hi)
+            cc = float(np.clip(cc, gl, gu))
+            lo_new = float(np.clip(cc - 0.5 * tgt_w, gl, gu - tgt_w))
+            hi_new = float(lo_new + tgt_w)
         if hi_new < lo_new:
             lo_new, hi_new = hi_new, lo_new
         pass1.append((lo_new, hi_new))
@@ -337,7 +357,7 @@ def _shrink_bounds_to_target_volume(
     if float(vol) <= float(target_volume_ratio) + tol:
         return out
 
-    # Pass 2: if pass1 is still wide (center clipping side effect), greedily shrink widest dims asymmetrically.
+    # Pass 2: boundary-aware greedy shrink (widest dim first).
     for _ in range(max(2 * d, 1)):
         vol = _volume_ratio_for_bounds(out, glb)
         if vol is None or float(vol) <= float(target_volume_ratio) + tol:
@@ -372,25 +392,31 @@ def _shrink_bounds_to_target_volume(
             continue
 
         cut = cur_w - tgt_w
-        cc = float(c[j]) if c is not None else 0.5 * (lo + hi)
-        cc = float(np.clip(cc, lo, hi))
-        left_room = cc - lo
-        right_room = hi - cc
         lo_new, hi_new = lo, hi
 
-        # Keep side near center, shrink the opposite side first.
-        if left_room <= right_room:
-            cut_r = min(cut, right_room)
-            hi_new -= cut_r
-            cut -= cut_r
-            if cut > 0.0:
-                lo_new += cut
+        # Boundary-aware: 경계 고정 면에서는 절단하지 않음
+        if pin_lo[j] and not pin_hi[j]:
+            hi_new -= min(cut, max(hi_new - lo_new, 0.0))
+        elif pin_hi[j] and not pin_lo[j]:
+            lo_new += min(cut, max(hi_new - lo_new, 0.0))
         else:
-            cut_l = min(cut, left_room)
-            lo_new += cut_l
-            cut -= cut_l
-            if cut > 0.0:
-                hi_new -= cut
+            cc = float(c[j]) if c is not None else 0.5 * (lo + hi)
+            cc = float(np.clip(cc, lo, hi))
+            left_room = cc - lo
+            right_room = hi - cc
+            # Keep side near center, shrink the opposite side first.
+            if left_room <= right_room:
+                cut_r = min(cut, right_room)
+                hi_new -= cut_r
+                cut -= cut_r
+                if cut > 0.0:
+                    lo_new += cut
+            else:
+                cut_l = min(cut, left_room)
+                lo_new += cut_l
+                cut -= cut_l
+                if cut > 0.0:
+                    hi_new -= cut
 
         lo_new = float(np.clip(lo_new, gl, gu))
         hi_new = float(np.clip(hi_new, gl, gu))
@@ -398,21 +424,28 @@ def _shrink_bounds_to_target_volume(
             lo_new, hi_new = hi_new, lo_new
         out[j] = (lo_new, hi_new)
 
-    # Final guard: enforce target if still above due to numeric drift.
+    # Final guard: boundary-aware enforcement.
     vol = _volume_ratio_for_bounds(out, glb)
     if vol is not None and float(vol) > float(target_volume_ratio) + tol:
         active_dims = max(sum(1 for s in spans if s > 0.0), 1)
         beta = float((float(target_volume_ratio) / float(vol)) ** (1.0 / float(active_dims)))
         beta = float(np.clip(beta, 0.0, 1.0))
         out2: list[tuple[float, float]] = []
-        for (lo, hi), (gl, gu), span in zip(out, glb, spans):
+        for j, ((lo, hi), (gl, gu), span) in enumerate(zip(out, glb, spans)):
             if span <= 0.0:
                 out2.append((gl, gu))
                 continue
             w = max(hi - lo, 0.0) * beta
-            mid = 0.5 * (lo + hi)
-            lo_new = float(np.clip(mid - 0.5 * w, gl, gu - w))
-            hi_new = float(lo_new + w)
+            if pin_lo[j] and not pin_hi[j]:
+                lo_new = gl
+                hi_new = float(np.clip(gl + w, gl, gu))
+            elif pin_hi[j] and not pin_lo[j]:
+                hi_new = gu
+                lo_new = float(np.clip(gu - w, gl, gu))
+            else:
+                mid = 0.5 * (lo + hi)
+                lo_new = float(np.clip(mid - 0.5 * w, gl, gu - w))
+                hi_new = float(lo_new + w)
             if hi_new < lo_new:
                 lo_new, hi_new = hi_new, lo_new
             out2.append((lo_new, hi_new))
@@ -1424,6 +1457,35 @@ class ExplorerOrchestrator:
                     pred_cluster_confidence = float(np.clip(conf, 0.0, 1.0))
             except Exception:
                 pred_cluster_confidence = None
+
+            # 대안C: pred cluster 선택 포인트 수 상한 — 과다 선택 시 noise 유입 방지
+            _pred_max_sel = int(strategy_params.get("pred_cluster_max_count", 22))
+            if X_pred_sel.ndim == 2 and X_pred_sel.shape[0] > _pred_max_sel:
+                try:
+                    _sel_idx_c = np.asarray(
+                        pred_stats.get("selected_indices", []), dtype=int
+                    ).reshape(-1)
+                    _sel_idx_c = _sel_idx_c[
+                        (_sel_idx_c >= 0) & (_sel_idx_c < pred_cluster_values.shape[0])
+                    ]
+                    if _sel_idx_c.size > _pred_max_sel:
+                        _scores_c = pred_cluster_values[_sel_idx_c]
+                        if objective_sense == "min":
+                            _keep_order = np.argsort(_scores_c)[:_pred_max_sel]
+                        else:
+                            _keep_order = np.argsort(-_scores_c)[:_pred_max_sel]
+                        _kept_idx = _sel_idx_c[_keep_order]
+                        X_pred_sel = X[_kept_idx]
+                        if labels_pred.size > _pred_max_sel:
+                            labels_pred = labels_pred[_keep_order]
+                        pred_cluster_selected_count = int(_kept_idx.size)
+                        print(
+                            f"[Explorer] pred cluster cap applied: "
+                            f"{_sel_idx_c.size} → {_kept_idx.size}"
+                        )
+                except Exception:
+                    pass
+
         except Exception as exc:
             print(f"[Explorer] Dual cluster selection failed: {exc}")
             X_pred_sel = np.empty((0, len(selected_features)))
@@ -1517,7 +1579,7 @@ class ExplorerOrchestrator:
             )
             pred_refine_bounds_scale = float(
                 max(
-                    float(strategy_params_local.get("pred_refine_bounds_scale", 1.30 if pred_family_alias else 1.15)),
+                    float(strategy_params_local.get("pred_refine_bounds_scale", 1.50 if pred_family_alias else 1.15)),
                     1.0,
                 )
             )
@@ -1547,7 +1609,7 @@ class ExplorerOrchestrator:
                 disagree_iou_threshold = float(strategy_params_local.get("dual_disagree_iou_threshold", 0.30))
                 disagree_obj_bonus = float(strategy_params_local.get("dual_disagree_obj_bonus", 0.08))
                 ratio_min = float(strategy_params_local.get("dual_obj_ratio_min", 0.25))
-                ratio_max = float(strategy_params_local.get("dual_obj_ratio_max", 0.75))
+                ratio_max = float(strategy_params_local.get("dual_obj_ratio_max", 0.85))
                 dual_center_tilt_strength_base = float(
                     np.clip(
                         float(strategy_params_local.get("dual_center_tilt_strength", 0.45)),
@@ -1559,6 +1621,42 @@ class ExplorerOrchestrator:
                 obj_ratio = float(obj_ratio_mid_np)
                 if dual_policy_mode in {"fixed", "fixed50"}:
                     obj_ratio = float(obj_ratio_mid_np)
+                elif dual_policy_mode == "routed_v1":
+                    # ── II안: 라우팅 피처 기반 obj_ratio 결정 ──
+                    _np_ratio = float(dual_np_ratio_used) if dual_np_ratio_used is not None else 0.0
+                    if has_pre_constraints:
+                        obj_ratio = 0.70
+                    elif d <= 3 and _np_ratio > 20.0:
+                        obj_ratio = 0.85
+                    elif d >= 5 and _np_ratio > 30.0:
+                        obj_ratio = 0.45
+                    else:
+                        obj_ratio = 0.55
+                    print(
+                        f"[Explorer] routed_v1: p_dim={d}, n/p={_np_ratio:.1f}, "
+                        f"constraints={has_pre_constraints} → base obj_ratio={obj_ratio:.2f}"
+                    )
+
+                    # 실시간 disagreement 연속 보정
+                    pred_center = _bounds_center(pred_bounds)
+                    obj_center = _bounds_center(obj_bounds)
+                    if pred_center is not None and obj_center is not None:
+                        spans = np.array(
+                            [max(float(ub) - float(lb), 1e-12) for lb, ub in bounds],
+                            dtype=float,
+                        )
+                        dual_disagreement_center_l1_norm = float(
+                            np.mean(np.abs(obj_center - pred_center) / spans)
+                        )
+                    dual_disagreement_iou = _bounds_iou_ratio(pred_bounds, obj_bounds)
+                    # 연속 disagreement 보너스: iou 0.30 이하에서 비례 증가, 최대 +0.25
+                    _iou_ref = float(strategy_params_local.get("dual_disagree_iou_ref", 0.30))
+                    if dual_disagreement_iou is not None and dual_disagreement_iou < _iou_ref:
+                        _cont_bonus = 0.25 * (1.0 - dual_disagreement_iou / _iou_ref)
+                        obj_ratio += float(_cont_bonus)
+                    dual_disagreement_triggered = bool(
+                        dual_disagreement_iou is not None and dual_disagreement_iou < _iou_ref
+                    )
                 else:
                     np_ratio_now = float(dual_np_ratio_used) if dual_np_ratio_used is not None else 0.0
                     if np_ratio_now <= np_ratio_low:
@@ -1596,6 +1694,13 @@ class ExplorerOrchestrator:
                     )
                     if dual_disagreement_triggered:
                         obj_ratio += float(disagree_obj_bonus)
+
+                    # 대안D: pred/obj 극심 불일치(iou<0.15) 시 obj 편향 강화
+                    if (
+                        dual_disagreement_iou is not None
+                        and dual_disagreement_iou < 0.15
+                    ):
+                        obj_ratio = max(obj_ratio, 0.70)
 
                 obj_ratio = float(np.clip(obj_ratio, ratio_min, ratio_max))
                 pred_ratio = float(np.clip(1.0 - obj_ratio, 0.0, 1.0))
@@ -2059,8 +2164,14 @@ class ExplorerOrchestrator:
             if use_obj_model and X_obj_train.shape[0] >= min_fit:
                 gp_obj, _ = _fit_gp_like_additional(X=X_obj_train, y=y_obj_train, seed=int(rng_seed) + 29)
 
+            # III-A: dual_acq_split — DUAL 모드에서 pred측 EI, obj측 LCB 분할
+            _dual_acq_split = bool(strategy_params_local.get("dual_acq_split", False))
+            _acq_type_orig = acq_type
+
             ref_pred = np.empty((0, d), dtype=float)
             if use_pred_model:
+                if _dual_acq_split and source_mode == "dual":
+                    acq_type = "EI"  # pred 측: 탐색적
                 ref_pred = _refine_with_gp(
                     gp_model=gp_pred,
                     starts=pred_starts,
@@ -2068,6 +2179,8 @@ class ExplorerOrchestrator:
                     region_bounds=pred_region_used,
                     expand_scale=pred_refine_bounds_scale,
                 )
+                if _dual_acq_split and source_mode == "dual":
+                    acq_type = _acq_type_orig  # 복원
                 ref_pred, removed_pred = _filter_points_pre_feasible(ref_pred)
                 refine_pre_removed_pred += int(removed_pred)
                 if ref_pred.shape[0] > 0 and pred_starts.shape[0] > 0:
@@ -2080,6 +2193,8 @@ class ExplorerOrchestrator:
                         pred_refine_shift_norm = None
             ref_obj = np.empty((0, d), dtype=float)
             if use_obj_model:
+                if _dual_acq_split and source_mode == "dual":
+                    acq_type = "LCB"  # obj 측: 보수적 수렴
                 ref_obj = _refine_with_gp(
                     gp_model=gp_obj,
                     starts=obj_starts,
@@ -2087,6 +2202,8 @@ class ExplorerOrchestrator:
                     region_bounds=obj_region_used,
                     expand_scale=obj_refine_bounds_scale,
                 )
+                if _dual_acq_split and source_mode == "dual":
+                    acq_type = _acq_type_orig  # 복원
                 ref_obj, removed_obj = _filter_points_pre_feasible(ref_obj)
                 refine_pre_removed_obj += int(removed_obj)
 
@@ -2144,6 +2261,11 @@ class ExplorerOrchestrator:
                             1.0,
                         )
                     )
+                    # D6: disagreement 크기에 비례하여 base_tilt 동적 스케일링
+                    # mean_disagreement가 클수록 obj 방향으로 더 강하게 tilt
+                    _disagree_ref = float(strategy_params_local.get("dual_tilt_disagree_ref", 0.15))
+                    _disagree_scale = float(np.clip(mean_disagreement / max(_disagree_ref, 1e-9), 0.8, 1.5))
+                    base_tilt = float(np.clip(base_tilt * _disagree_scale, 0.0, 0.75))
                     tilt_weights = np.clip(
                         base_tilt
                         * (
@@ -2174,7 +2296,7 @@ class ExplorerOrchestrator:
                     spans = np.array([max(float(ub) - float(lb), 1e-12) for lb, ub in bounds], dtype=float)
                     center_l1 = float(np.mean(np.abs(pred_center - obj_center) / spans))
                 pred_obj_center_l1_norm = center_l1
-                conf_low = float(np.clip(float(strategy_params_local.get("pred_cluster_confidence_low", 0.42)), 0.0, 1.0))
+                conf_low = float(np.clip(float(strategy_params_local.get("pred_cluster_confidence_low", 0.35)), 0.0, 1.0))
                 shift_hi = float(max(float(strategy_params_local.get("pred_refine_shift_high", 0.35)), 0.0))
                 if pred_bounds is None:
                     pred_obj_miss_case = "pred_bounds_empty"
@@ -2190,6 +2312,24 @@ class ExplorerOrchestrator:
                     pred_obj_miss_case = "pred_refine_large_shift"
                 else:
                     pred_obj_miss_case = "pred_obj_aligned_or_unknown"
+
+                # D1: pred-obj disjoint fallback — pred가 obj와 완전 불일치(iou<0.05)이고
+                # confidence도 낮으면 pred bounds 대신 obj bounds를 사용하여 over_shrink 방지
+                if (
+                    strategy_alias in {"s4_pred", "s8_pred"}
+                    and pred_obj_miss_case == "pred_obj_disjoint"
+                    and pred_cluster_confidence is not None
+                    and pred_cluster_confidence < 0.35
+                    and obj_bounds is not None
+                    and selected_bounds is not None
+                ):
+                    print(
+                        f"[Explorer] pred-obj disjoint fallback: pred_conf={pred_cluster_confidence:.3f}, "
+                        f"iou={pred_obj_iou:.4f} → obj_bounds 사용"
+                    )
+                    selected_bounds = list(obj_bounds)
+                    if X_obj_sel is not None and X_obj_sel.shape[0] > 0:
+                        selected_points = _safe_stack([X_obj_sel], n_dim=len(selected_features))
 
         if selected_bounds is None:
             if strategy_alias in {"s4_pred", "s8_pred"} and pred_bounds is not None:
@@ -2270,10 +2410,15 @@ class ExplorerOrchestrator:
             if isinstance(selected_points, np.ndarray) and selected_points.ndim == 2 and selected_points.shape[0] > 0:
                 _center_hint_arr = np.median(selected_points, axis=0)
 
+            # D4: confidence-adaptive margin — pred confidence가 낮으면 margin 확대
+            _margin_ratio = float(self.config.system.bounds_margin_ratio)
+            if pred_cluster_confidence is not None and pred_cluster_confidence < 0.4:
+                _margin_ratio = max(_margin_ratio, 0.06)
+
             selected_bounds = apply_bounds_margin(
                 selected_bounds=selected_bounds,
                 bounds=bounds,
-                margin_ratio=float(self.config.system.bounds_margin_ratio),
+                margin_ratio=_margin_ratio,
                 min_volume_ratio=float(self.config.system.bounds_min_volume_ratio),
                 dim_weights=dim_weights,
                 center_hint=_center_hint_arr,

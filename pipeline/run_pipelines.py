@@ -247,6 +247,71 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
             "dbscan_eps_quantile": 0.90,
         },
     ),
+    # ── II안: 라우팅 기반 DUAL (routed_v1 정책) ──
+    # obj_ratio를 p_dim/n_per_p/constraints 기반으로 자동 결정.
+    # 연속 disagreement 보정 포함. ratio_max=0.85로 OBJ-like 동작 가능.
+    ExplorerStrategy(
+        "SR_dual",
+        {
+            "strategy_params": {
+                "mode": "dual_refine_ei",
+                "max_volume_ratio_target": 0.249,
+                "dual_policy_mode": "routed_v1",
+                "dual_total_starts": 40,
+                "dual_obj_ratio_min": 0.25,
+                "dual_obj_ratio_max": 0.85,
+                "dual_center_tilt_strength": 0.45,
+                "dual_center_tilt_aniso_gamma": 0.6,
+                "dual_disagree_iou_ref": 0.30,
+                "pred_cluster_beta": 0.20,
+                "pred_refine_bounds_scale": 1.50,
+                "pred_multistart_det_fraction": 0.35,
+                "pred_cluster_max_count": 22,
+                "obj_diversity_extra_clusters": 3,
+                "obj_diversity_weight": 0.35,
+                "obj_diversity_min_distance": 0.18,
+                "obj_diversity_close_penalty": 0.80,
+                "obj_diversity_min_dim": 4,
+            },
+            "bounds_expansion_mode": "fi_aware",
+            "quantile_threshold": 0.86,
+            "bounds_margin_ratio": 0.03,
+            "dbscan_eps_quantile": 0.88,
+        },
+    ),
+    # ── III-A: Adaptive EI/LCB 분할 DUAL ──
+    # pred 측은 EI(탐색), obj 측은 LCB(수렴)로 acquisition 분할.
+    # routed_v1 정책과 결합하여 최적 obj_ratio + 분할 acquisition 동시 적용.
+    ExplorerStrategy(
+        "SA_dual",
+        {
+            "strategy_params": {
+                "mode": "dual_refine_ei",
+                "max_volume_ratio_target": 0.249,
+                "dual_policy_mode": "routed_v1",
+                "dual_acq_split": True,
+                "dual_total_starts": 40,
+                "dual_obj_ratio_min": 0.25,
+                "dual_obj_ratio_max": 0.85,
+                "dual_center_tilt_strength": 0.45,
+                "dual_center_tilt_aniso_gamma": 0.6,
+                "dual_disagree_iou_ref": 0.30,
+                "pred_cluster_beta": 0.20,
+                "pred_refine_bounds_scale": 1.50,
+                "pred_multistart_det_fraction": 0.35,
+                "pred_cluster_max_count": 22,
+                "obj_diversity_extra_clusters": 3,
+                "obj_diversity_weight": 0.35,
+                "obj_diversity_min_distance": 0.18,
+                "obj_diversity_close_penalty": 0.80,
+                "obj_diversity_min_dim": 4,
+            },
+            "bounds_expansion_mode": "fi_aware",
+            "quantile_threshold": 0.86,
+            "bounds_margin_ratio": 0.03,
+            "dbscan_eps_quantile": 0.88,
+        },
+    ),
 ]
 
 

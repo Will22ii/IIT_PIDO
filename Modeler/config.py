@@ -102,7 +102,7 @@ class ModelerSystemConfig:
     # 5) FI 최종 선택 가드
     # -----------------------------
     # final/global 컷오프
-    fi_final_score_threshold: float = 0.55
+    fi_final_score_threshold: float = 0.58
     fi_global_score_floor: float = 0.25
 
     # -----------------------------
@@ -166,10 +166,10 @@ class ModelerSystemConfig:
     # N/p ≤ threshold일 때 bootstrap 서브샘플링으로 feature 선택 안정성 검증
     fi_bootstrap_enabled: bool = True
     fi_bootstrap_np_threshold: float = 10.0   # N/p ≤ 이 값일 때 발동
-    fi_bootstrap_rounds: int = 15             # 반복 횟수
+    fi_bootstrap_rounds: int = 20             # 반복 횟수
     fi_bootstrap_sample_ratio: float = 0.8    # 서브샘플 비율
     fi_bootstrap_min_freq: float = 0.73       # 최소 선택 빈도 (미만이면 제거) (E: 0.80→0.73 원복, real variable 과제거 방지)
-    fi_bootstrap_min_freq_very_low_data: float = 0.45  # very_low_data 전용 완화 임계값
+    fi_bootstrap_min_freq_very_low_data: float = 0.55  # very_low_data 전용 완화 임계값
     # very_low_data 구제: bootstrap_freq < min_freq여도 global_score가 이 값 이상이면 유지
     fi_bootstrap_rescue_global_floor: float = 0.83
     fi_bootstrap_rescue_very_low_data_only: bool = True  # very_low_data에서만 구제 적용
