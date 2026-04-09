@@ -93,7 +93,7 @@ class FeatureSelectionConfig:
     null_alpha_normal: float = 0.12
     null_apply_to: str = "both"
     null_pre_elite_ratio: float = 0.5
-    bootstrap_min_freq_very_low_data: float = 0.45
+    bootstrap_min_freq_very_low_data: float = 0.55
     # bootstrap rescue (very_low_data)
     fi_bootstrap_rescue_global_floor: float = 0.83
     fi_bootstrap_rescue_very_low_data_only: bool = True

@@ -57,6 +57,8 @@ class ExplorerSystemConfig:
     strategy_id: str = "S4_dual"
     # Probe 기반 전략 시작점 개수(미사용 전략에서도 메타 기록용)
     probe_multistart: int = 20
+    # Obj refine bounds 확장 배율 기본값 (strategy_params 미지정 시 사용)
+    obj_refine_bounds_scale: float = 1.30
     # 전략별 추가 파라미터 메타(실험 추적용)
     strategy_params: dict[str, object] = field(default_factory=dict)
 

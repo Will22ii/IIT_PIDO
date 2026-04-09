@@ -18,14 +18,13 @@ class DOESystemConfig:
     # =========================
     n_samples: int = 120  # DOE 전체 샘플 수 (추가 DOE면 total_budget)
     force_baseline_initial: bool = False  # 초기 DOE에서 기준점 강제 포함 여부
-    initial_corner_ratio: float = 0.06  # 초기 DOE에서 corner 샘플 비율
+    initial_corner_ratio: float = 0.05  # 초기 DOE에서 corner 샘플 비율
     # initial corner ratio adaptive policy (low N/p 구간에서만 완화)
-    initial_corner_adaptive_enabled: bool = True
+    initial_corner_adaptive_enabled: bool = False
     initial_corner_adaptive_np_ratio_max: float = 10.0
     initial_corner_adaptive_low_dim_max: int = 6
-    initial_corner_adaptive_mid_dim_max: int = 6
     initial_corner_adaptive_ratio_low_dim: float = 0.05
-    initial_corner_adaptive_ratio_mid_dim: float = 0.05
+  
 
     # =========================
     # 2) 추가 DOE: 단계/비율
@@ -47,10 +46,26 @@ class DOESystemConfig:
     # global_random_ratio는 현재 전달/적용하지 않습니다.
     # 전역 X_exec은 boundary/margin/top 버킷을 우선 배정하고,
     # 남은 슬롯을 random으로 채우는 정책을 사용합니다.
-    global_boundary_ratio: float = 0.15  # 전역 X_plan/X_exec 경계 샘플 비율 (G: 0.21→0.15, top-k 비율 상향에 따른 조정)
-    global_margin_ratio: float = 0.2  # 전역 X_exec 중 제약 경계(margin) 버킷 비율
+    global_boundary_ratio: float = 0.05  # 전역 X_plan/X_exec 경계 샘플 비율 (G: 0.21→0.15, top-k 비율 상향에 따른 조정)
+    global_margin_ratio: float = 0.3  # 전역 X_exec 중 제약 경계(margin) 버킷 비율
+    # 전역 margin 버킷을 제약 부분집합 기반으로 배분할지 여부
+    # - True: feasible 후보 내에서 subset margin(min) 기준으로 가중 배분
+    # - False: 기존처럼 단일 margin 오름차순
+    global_margin_subset_enabled: bool = True
+    # n>=4일 때 k={1,n} + (2..n-1)에서 랜덤 추출할 중간 k 개수
+    # 결과적으로 k 종류 수는 최대 4개(1, n, mid1, mid2)
+    global_margin_subset_random_k_count: int = 2
     global_top_ratio: float = 0.25  # 전역 X_exec 중 top-k 버킷 비율 (DOE-1: 0.28→0.25, top-k 과집중 완화)
-    global_boundary_corner_ratio: float = 0.4  # 경계 샘플 중 코너 조합 비율
+    global_boundary_corner_ratio: float = 0.5  # 경계 샘플 중 코너 조합 비율
+    # 제약 문제에서 boundary 예산 배율 (has_pre_constraints 시 boundary_ratio에 곱함)
+    global_boundary_constraint_boost: float = 1.2
+    # 제약 문제에서 boundary 예산의 절반을 margin+boundary 교차 bucket에 배정
+    # margin+boundary: margin 작고 AND 변수 1개+ 경계 근처인 점 우선
+    global_boundary_margin_cross_ratio: float = 0.5
+    # margin+boundary 교차 판정: 변수 값이 경계에서 이 비율 이내면 "경계 근처"
+    global_boundary_margin_near_tol: float = 0.05
+    # margin bucket 내 objective-aware 복합 정렬 가중치 (alpha: margin 비중, 1-alpha: objective 비중)
+    global_margin_obj_alpha: float = 0.6
 
     # =========================
     # 3) 추가 DOE: X_plan 크기

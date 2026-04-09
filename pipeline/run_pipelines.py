@@ -44,19 +44,19 @@ PROBLEM_SUITE: list[ProblemCase] = [
         problem_name="rosenbrock",
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
         n_samples=450,
-        repeats=10,
+        repeats=5,
     ),
     ProblemCase(
         problem_name="cantilever_beam",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         n_samples=90,
-        repeats=25,
+        repeats=12,
     ),
     ProblemCase(
         problem_name="goldstein_price",
         known_optimum={"x1": 0.0, "x2": -1.0},
         n_samples=150,
-        repeats=50,
+        repeats=25,
     ),
 
     ProblemCase(
@@ -66,7 +66,7 @@ PROBLEM_SUITE: list[ProblemCase] = [
             {"x1": -0.0898, "x2": 0.7126},
         ],
         n_samples=50,
-        repeats=25,
+        repeats=12,
     ),
 
     # ProblemCase(
@@ -367,6 +367,8 @@ def _choose_strategies_by_dim(
         "S8_pred",
         "S4_obj",
         "S8_obj",
+        "SR_dual",
+        "SA_dual",
     ]
     chosen = [requested_map[sid] for sid in ordered if sid in requested_map]
     if not chosen:
@@ -1099,7 +1101,7 @@ def main() -> None:
     parser.add_argument(
         "--explorer-strategies",
         type=str,
-        default="S4_dual,S8_dual,S4_pred,S8_pred,S4_obj,S8_obj",
+        default="S4_dual,S8_dual,S4_pred,S8_pred,S4_obj,S8_obj,SR_dual,SA_dual",
         help="Comma-separated Explorer strategy IDs.",
     )
     args = parser.parse_args()

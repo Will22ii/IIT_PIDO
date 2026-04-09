@@ -1583,8 +1583,11 @@ class ExplorerOrchestrator:
                     1.0,
                 )
             )
+            obj_refine_bounds_scale_default = float(
+                max(float(getattr(self.config.system, "obj_refine_bounds_scale", 1.30)), 1.0)
+            )
             obj_refine_bounds_scale = float(
-                max(float(strategy_params_local.get("obj_refine_bounds_scale", 1.15)), 1.0)
+                max(float(strategy_params_local.get("obj_refine_bounds_scale", obj_refine_bounds_scale_default)), 1.0)
             )
             pred_multistart_det_fraction_used = float(pred_multistart_det_fraction)
             pred_refine_bounds_scale_used = float(pred_refine_bounds_scale)

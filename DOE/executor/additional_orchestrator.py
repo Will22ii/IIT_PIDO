@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from itertools import combinations
 import warnings
 from typing import Any, Callable, Optional
 
@@ -79,7 +80,13 @@ class AdditionalDOEOrchestrator:
         initial_corner_ratio: float = 0.05,
         global_random_ratio: float = 0.3,
         global_boundary_ratio: float = 0.1,
+        global_boundary_constraint_boost: float = 1.2,
+        global_boundary_margin_cross_ratio: float = 0.5,
+        global_boundary_margin_near_tol: float = 0.05,
         global_margin_ratio: float = 0.2,
+        global_margin_obj_alpha: float = 0.6,
+        global_margin_subset_enabled: bool = True,
+        global_margin_subset_random_k_count: int = 2,
         global_top_ratio: float = 0.2,
         global_boundary_corner_ratio: float = 0.5,
         plan_base_k: float = 200.0,
@@ -210,7 +217,15 @@ class AdditionalDOEOrchestrator:
             raise ValueError("initial_corner_ratio must be in [0, 1]")
         self.global_random_ratio = float(global_random_ratio)
         self.global_boundary_ratio = float(global_boundary_ratio)
+        self.global_boundary_constraint_boost = float(global_boundary_constraint_boost)
+        self.global_boundary_margin_cross_ratio = float(global_boundary_margin_cross_ratio)
+        self.global_boundary_margin_near_tol = float(global_boundary_margin_near_tol)
         self.global_margin_ratio = float(global_margin_ratio)
+        self.global_margin_obj_alpha = float(global_margin_obj_alpha)
+        self.global_margin_subset_enabled = bool(global_margin_subset_enabled)
+        self.global_margin_subset_random_k_count = int(global_margin_subset_random_k_count)
+        if self.global_margin_subset_random_k_count < 0:
+            raise ValueError("global_margin_subset_random_k_count must be >= 0")
         self.global_top_ratio = float(global_top_ratio)
         self.global_boundary_corner_ratio = float(global_boundary_corner_ratio)
         self.plan_base_k = float(plan_base_k)
@@ -431,6 +446,103 @@ class AdditionalDOEOrchestrator:
         if s <= 0.0:
             return default
         return [float(v / s) for v in vals]
+
+    @staticmethod
+    def _extract_pre_constraint_ids(constraints_payloads: list[dict]) -> list[str]:
+        ids: set[str] = set()
+        for payload in constraints_payloads:
+            if not isinstance(payload, dict):
+                continue
+            for key, cinfo in payload.items():
+                if not isinstance(cinfo, dict):
+                    continue
+                scope = str(cinfo.get("scope", "pre")).strip().lower()
+                if scope != "pre":
+                    continue
+                cid = str(cinfo.get("id", key)).strip()
+                if cid:
+                    ids.add(cid)
+        return sorted(ids)
+
+    def _resolve_margin_subset_k_values(self, n_constraints: int) -> list[int]:
+        n = int(n_constraints)
+        if n <= 0:
+            return []
+        if n <= 3:
+            return list(range(1, n + 1))
+        mid_candidates = list(range(2, n))
+        n_mid = min(max(self.global_margin_subset_random_k_count, 0), len(mid_candidates))
+        picked_mid: list[int] = []
+        if n_mid > 0:
+            arr = np.asarray(mid_candidates, dtype=int)
+            picked_mid = (
+                self.rng.choice(arr, size=n_mid, replace=False).astype(int).tolist()
+            )
+        k_vals = sorted(set([1, n] + picked_mid))
+        return [int(k) for k in k_vals]
+
+    def _build_margin_subset_specs(self, constraint_ids: list[str]) -> list[tuple[tuple[str, ...], float]]:
+        if not constraint_ids:
+            return []
+        k_values = self._resolve_margin_subset_k_values(len(constraint_ids))
+        if not k_values:
+            return []
+        subsets: list[tuple[str, ...]] = []
+        weights_raw: list[float] = []
+        for k in k_values:
+            for subset in combinations(constraint_ids, int(k)):
+                subsets.append(tuple(subset))
+                weights_raw.append(float(k))
+        if not subsets:
+            return []
+        w_sum = float(sum(weights_raw))
+        if w_sum <= 0.0:
+            return []
+        return [(subsets[i], float(weights_raw[i] / w_sum)) for i in range(len(subsets))]
+
+    @staticmethod
+    def _allocate_weighted_subset_quotas(
+        *,
+        n_total: int,
+        weights: list[float],
+        enforce_min_one: bool,
+    ) -> list[int]:
+        if n_total <= 0 or not weights:
+            return [0 for _ in weights]
+        m = len(weights)
+        w = [max(float(x), 0.0) for x in weights]
+        w_sum = float(sum(w))
+        if w_sum <= 0.0:
+            w = [1.0 / float(m) for _ in range(m)]
+        else:
+            w = [float(x / w_sum) for x in w]
+
+        def _distribute(total: int, base_offset: list[int]) -> list[int]:
+            raw = [float(total) * wi for wi in w]
+            add = [int(np.floor(v)) for v in raw]
+            remain = int(max(total - sum(add), 0))
+            frac_order = sorted(
+                range(m),
+                key=lambda i: (raw[i] - add[i], raw[i]),
+                reverse=True,
+            )
+            for i in frac_order[:remain]:
+                add[i] += 1
+            return [int(base_offset[i] + add[i]) for i in range(m)]
+
+        if not enforce_min_one:
+            return _distribute(int(n_total), [0 for _ in range(m)])
+
+        if n_total >= m:
+            # 각 subset 최소 1개를 보장하되, 총량은 n_total로 유지
+            return _distribute(int(n_total - m), [1 for _ in range(m)])
+
+        # 총량이 subset 수보다 작으면 가중치가 큰 subset부터 1개 배정
+        out = [0 for _ in range(m)]
+        order = sorted(range(m), key=lambda i: (w[i], -i), reverse=True)
+        for i in order[: int(n_total)]:
+            out[i] = 1
+        return out
 
     def _estimate_exec_multiplier(self) -> tuple[float, float | None, float | None]:
         if not self.dynamic_exec_allocation_enabled:
@@ -1262,6 +1374,10 @@ class AdditionalDOEOrchestrator:
             n_local = n_plan - n_global
 
             boundary_ratio = max(0.0, min(1.0, self.global_boundary_ratio))
+            # constraint 문제에서 boundary 예산 확대
+            if self.has_pre_constraints:
+                boundary_ratio *= float(self.global_boundary_constraint_boost)
+                boundary_ratio = min(boundary_ratio, 1.0)
             boundary_ratio *= float(0.9 ** round_idx)
             if self._anchor_spread_zero_streak >= self.stop_anchor_spread_streak and (not diversity_boost_active):
                 boundary_ratio = 0.0
@@ -1270,21 +1386,24 @@ class AdditionalDOEOrchestrator:
 
             n_boundary = int(round(n_global * boundary_ratio))
             if n_boundary > 0 and n_global >= 2 and n_boundary < 2:
-                # 코너/부분 경계를 모두 포함시키기 위해 최소 2개 확보
                 n_boundary = 2
             spans, _ = compute_spans_lbs(self.bounds)
             offset = spans * tol
 
             boundary_flags = []
             if n_boundary > 0:
+                # constraint 문제: 절반을 margin+boundary 교차용으로 예약
+                _cross_ratio = float(self.global_boundary_margin_cross_ratio) if self.has_pre_constraints else 0.0
+                n_margin_cross = int(round(n_boundary * _cross_ratio))
+                n_classic_boundary = n_boundary - n_margin_cross
+
                 corner_ratio = max(0.0, min(1.0, self.global_boundary_corner_ratio))
                 corner_ratio *= float(0.9 ** round_idx)
-                n_corner = int(round(n_boundary * corner_ratio))
-                n_partial = n_boundary - n_corner
-                if n_boundary >= 2:
-                    # 경계 샘플이 2개 이상이면 코너/부분 경계 모두 최소 1개 보장
-                    n_corner = min(max(n_corner, 1), n_boundary - 1)
-                    n_partial = n_boundary - n_corner
+                n_corner = int(round(n_classic_boundary * corner_ratio))
+                n_partial = n_classic_boundary - n_corner
+                if n_classic_boundary >= 2:
+                    n_corner = min(max(n_corner, 1), n_classic_boundary - 1)
+                    n_partial = n_classic_boundary - n_corner
 
                 boundary_candidates = sample_boundary_corners(self.bounds, offset=offset)
                 if n_corner > 0:
@@ -1297,7 +1416,6 @@ class AdditionalDOEOrchestrator:
                     X_corner = np.empty((0, len(self.bounds)), dtype=float)
 
                 if n_partial > 0:
-                    # use LHC points as base for partial boundary
                     X_base = self.plan_builder.build(n_plan=max(n_partial, 1), n_divisions=n_divisions)
                     boundary_dims_k = max(1, len(self.bounds) - 2)
                     X_partial = sample_boundary_partial(
@@ -1311,7 +1429,24 @@ class AdditionalDOEOrchestrator:
                 else:
                     X_partial = np.empty((0, len(self.bounds)), dtype=float)
 
-                Xg_boundary = np.vstack([X_corner, X_partial]) if X_corner.size or X_partial.size else np.empty((0, len(self.bounds)), dtype=float)
+                # margin+boundary 교차 bucket: LHC 기반 partial boundary 추가 생성
+                # (constraint filter 후 margin이 작은 것만 _select_global_exec에서 선별)
+                if n_margin_cross > 0:
+                    X_mc_base = self.plan_builder.build(n_plan=max(n_margin_cross * 3, 6), n_divisions=n_divisions)
+                    boundary_dims_k_mc = max(1, min(2, len(self.bounds) - 1))
+                    X_margin_cross = sample_boundary_partial(
+                        self.bounds,
+                        offset=offset,
+                        base_points=X_mc_base,
+                        n_samples=max(n_margin_cross * 3, 6),
+                        n_boundary_dims=boundary_dims_k_mc,
+                        rng=self.rng,
+                    )
+                else:
+                    X_margin_cross = np.empty((0, len(self.bounds)), dtype=float)
+
+                parts = [p for p in [X_corner, X_partial, X_margin_cross] if p.size > 0]
+                Xg_boundary = np.vstack(parts) if parts else np.empty((0, len(self.bounds)), dtype=float)
                 boundary_flags = [True] * Xg_boundary.shape[0]
             else:
                 Xg_boundary = np.empty((0, len(self.bounds)), dtype=float)
@@ -1750,6 +1885,11 @@ class AdditionalDOEOrchestrator:
                 n_margin_exec = min(max(n_margin_exec, 0), n_pick)
                 n_top_exec = int(round(n_pick * self.global_top_ratio))
                 n_top_exec = min(max(n_top_exec, 0), n_pick)
+                margin_subset_specs: list[tuple[tuple[str, ...], float]] = []
+                if self.global_margin_subset_enabled and n_margin_exec > 0:
+                    pre_constraint_ids = self._extract_pre_constraint_ids(constraints_work)
+                    if len(pre_constraint_ids) >= 2:
+                        margin_subset_specs = self._build_margin_subset_specs(pre_constraint_ids)
                 diversity_reserve = 0
                 if (
                     diversity_boost_active
@@ -1763,13 +1903,27 @@ class AdditionalDOEOrchestrator:
 
                 # top-k 최소 1개를 보장하기 위해 boundary/margin을 먼저 캡한다.
                 max_for_pre_buckets = max(n_pick - n_top_exec, 0)
+                if margin_subset_specs and max_for_pre_buckets > 0:
+                    # ratio를 최소선으로 유지하되, subset별 최소 1개 보장을 위해 margin quota를 상향
+                    n_margin_exec = max(
+                        int(n_margin_exec),
+                        int(min(len(margin_subset_specs), max_for_pre_buckets)),
+                    )
                 if (n_boundary_exec + n_margin_exec) > max_for_pre_buckets:
                     overflow = (n_boundary_exec + n_margin_exec) - max_for_pre_buckets
-                    reduce_margin = min(overflow, n_margin_exec)
-                    n_margin_exec -= reduce_margin
-                    overflow -= reduce_margin
-                    if overflow > 0:
-                        n_boundary_exec = max(n_boundary_exec - overflow, 0)
+                    if margin_subset_specs:
+                        # subset margin 모드에서는 margin quota를 우선 보존
+                        reduce_boundary = min(overflow, n_boundary_exec)
+                        n_boundary_exec -= reduce_boundary
+                        overflow -= reduce_boundary
+                        if overflow > 0:
+                            n_margin_exec = max(n_margin_exec - overflow, 0)
+                    else:
+                        reduce_margin = min(overflow, n_margin_exec)
+                        n_margin_exec -= reduce_margin
+                        overflow -= reduce_margin
+                        if overflow > 0:
+                            n_boundary_exec = max(n_boundary_exec - overflow, 0)
 
                 selected: list[int] = []
                 selected_set: set[int] = set()
@@ -1795,10 +1949,99 @@ class AdditionalDOEOrchestrator:
 
                 # 1) margin 작은 순(제약 경계 근처)
                 if n_margin_exec > 0 and margins_work.size == Xg_work.shape[0]:
-                    margin_order = np.argsort(margins_work).astype(int).tolist()
-                    picked = _take(margin_order, n_margin_exec)
-                    selected.extend(picked)
-                    selected_set.update(picked)
+                    if margin_subset_specs:
+                        # subset별 margin(min) 기준으로 가중 배분
+                        n_constraints = len(self._extract_pre_constraint_ids(constraints_work))
+                        edge_k = {1, int(n_constraints)}
+                        subset_priority = sorted(
+                            range(len(margin_subset_specs)),
+                            key=lambda gi: (
+                                0 if len(margin_subset_specs[gi][0]) in edge_k else 1,
+                                -len(margin_subset_specs[gi][0]),
+                                margin_subset_specs[gi][0],
+                            ),
+                        )
+                        weights = [float(margin_subset_specs[gi][1]) for gi in range(len(margin_subset_specs))]
+                        enforce_min_one = n_margin_exec >= len(margin_subset_specs)
+                        quotas = self._allocate_weighted_subset_quotas(
+                            n_total=int(n_margin_exec),
+                            weights=weights,
+                            enforce_min_one=bool(enforce_min_one),
+                        )
+                        rank_pos = {
+                            int(idx): int(pos)
+                            for pos, idx in enumerate(order_g.astype(int).tolist())
+                        }
+                        # candidate별 제약 margin map 구성
+                        candidate_margin_maps: list[dict[str, float]] = []
+                        for payload in constraints_work:
+                            cur: dict[str, float] = {}
+                            if isinstance(payload, dict):
+                                for key, cinfo in payload.items():
+                                    if not isinstance(cinfo, dict):
+                                        continue
+                                    scope = str(cinfo.get("scope", "pre")).strip().lower()
+                                    if scope != "pre":
+                                        continue
+                                    cid = str(cinfo.get("id", key)).strip()
+                                    mv = cinfo.get("margin")
+                                    if cid:
+                                        try:
+                                            mval = float(mv)
+                                            if np.isfinite(mval):
+                                                cur[cid] = mval
+                                        except Exception:
+                                            continue
+                            candidate_margin_maps.append(cur)
+
+                        subset_orders: list[list[int]] = []
+                        for subset_ids, _w in margin_subset_specs:
+                            ranked: list[tuple[float, int, int]] = []
+                            for idx in range(Xg_work.shape[0]):
+                                m_map = candidate_margin_maps[idx] if idx < len(candidate_margin_maps) else {}
+                                vals = [m_map.get(cid) for cid in subset_ids]
+                                if any(v is None for v in vals):
+                                    continue
+                                s_margin = float(np.min(np.asarray(vals, dtype=float)))
+                                ranked.append((s_margin, rank_pos.get(int(idx), 10**9), int(idx)))
+                            ranked.sort(key=lambda t: (t[0], t[1]))
+                            subset_orders.append([idx for _, __, idx in ranked])
+
+                        allocated = [0 for _ in quotas]
+                        if enforce_min_one:
+                            for gi in subset_priority:
+                                picked = _take(subset_orders[gi], 1)
+                                if picked:
+                                    selected.extend(picked)
+                                    selected_set.update(picked)
+                                    allocated[gi] += len(picked)
+
+                        for gi in subset_priority:
+                            need = max(int(quotas[gi]) - int(allocated[gi]), 0)
+                            if need <= 0:
+                                continue
+                            picked = _take(subset_orders[gi], need)
+                            if picked:
+                                selected.extend(picked)
+                                selected_set.update(picked)
+                                allocated[gi] += len(picked)
+                    else:
+                        # objective-aware margin 정렬: margin + objective 복합 순위
+                        _alpha = float(self.global_margin_obj_alpha)
+                        if _alpha < 1.0 and order_g.size == Xg_work.shape[0]:
+                            from scipy.stats import rankdata as _rankdata
+                            _m_rank = _rankdata(margins_work, method="ordinal") / max(float(Xg_work.shape[0]), 1.0)
+                            _o_rank = np.zeros_like(_m_rank)
+                            for _ri, _oi in enumerate(order_g.astype(int).tolist()):
+                                if 0 <= _oi < _o_rank.shape[0]:
+                                    _o_rank[_oi] = float(_ri) / max(float(Xg_work.shape[0]), 1.0)
+                            _combined = _alpha * _m_rank + (1.0 - _alpha) * _o_rank
+                            margin_order = np.argsort(_combined).astype(int).tolist()
+                        else:
+                            margin_order = np.argsort(margins_work).astype(int).tolist()
+                        picked = _take(margin_order, n_margin_exec)
+                        selected.extend(picked)
+                        selected_set.update(picked)
 
                 # 2) top-k
                 if n_top_exec > 0:
@@ -1806,12 +2049,48 @@ class AdditionalDOEOrchestrator:
                     selected.extend(picked)
                     selected_set.update(picked)
 
-                # 3) boundary quota (가능한 만큼 확보)
+                # 3) boundary quota — constraint 문제에서는 margin+boundary 교차 우선
                 if n_boundary_exec > 0 and boundary_work.size == Xg_work.shape[0]:
-                    boundary_order = [idx for idx in order_g.tolist() if boundary_work[idx]]
-                    picked = _take(boundary_order, n_boundary_exec)
-                    selected.extend(picked)
-                    selected_set.update(picked)
+                    if (
+                        self.has_pre_constraints
+                        and margins_work.size == Xg_work.shape[0]
+                        and self.global_boundary_margin_cross_ratio > 0.0
+                    ):
+                        # margin+boundary 교차: boundary 점 중 margin이 가장 작은 것 우선
+                        _near_tol = float(self.global_boundary_margin_near_tol)
+                        _cross_quota = int(round(n_boundary_exec * self.global_boundary_margin_cross_ratio))
+                        _classic_quota = n_boundary_exec - _cross_quota
+
+                        # 교차 조건: boundary flag AND 변수 1개+ 경계 근처
+                        _cross_candidates: list[tuple[float, int]] = []
+                        for idx in range(Xg_work.shape[0]):
+                            if not boundary_work[idx]:
+                                continue
+                            x = Xg_work[idx]
+                            near_any = False
+                            for j, (lb, ub) in enumerate(self.bounds):
+                                sp = max(float(ub) - float(lb), 1e-12)
+                                if (float(x[j]) - float(lb)) < _near_tol * sp or (float(ub) - float(x[j])) < _near_tol * sp:
+                                    near_any = True
+                                    break
+                            if near_any and np.isfinite(margins_work[idx]):
+                                _cross_candidates.append((float(margins_work[idx]), int(idx)))
+                        _cross_candidates.sort(key=lambda t: t[0])  # margin 오름차순
+                        _cross_order = [idx for _, idx in _cross_candidates]
+                        picked_cross = _take(_cross_order, _cross_quota)
+                        selected.extend(picked_cross)
+                        selected_set.update(picked_cross)
+
+                        # 나머지: 기존 boundary 순서
+                        boundary_order = [idx for idx in order_g.tolist() if boundary_work[idx]]
+                        picked_classic = _take(boundary_order, _classic_quota)
+                        selected.extend(picked_classic)
+                        selected_set.update(picked_classic)
+                    else:
+                        boundary_order = [idx for idx in order_g.tolist() if boundary_work[idx]]
+                        picked = _take(boundary_order, n_boundary_exec)
+                        selected.extend(picked)
+                        selected_set.update(picked)
 
                 # 4) random(남은 슬롯)
                 remaining_slots = max(n_pick - len(selected), 0)
@@ -2453,6 +2732,8 @@ class AdditionalDOEOrchestrator:
             "exec_eff_clip_max": float(self.exec_eff_clip_max),
             "exec_stage_min_ratio": float(self.exec_stage_min_ratio),
             "exec_stage_max_ratio": float(self.exec_stage_max_ratio),
+            "global_margin_subset_enabled": bool(self.global_margin_subset_enabled),
+            "global_margin_subset_random_k_count": int(self.global_margin_subset_random_k_count),
             "alloc_multiplier_last": alloc_multiplier_last,
             "alloc_multiplier_mean": alloc_multiplier_mean,
             "alloc_eff_prev_last": alloc_eff_prev_last,
