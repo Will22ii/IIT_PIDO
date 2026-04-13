@@ -169,6 +169,10 @@ class ModelerSystemConfig:
     fi_bootstrap_rounds: int = 20             # 반복 횟수
     fi_bootstrap_sample_ratio: float = 0.8    # 서브샘플 비율
     fi_bootstrap_min_freq: float = 0.73       # 최소 선택 빈도 (미만이면 제거) (E: 0.80→0.73 원복, real variable 과제거 방지)
+    # FS-1: low_data_mode (n/p<=threshold) 전용 bootstrap freq 강화(dummy leak 억제)
+    # normal-data에는 fi_bootstrap_min_freq, very_low_data(n<55)에는 *_very_low_data 적용.
+    # 그 사이(low_data & n>=55) 구간에 이 값을 사용한다.
+    fi_bootstrap_min_freq_low_data: float = 0.78
     fi_bootstrap_min_freq_very_low_data: float = 0.55  # very_low_data 전용 완화 임계값
     # very_low_data 구제: bootstrap_freq < min_freq여도 global_score가 이 값 이상이면 유지
     fi_bootstrap_rescue_global_floor: float = 0.83
@@ -322,6 +326,7 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         null_pre_elite_ratio=system.fi_null_pre_elite_ratio,
         # quantile policy
         # bootstrap rescue
+        bootstrap_min_freq_low_data=system.fi_bootstrap_min_freq_low_data,
         bootstrap_min_freq_very_low_data=system.fi_bootstrap_min_freq_very_low_data,
         fi_bootstrap_rescue_global_floor=system.fi_bootstrap_rescue_global_floor,
         fi_bootstrap_rescue_very_low_data_only=system.fi_bootstrap_rescue_very_low_data_only,

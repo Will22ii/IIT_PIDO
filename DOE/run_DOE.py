@@ -337,6 +337,8 @@ def run_doe(*, config: DOEConfig, run_context: RunContext | None = None) -> dict
             "phase2_min_usable_np_ratio": config.system.phase2_min_usable_np_ratio,
             "phase2_np_ratio_cap_scale": config.system.phase2_np_ratio_cap_scale,
             "phase2_min_used_budget_ratio": config.system.phase2_min_used_budget_ratio,
+            "phase2_min_used_budget_ratio_high_crate": config.system.phase2_min_used_budget_ratio_high_crate,
+            "phase2_high_crate_threshold": config.system.phase2_high_crate_threshold,
             "early_stop_min_used_budget_ratio": config.system.early_stop_min_used_budget_ratio,
             "early_stop_min_usable_np_ratio": config.system.early_stop_min_usable_np_ratio,
             "stop_span_ratio_threshold": config.system.stop_span_ratio_threshold,

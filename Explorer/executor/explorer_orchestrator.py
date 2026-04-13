@@ -1613,12 +1613,26 @@ class ExplorerOrchestrator:
                 disagree_obj_bonus = float(strategy_params_local.get("dual_disagree_obj_bonus", 0.08))
                 ratio_min = float(strategy_params_local.get("dual_obj_ratio_min", 0.25))
                 ratio_max = float(strategy_params_local.get("dual_obj_ratio_max", 0.85))
+                # DSE-B: 고제약(crate_hat < high_crate_threshold) 시 tilt_strength 상향
+                _dseb_crate_thr = float(np.clip(
+                    float(strategy_params_local.get("dsb_high_crate_threshold", 0.85)),
+                    0.0, 1.0,
+                ))
+                _dseb_tilt_base = float(strategy_params_local.get("dual_center_tilt_strength", 0.45))
+                _dseb_tilt_high_crate = float(strategy_params_local.get(
+                    "dual_center_tilt_strength_high_crate", 0.55
+                ))
+                try:
+                    _dseb_crate_hat = float(_meta_get("constraint_rate_hat", 1.0))
+                except Exception:
+                    _dseb_crate_hat = 1.0
+                _dseb_is_high_crate = bool(
+                    has_pre_constraints and np.isfinite(_dseb_crate_hat)
+                    and _dseb_crate_hat < _dseb_crate_thr
+                )
+                _dseb_tilt_eff = _dseb_tilt_high_crate if _dseb_is_high_crate else _dseb_tilt_base
                 dual_center_tilt_strength_base = float(
-                    np.clip(
-                        float(strategy_params_local.get("dual_center_tilt_strength", 0.45)),
-                        0.0,
-                        1.0,
-                    )
+                    np.clip(_dseb_tilt_eff, 0.0, 1.0)
                 )
 
                 obj_ratio = float(obj_ratio_mid_np)
@@ -1704,6 +1718,17 @@ class ExplorerOrchestrator:
                         and dual_disagreement_iou < 0.15
                     ):
                         obj_ratio = max(obj_ratio, 0.70)
+
+                # DSE-B: 고제약(crate_hat < threshold) 시 obj_ratio bonus
+                _dseb_obj_bonus = float(strategy_params_local.get(
+                    "dual_high_crate_obj_ratio_bonus", 0.10
+                ))
+                if _dseb_is_high_crate and _dseb_obj_bonus > 0.0:
+                    obj_ratio += float(_dseb_obj_bonus)
+                    print(
+                        f"[Explorer] DSE-B high-crate bonus: crate_hat={_dseb_crate_hat:.3f} "
+                        f"→ obj_ratio += {_dseb_obj_bonus:.2f}, tilt={_dseb_tilt_eff:.2f}"
+                    )
 
                 obj_ratio = float(np.clip(obj_ratio, ratio_min, ratio_max))
                 pred_ratio = float(np.clip(1.0 - obj_ratio, 0.0, 1.0))
@@ -2333,6 +2358,50 @@ class ExplorerOrchestrator:
                     selected_bounds = list(obj_bounds)
                     if X_obj_sel is not None and X_obj_sel.shape[0] > 0:
                         selected_points = _safe_stack([X_obj_sel], n_dim=len(selected_features))
+
+                # DSE-A: high-confidence misleading pred fallback —
+                # pred_conf이 높지만(>=0.45) iou가 매우 낮으면(<0.10) EI 표면이
+                # 잘못된 클러스터로 과도한 확신을 갖는 패턴. pred 중심을 obj 중심 쪽으로
+                # blend하여 over_shrink 완화. (width은 pred 유지)
+                _dsea_conf_high = float(np.clip(
+                    float(strategy_params_local.get("pred_obj_fallback_conf_high", 0.45)),
+                    0.0, 1.0,
+                ))
+                _dsea_iou_low = float(max(
+                    float(strategy_params_local.get("pred_obj_fallback_iou_low", 0.10)),
+                    0.0,
+                ))
+                _dsea_blend = float(np.clip(
+                    float(strategy_params_local.get("pred_obj_fallback_center_blend", 0.5)),
+                    0.0, 1.0,
+                ))
+                if (
+                    strategy_alias in {"s4_pred", "s8_pred"}
+                    and pred_cluster_confidence is not None
+                    and pred_cluster_confidence >= _dsea_conf_high
+                    and pred_obj_iou is not None
+                    and pred_obj_iou < _dsea_iou_low
+                    and obj_center is not None
+                    and pred_center is not None
+                    and selected_bounds is not None
+                    and not (
+                        pred_obj_miss_case == "pred_obj_disjoint"
+                        and pred_cluster_confidence < 0.35
+                    )
+                ):
+                    target_center = (1.0 - _dsea_blend) * pred_center + _dsea_blend * obj_center
+                    recentred = _recenter_bounds_keep_width(
+                        base_bounds=selected_bounds,
+                        global_bounds=bounds,
+                        target_center=target_center,
+                    )
+                    if recentred is not None:
+                        print(
+                            f"[Explorer] DSE-A pred_obj fallback blend: "
+                            f"conf={pred_cluster_confidence:.3f} iou={pred_obj_iou:.4f} "
+                            f"blend={_dsea_blend:.2f} → center shifted toward obj"
+                        )
+                        selected_bounds = recentred
 
         if selected_bounds is None:
             if strategy_alias in {"s4_pred", "s8_pred"} and pred_bounds is not None:

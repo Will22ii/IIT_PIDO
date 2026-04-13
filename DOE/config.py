@@ -18,7 +18,7 @@ class DOESystemConfig:
     # =========================
     n_samples: int = 120  # DOE 전체 샘플 수 (추가 DOE면 total_budget)
     force_baseline_initial: bool = False  # 초기 DOE에서 기준점 강제 포함 여부
-    initial_corner_ratio: float = 0.05  # 초기 DOE에서 corner 샘플 비율
+    initial_corner_ratio: float = 0.03  # 초기 DOE에서 corner 샘플 비율
     # initial corner ratio adaptive policy (low N/p 구간에서만 완화)
     initial_corner_adaptive_enabled: bool = False
     initial_corner_adaptive_np_ratio_max: float = 10.0
@@ -46,7 +46,7 @@ class DOESystemConfig:
     # global_random_ratio는 현재 전달/적용하지 않습니다.
     # 전역 X_exec은 boundary/margin/top 버킷을 우선 배정하고,
     # 남은 슬롯을 random으로 채우는 정책을 사용합니다.
-    global_boundary_ratio: float = 0.05  # 전역 X_plan/X_exec 경계 샘플 비율 (G: 0.21→0.15, top-k 비율 상향에 따른 조정)
+    global_boundary_ratio: float = 0.04  # 전역 X_plan/X_exec 경계 샘플 비율 (G: 0.21→0.15, top-k 비율 상향에 따른 조정)
     global_margin_ratio: float = 0.3  # 전역 X_exec 중 제약 경계(margin) 버킷 비율
     # 전역 margin 버킷을 제약 부분집합 기반으로 배분할지 여부
     # - True: feasible 후보 내에서 subset margin(min) 기준으로 가중 배분
@@ -61,11 +61,11 @@ class DOESystemConfig:
     global_boundary_constraint_boost: float = 1.2
     # 제약 문제에서 boundary 예산의 절반을 margin+boundary 교차 bucket에 배정
     # margin+boundary: margin 작고 AND 변수 1개+ 경계 근처인 점 우선
-    global_boundary_margin_cross_ratio: float = 0.5
+    global_boundary_margin_cross_ratio: float = 0.6
     # margin+boundary 교차 판정: 변수 값이 경계에서 이 비율 이내면 "경계 근처"
-    global_boundary_margin_near_tol: float = 0.05
+    global_boundary_margin_near_tol: float = 0.03
     # margin bucket 내 objective-aware 복합 정렬 가중치 (alpha: margin 비중, 1-alpha: objective 비중)
-    global_margin_obj_alpha: float = 0.6
+    global_margin_obj_alpha: float = 0.75
 
     # =========================
     # 3) 추가 DOE: X_plan 크기
@@ -159,6 +159,11 @@ class DOESystemConfig:
     phase2_min_usable_np_ratio: float = 10.0  # phase1->2 전환 usable N/p 기준치
     phase2_np_ratio_cap_scale: float = 0.75  # phase2 N/p gate 동적 상한 스케일: min(base, scale * total_budget/p_dim)
     phase2_min_used_budget_ratio: float = 0.30  # phase2 진입 최소 예산 소진 비율 (used/total)
+    # DSE-C: 고제약(feasible rate 낮음) 문제에서 phase2 조기 진입 억제용 상향 임계
+    # constraint_rate_hat = feasible_count/generated_count (1.0=무제약, 낮을수록 고제약)
+    # crate_hat < high_crate_threshold 이면 phase2 진입에 phase2_min_used_budget_ratio_high_crate 적용
+    phase2_min_used_budget_ratio_high_crate: float = 0.50
+    phase2_high_crate_threshold: float = 0.85  # crate_hat < 0.85 ⇒ "고제약"으로 간주
     # Gate 판정 스무딩(EMA) 설정: raw는 항상 저장하고, 전환 판정은 EMA 사용 가능
     gate_smoothing_enabled: bool = True  # Gate score EMA 스무딩 사용
     gate_ema_alpha: float = 0.35  # EMA 계수(0~1, 클수록 최근 값 반영 비중 증가)

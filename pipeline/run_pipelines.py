@@ -119,8 +119,8 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
                 "dual_high_dim_threshold": 6,
                 "dual_high_dim_obj_bonus": 0.08,
                 "dual_disagree_l1_threshold": 0.35,
-                "dual_disagree_iou_threshold": 0.30,
-                "dual_disagree_obj_bonus": 0.08,
+                "dual_disagree_iou_threshold": 0.20,  # DSE-D: 0.30→0.20
+                "dual_disagree_obj_bonus": 0.12,  # DSE-D: 0.08→0.12
                 "dual_obj_ratio_min": 0.25,
                 "dual_obj_ratio_max": 0.75,
                 "dual_center_tilt_strength": 0.45,
@@ -129,7 +129,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
                 "pred_cluster_beta": 0.20,
                 "pred_refine_bounds_scale": 1.30,
                 "pred_multistart_det_fraction": 0.35,
-                "obj_diversity_extra_clusters": 1,
+                "obj_diversity_extra_clusters": 2,  # DSE-E: 1→2
                 "obj_diversity_weight": 0.35,
                 "obj_diversity_min_distance": 0.22,
                 "obj_diversity_close_penalty": 0.80,
@@ -157,8 +157,8 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
                 "dual_high_dim_threshold": 6,
                 "dual_high_dim_obj_bonus": 0.08,
                 "dual_disagree_l1_threshold": 0.35,
-                "dual_disagree_iou_threshold": 0.30,
-                "dual_disagree_obj_bonus": 0.08,
+                "dual_disagree_iou_threshold": 0.20,  # DSE-D: 0.30→0.20
+                "dual_disagree_obj_bonus": 0.12,  # DSE-D: 0.08→0.12
                 "dual_obj_ratio_min": 0.25,
                 "dual_obj_ratio_max": 0.75,
                 "dual_center_tilt_strength": 0.45,
@@ -167,7 +167,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
                 "pred_cluster_beta": 0.20,
                 "pred_refine_bounds_scale": 1.30,
                 "pred_multistart_det_fraction": 0.35,
-                "obj_diversity_extra_clusters": 1,
+                "obj_diversity_extra_clusters": 2,  # DSE-E: 1→2
                 "obj_diversity_weight": 0.35,
                 "obj_diversity_min_distance": 0.22,
                 "obj_diversity_close_penalty": 0.80,
@@ -217,7 +217,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
             "strategy_params": {
                 "mode": "obj_refine_ei",
                 "max_volume_ratio_target": 0.249,  # K: obj 전략 volume clamp 추가
-                "obj_diversity_extra_clusters": 1,
+                "obj_diversity_extra_clusters": 2,  # DSE-E: 1→2
                 "obj_diversity_weight": 0.35,
                 "obj_diversity_min_distance": 0.22,
                 "obj_diversity_close_penalty": 0.80,
@@ -235,7 +235,7 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
             "strategy_params": {
                 "mode": "obj_refine_lcb",
                 "max_volume_ratio_target": 0.249,  # K: obj 전략 volume clamp 추가
-                "obj_diversity_extra_clusters": 1,
+                "obj_diversity_extra_clusters": 2,  # DSE-E: 1→2
                 "obj_diversity_weight": 0.35,
                 "obj_diversity_min_distance": 0.22,
                 "obj_diversity_close_penalty": 0.80,

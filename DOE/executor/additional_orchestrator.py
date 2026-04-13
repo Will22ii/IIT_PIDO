@@ -114,6 +114,8 @@ class AdditionalDOEOrchestrator:
         phase2_min_usable_np_ratio: float = 15.0,
         phase2_np_ratio_cap_scale: float = 0.75,
         phase2_min_used_budget_ratio: float = 0.3,
+        phase2_min_used_budget_ratio_high_crate: float = 0.5,
+        phase2_high_crate_threshold: float = 0.85,
         early_stop_min_used_budget_ratio: float = 0.5,
         early_stop_min_usable_np_ratio: float = 20.0,
         stop_span_ratio_threshold: float = 0.3,
@@ -289,6 +291,12 @@ class AdditionalDOEOrchestrator:
         self.phase2_min_used_budget_ratio = float(phase2_min_used_budget_ratio)
         if not (0.0 <= self.phase2_min_used_budget_ratio <= 1.0):
             raise ValueError("phase2_min_used_budget_ratio must be in [0, 1]")
+        self.phase2_min_used_budget_ratio_high_crate = float(phase2_min_used_budget_ratio_high_crate)
+        if not (0.0 <= self.phase2_min_used_budget_ratio_high_crate <= 1.0):
+            raise ValueError("phase2_min_used_budget_ratio_high_crate must be in [0, 1]")
+        self.phase2_high_crate_threshold = float(phase2_high_crate_threshold)
+        if not (0.0 <= self.phase2_high_crate_threshold <= 1.0):
+            raise ValueError("phase2_high_crate_threshold must be in [0, 1]")
         self.early_stop_min_used_budget_ratio = float(early_stop_min_used_budget_ratio)
         if not (0.0 <= self.early_stop_min_used_budget_ratio <= 1.0):
             raise ValueError("early_stop_min_used_budget_ratio must be in [0, 1]")
@@ -1178,7 +1186,124 @@ class AdditionalDOEOrchestrator:
                     self._set_failure("FAILED_FILTER_MIN", stage=0)
                     return self._export_results()
 
-                pick_idx = self.rng.choice(np.arange(len(pool_X)), size=n_regular_target, replace=False)
+                selected_idx: list[int] = []
+                selected_set: set[int] = set()
+
+                def _take(candidates: list[int], k: int) -> list[int]:
+                    if k <= 0:
+                        return []
+                    out: list[int] = []
+                    for cid in candidates:
+                        if cid in selected_set:
+                            continue
+                        out.append(int(cid))
+                        if len(out) >= k:
+                            break
+                    return out
+
+                n_margin_init = int(round(n_regular_target * self.global_margin_ratio))
+                n_margin_init = min(max(n_margin_init, 0), n_regular_target)
+                margin_subset_specs: list[tuple[tuple[str, ...], float]] = []
+                if self.global_margin_subset_enabled and n_margin_init > 0:
+                    pre_constraint_ids = self._extract_pre_constraint_ids(pool_constraints)
+                    if len(pre_constraint_ids) >= 2:
+                        margin_subset_specs = self._build_margin_subset_specs(pre_constraint_ids)
+
+                if n_margin_init > 0:
+                    if margin_subset_specs:
+                        n_constraints = len(self._extract_pre_constraint_ids(pool_constraints))
+                        edge_k = {1, int(n_constraints)}
+                        subset_priority = sorted(
+                            range(len(margin_subset_specs)),
+                            key=lambda gi: (
+                                0 if len(margin_subset_specs[gi][0]) in edge_k else 1,
+                                -len(margin_subset_specs[gi][0]),
+                                margin_subset_specs[gi][0],
+                            ),
+                        )
+                        weights = [float(margin_subset_specs[gi][1]) for gi in range(len(margin_subset_specs))]
+                        enforce_min_one = n_margin_init >= len(margin_subset_specs)
+                        quotas = self._allocate_weighted_subset_quotas(
+                            n_total=int(n_margin_init),
+                            weights=weights,
+                            enforce_min_one=bool(enforce_min_one),
+                        )
+                        candidate_margin_maps: list[dict[str, float]] = []
+                        for payload in pool_constraints:
+                            cur: dict[str, float] = {}
+                            if isinstance(payload, dict):
+                                for key, cinfo in payload.items():
+                                    if not isinstance(cinfo, dict):
+                                        continue
+                                    scope = str(cinfo.get("scope", "pre")).strip().lower()
+                                    if scope != "pre":
+                                        continue
+                                    cid = str(cinfo.get("id", key)).strip()
+                                    mv = cinfo.get("margin")
+                                    if cid:
+                                        try:
+                                            mval = float(mv)
+                                            if np.isfinite(mval):
+                                                cur[cid] = mval
+                                        except Exception:
+                                            continue
+                            candidate_margin_maps.append(cur)
+
+                        subset_orders: list[list[int]] = []
+                        for subset_ids, _w in margin_subset_specs:
+                            ranked: list[tuple[float, int]] = []
+                            for idx in range(len(pool_X)):
+                                m_map = candidate_margin_maps[idx] if idx < len(candidate_margin_maps) else {}
+                                vals = [m_map.get(cid) for cid in subset_ids]
+                                if any(v is None for v in vals):
+                                    continue
+                                s_margin = float(np.min(np.asarray(vals, dtype=float)))
+                                ranked.append((s_margin, int(idx)))
+                            ranked.sort(key=lambda t: (t[0], t[1]))
+                            subset_orders.append([idx for _, idx in ranked])
+
+                        allocated = [0 for _ in quotas]
+                        if enforce_min_one:
+                            for gi in subset_priority:
+                                picked = _take(subset_orders[gi], 1)
+                                if picked:
+                                    selected_idx.extend(picked)
+                                    selected_set.update(picked)
+                                    allocated[gi] += len(picked)
+
+                        for gi in subset_priority:
+                            need = max(int(quotas[gi]) - int(allocated[gi]), 0)
+                            if need <= 0:
+                                continue
+                            picked = _take(subset_orders[gi], need)
+                            if picked:
+                                selected_idx.extend(picked)
+                                selected_set.update(picked)
+                                allocated[gi] += len(picked)
+                    else:
+                        margin_order = np.argsort(np.asarray(pool_margins, dtype=float)).astype(int).tolist()
+                        picked = _take(margin_order, n_margin_init)
+                        selected_idx.extend(picked)
+                        selected_set.update(picked)
+
+                remaining_slots = max(int(n_regular_target - len(selected_idx)), 0)
+                if remaining_slots > 0:
+                    remain_candidates = [idx for idx in range(len(pool_X)) if idx not in selected_set]
+                    if remain_candidates:
+                        n_fill = min(remaining_slots, len(remain_candidates))
+                        fill = self.rng.choice(
+                            np.asarray(remain_candidates, dtype=int),
+                            size=n_fill,
+                            replace=False,
+                        ).astype(int).tolist()
+                        selected_idx.extend(fill)
+                        selected_set.update(fill)
+
+                if len(selected_idx) < n_regular_target:
+                    fallback_candidates = [idx for idx in range(len(pool_X)) if idx not in selected_set]
+                    selected_idx.extend(fallback_candidates[: max(n_regular_target - len(selected_idx), 0)])
+
+                pick_idx = np.asarray(selected_idx[:n_regular_target], dtype=int)
                 X_regular = np.vstack([pool_X[i].reshape(1, -1) for i in pick_idx]).astype(float)
                 regular_constraints = [pool_constraints[i] for i in pick_idx]
                 regular_margins = [float(pool_margins[i]) for i in pick_idx]
@@ -1695,7 +1820,16 @@ class AdditionalDOEOrchestrator:
                     print(f"[AdditionalDOE] gate_stop=True, executing final batch (stage={round_idx})")
 
                 can_enter_phase2_by_data = bool(usable_np_ratio > phase2_np_gate)
-                can_enter_phase2_by_budget = bool(used_budget_ratio >= self.phase2_min_used_budget_ratio)
+                # DSE-C: 고제약(crate_hat < high_crate_threshold) 시 phase2 진입 최소 예산 상향
+                _eff_phase2_min_used_budget = (
+                    self.phase2_min_used_budget_ratio_high_crate
+                    if (
+                        self.has_pre_constraints
+                        and float(self.constraint_rate_hat) < self.phase2_high_crate_threshold
+                    )
+                    else self.phase2_min_used_budget_ratio
+                )
+                can_enter_phase2_by_budget = bool(used_budget_ratio >= _eff_phase2_min_used_budget)
                 gate1_score_for_phase2 = gate1_score_raw
                 gate2_score_for_phase2 = gate2_score_raw
                 if use_ema and self.gate_smoothing_use_for_phase2:
@@ -1883,6 +2017,8 @@ class AdditionalDOEOrchestrator:
                 n_boundary_exec = min(max(n_boundary_exec, 0), n_pick)
                 n_margin_exec = int(round(n_pick * self.global_margin_ratio))
                 n_margin_exec = min(max(n_margin_exec, 0), n_pick)
+                if not self.has_pre_constraints:
+                    n_margin_exec = 0
                 n_top_exec = int(round(n_pick * self.global_top_ratio))
                 n_top_exec = min(max(n_top_exec, 0), n_pick)
                 margin_subset_specs: list[tuple[tuple[str, ...], float]] = []
@@ -2757,6 +2893,8 @@ class AdditionalDOEOrchestrator:
             "phase2_min_usable_np_ratio": float(self.phase2_min_usable_np_ratio),
             "phase2_np_ratio_cap_scale": float(self.phase2_np_ratio_cap_scale),
             "phase2_min_used_budget_ratio": float(self.phase2_min_used_budget_ratio),
+            "phase2_min_used_budget_ratio_high_crate": float(self.phase2_min_used_budget_ratio_high_crate),
+            "phase2_high_crate_threshold": float(self.phase2_high_crate_threshold),
             "phase2_np_gate_last": phase2_np_gate_last,
             "gate2_phase_threshold_used_last": gate2_phase_threshold_used_last,
             "early_stop_min_used_budget_ratio": float(self.early_stop_min_used_budget_ratio),

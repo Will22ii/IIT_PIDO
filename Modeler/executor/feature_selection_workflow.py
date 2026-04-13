@@ -236,6 +236,11 @@ def run_fi_selection_workflow(
         bootstrap_min_freq_eff = float(
             getattr(fs_config, "bootstrap_min_freq_very_low_data", bootstrap_min_freq_eff)
         )
+    elif bool(low_data):
+        # FS-1: low_data & n>=very_low 구간 — dummy leak 억제용 상향
+        bootstrap_min_freq_eff = float(
+            getattr(fs_config, "bootstrap_min_freq_low_data", bootstrap_min_freq_eff)
+        )
 
     if _bs_active:
         selected_df = run_bootstrap_stability(
