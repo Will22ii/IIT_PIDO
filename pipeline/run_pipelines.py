@@ -39,278 +39,237 @@ class ExplorerStrategy:
     overrides: dict[str, Any]
 
 
-PROBLEM_SUITE: list[ProblemCase] = [
-    # ProblemCase(
-    #     problem_name="rosenbrock",
-    #     known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
-    #     n_samples=450,
-    #     repeats=100,
-    # ),
-    ProblemCase(
+PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
+    "rosenbrock": ProblemCase(
+        problem_name="rosenbrock",
+        known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
+        n_samples=450,
+        repeats=100,
+    ),
+    "cantilever_beam": ProblemCase(
         problem_name="cantilever_beam",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         n_samples=90,
         repeats=50,
     ),
-    # ProblemCase(
-    #     problem_name="goldstein_price",
-    #     known_optimum={"x1": 0.0, "x2": -1.0},
-    #     n_samples=150,
-    #     repeats=500,
-    # ),
+    "goldstein_price": ProblemCase(
+        problem_name="goldstein_price",
+        known_optimum={"x1": 0.0, "x2": -1.0},
+        n_samples=150,
+        repeats=500,
+    ),
+    "six_hump_camel": ProblemCase(
+        problem_name="six_hump_camel",
+        known_optimum=[
+            {"x1": 0.0898, "x2": -0.7126},
+            {"x1": -0.0898, "x2": 0.7126},
+        ],
+        n_samples=50,
+        repeats=250,
+    ),
+    "rosenbrock_nodummy": ProblemCase(
+        problem_name="rosenbrock_nodummy",
+        known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
+        n_samples=450,
+        repeats=10,
+    ),
+    "cantilever_beam_nodummy": ProblemCase(
+        problem_name="cantilever_beam_nodummy",
+        known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
+        n_samples=45,
+        repeats=25,
+    ),
+    "goldstein_price_nodummy": ProblemCase(
+        problem_name="goldstein_price_nodummy",
+        known_optimum={"x1": 0.0, "x2": -1.0},
+        n_samples=150,
+        repeats=50,
+    ),
+    "six_hump_camel_nodummy": ProblemCase(
+        problem_name="six_hump_camel_nodummy",
+        known_optimum=[
+            {"x1": 0.0898, "x2": -0.7126},
+            {"x1": -0.0898, "x2": 0.7126},
+        ],
+        n_samples=15,
+        repeats=25,
+    ),
+}
 
-    # ProblemCase(
-    #     problem_name="six_hump_camel",
-    #     known_optimum=[
-    #         {"x1": 0.0898, "x2": -0.7126},
-    #         {"x1": -0.0898, "x2": 0.7126},
-    #     ],
-    #     n_samples=50,
-    #     repeats=250,
-    # ),
-
-    # ProblemCase(
-    #     problem_name="rosenbrock_nodummy",
-    #     known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
-    #     n_samples=450,
-    #     repeats=10,
-    # ),
-
-    # ProblemCase(
-    #     problem_name="cantilever_beam_nodummy",
-    #     known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
-    #     n_samples=45,
-    #     repeats=25,
-    # ),
-
-    # ProblemCase(
-    #     problem_name="goldstein_price_nodummy",
-    #     known_optimum={"x1": 0.0, "x2": -1.0},
-    #     n_samples=150,
-    #     repeats=50,
-    # ),
-
-    # ProblemCase(
-    #     problem_name="six_hump_camel_nodummy",
-    #     known_optimum=[
-    #         {"x1": 0.0898, "x2": -0.7126},
-    #         {"x1": -0.0898, "x2": 0.7126},
-    #     ],
-    #     n_samples=15,
-    #     repeats=25,
-    # ),
+# Activate only the cases used in this run.
+ACTIVE_PROBLEM_CASES: list[str] = [
+    "cantilever_beam",
 ]
+
+PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIVE_PROBLEM_CASES]
+
+
+def _strategy_overrides(
+    *,
+    strategy_params: dict[str, Any],
+    quantile_threshold: float,
+    bounds_margin_ratio: float,
+    dbscan_eps_quantile: float,
+    bounds_expansion_mode: str = "fi_aware",
+) -> dict[str, Any]:
+    return {
+        "strategy_params": dict(strategy_params),
+        "bounds_expansion_mode": bounds_expansion_mode,
+        "quantile_threshold": quantile_threshold,
+        "bounds_margin_ratio": bounds_margin_ratio,
+        "dbscan_eps_quantile": dbscan_eps_quantile,
+    }
+
+
+# DUAL base (S4/S8)
+_DUAL_SHARED_PARAMS: dict[str, Any] = {
+    "max_volume_ratio_target": 0.249,
+    "dual_policy_mode": "np_dim_disagreement_v1",
+    "dual_total_starts": 40,
+    "dual_np_ratio_low": 12.0,
+    "dual_np_ratio_high": 24.0,
+    "dual_obj_ratio_low_np": 0.62,
+    "dual_obj_ratio_mid_np": 0.50,
+    "dual_obj_ratio_high_np": 0.42,
+    "dual_high_dim_threshold": 6,
+    "dual_high_dim_obj_bonus": 0.08,
+    "dual_disagree_l1_threshold": 0.35,
+    "dual_disagree_iou_threshold": 0.20,
+    "dual_disagree_obj_bonus": 0.12,
+    "dual_obj_ratio_min": 0.25,
+    "dual_obj_ratio_max": 0.75,
+    "dual_center_tilt_strength": 0.45,
+    "dual_center_tilt_aniso_gamma": 0.6,
+    "dual_center_bias_obj_ratio_weight": 0.50,
+    "pred_cluster_beta": 0.20,
+    "pred_refine_bounds_scale": 1.30,
+    "pred_multistart_det_fraction": 0.35,
+    "obj_diversity_extra_clusters": 2,
+    "obj_diversity_weight": 0.35,
+    "obj_diversity_min_distance": 0.22,
+    "obj_diversity_close_penalty": 0.80,
+    "obj_diversity_min_dim": 4,
+}
+
+# PRED base (S4/S8): includes pred-obj disjoint safety fallback.
+_PRED_SHARED_PARAMS: dict[str, Any] = {
+    "max_volume_ratio_target": 0.249,
+    "pred_cluster_beta": 0.20,
+    "pred_refine_bounds_scale": 1.30,
+    "pred_multistart_det_fraction": 0.35,
+    "pred_cluster_confidence_low": 0.40,
+    "pred_refine_shift_high": 0.30,
+    "pred_obj_disjoint_iou": 0.05,
+    "pred_obj_fallback_conf_high": 0.40,
+    "pred_obj_fallback_iou_low": 0.18,
+    "pred_obj_fallback_center_blend": 0.65,
+}
+
+# OBJ base (S4/S8)
+_OBJ_SHARED_PARAMS: dict[str, Any] = {
+    "max_volume_ratio_target": 0.249,
+    "obj_diversity_extra_clusters": 2,
+    "obj_diversity_weight": 0.35,
+    "obj_diversity_min_distance": 0.22,
+    "obj_diversity_close_penalty": 0.80,
+    "obj_diversity_min_dim": 4,
+}
+
+# Routed dual variants (SR/SA)
+_ROUTED_DUAL_SHARED_PARAMS: dict[str, Any] = {
+    "mode": "dual_refine_ei",
+    "max_volume_ratio_target": 0.249,
+    "dual_policy_mode": "routed_v1",
+    "dual_total_starts": 40,
+    "dual_obj_ratio_min": 0.25,
+    "dual_obj_ratio_max": 0.85,
+    "dual_center_tilt_strength": 0.45,
+    "dual_center_tilt_aniso_gamma": 0.6,
+    "dual_disagree_iou_ref": 0.30,
+    "pred_cluster_beta": 0.20,
+    "pred_refine_bounds_scale": 1.50,
+    "pred_multistart_det_fraction": 0.35,
+    "pred_cluster_max_count": 22,
+    "obj_diversity_extra_clusters": 3,
+    "obj_diversity_weight": 0.35,
+    "obj_diversity_min_distance": 0.18,
+    "obj_diversity_close_penalty": 0.80,
+    "obj_diversity_min_dim": 4,
+}
 
 
 EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
     ExplorerStrategy(
         "S4_dual",
-        {
-            "strategy_params": {
-                "mode": "dual_refine_ei",
-                "max_volume_ratio_target": 0.249,
-                "dual_policy_mode": "np_dim_disagreement_v1",
-                "dual_total_starts": 40,
-                "dual_np_ratio_low": 12.0,
-                "dual_np_ratio_high": 24.0,
-                "dual_obj_ratio_low_np": 0.62,
-                "dual_obj_ratio_mid_np": 0.50,
-                "dual_obj_ratio_high_np": 0.42,
-                "dual_high_dim_threshold": 6,
-                "dual_high_dim_obj_bonus": 0.08,
-                "dual_disagree_l1_threshold": 0.35,
-                "dual_disagree_iou_threshold": 0.20,  # DSE-D: 0.30→0.20
-                "dual_disagree_obj_bonus": 0.12,  # DSE-D: 0.08→0.12
-                "dual_obj_ratio_min": 0.25,
-                "dual_obj_ratio_max": 0.75,
-                "dual_center_tilt_strength": 0.45,
-                "dual_center_tilt_aniso_gamma": 0.6,
-                "dual_center_bias_obj_ratio_weight": 0.50,
-                "pred_cluster_beta": 0.20,
-                "pred_refine_bounds_scale": 1.30,
-                "pred_multistart_det_fraction": 0.35,
-                "obj_diversity_extra_clusters": 2,  # DSE-E: 1→2
-                "obj_diversity_weight": 0.35,
-                "obj_diversity_min_distance": 0.22,
-                "obj_diversity_close_penalty": 0.80,
-                "obj_diversity_min_dim": 4,
-            },
-            "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.89,  # I: 0.94→0.89
-            "bounds_margin_ratio": 0.02,
-            "dbscan_eps_quantile": 0.88,
-        },
+        _strategy_overrides(
+            strategy_params={**_DUAL_SHARED_PARAMS, "mode": "dual_refine_ei"},
+            quantile_threshold=0.89,
+            bounds_margin_ratio=0.02,
+            dbscan_eps_quantile=0.88,
+        ),
     ),
     ExplorerStrategy(
         "S8_dual",
-        {
-            "strategy_params": {
-                "mode": "dual_gradient_refine",
-                "max_volume_ratio_target": 0.249,
-                "dual_policy_mode": "np_dim_disagreement_v1",
-                "dual_total_starts": 40,
-                "dual_np_ratio_low": 12.0,
-                "dual_np_ratio_high": 24.0,
-                "dual_obj_ratio_low_np": 0.62,
-                "dual_obj_ratio_mid_np": 0.50,
-                "dual_obj_ratio_high_np": 0.42,
-                "dual_high_dim_threshold": 6,
-                "dual_high_dim_obj_bonus": 0.08,
-                "dual_disagree_l1_threshold": 0.35,
-                "dual_disagree_iou_threshold": 0.20,  # DSE-D: 0.30→0.20
-                "dual_disagree_obj_bonus": 0.12,  # DSE-D: 0.08→0.12
-                "dual_obj_ratio_min": 0.25,
-                "dual_obj_ratio_max": 0.75,
-                "dual_center_tilt_strength": 0.45,
-                "dual_center_tilt_aniso_gamma": 0.6,
-                "dual_center_bias_obj_ratio_weight": 0.50,
-                "pred_cluster_beta": 0.20,
-                "pred_refine_bounds_scale": 1.30,
-                "pred_multistart_det_fraction": 0.35,
-                "obj_diversity_extra_clusters": 2,  # DSE-E: 1→2
-                "obj_diversity_weight": 0.35,
-                "obj_diversity_min_distance": 0.22,
-                "obj_diversity_close_penalty": 0.80,
-                "obj_diversity_min_dim": 4,
-            },
-            "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.89,  # I: 0.94→0.89
-            "bounds_margin_ratio": 0.02,
-            "dbscan_eps_quantile": 0.88,
-        },
+        _strategy_overrides(
+            strategy_params={**_DUAL_SHARED_PARAMS, "mode": "dual_gradient_refine"},
+            quantile_threshold=0.89,
+            bounds_margin_ratio=0.02,
+            dbscan_eps_quantile=0.88,
+        ),
     ),
     ExplorerStrategy(
         "S4_pred",
-        {
-            "strategy_params": {
-                "mode": "pred_refine_ei",
-                "max_volume_ratio_target": 0.249,  # K: pred 전략 volume clamp 추가
-                "pred_cluster_beta": 0.20,
-                "pred_refine_bounds_scale": 1.30,
-                "pred_multistart_det_fraction": 0.35,
-            },
-            "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.86,
-            "bounds_margin_ratio": 0.05,
-            "dbscan_eps_quantile": 0.92,
-        },
+        _strategy_overrides(
+            strategy_params={**_PRED_SHARED_PARAMS, "mode": "pred_refine_ei"},
+            quantile_threshold=0.86,
+            bounds_margin_ratio=0.05,
+            dbscan_eps_quantile=0.92,
+        ),
     ),
     ExplorerStrategy(
         "S8_pred",
-        {
-            "strategy_params": {
-                "mode": "pred_refine_lcb",
-                "max_volume_ratio_target": 0.249,  # K: pred 전략 volume clamp 추가
-                "pred_cluster_beta": 0.20,
-                "pred_refine_bounds_scale": 1.30,
-                "pred_multistart_det_fraction": 0.35,
-            },
-            "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.86,
-            "bounds_margin_ratio": 0.05,
-            "dbscan_eps_quantile": 0.92,
-        },
+        _strategy_overrides(
+            strategy_params={**_PRED_SHARED_PARAMS, "mode": "pred_refine_lcb"},
+            quantile_threshold=0.86,
+            bounds_margin_ratio=0.05,
+            dbscan_eps_quantile=0.92,
+        ),
     ),
     ExplorerStrategy(
         "S4_obj",
-        {
-            "strategy_params": {
-                "mode": "obj_refine_ei",
-                "max_volume_ratio_target": 0.249,  # K: obj 전략 volume clamp 추가
-                "obj_diversity_extra_clusters": 2,  # DSE-E: 1→2
-                "obj_diversity_weight": 0.35,
-                "obj_diversity_min_distance": 0.22,
-                "obj_diversity_close_penalty": 0.80,
-                "obj_diversity_min_dim": 4,
-            },
-            "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.88,  # I: 0.90→0.88 (over_wide 방지 부분 롤백)
-            "bounds_margin_ratio": 0.03,
-            "dbscan_eps_quantile": 0.90,
-        },
+        _strategy_overrides(
+            strategy_params={**_OBJ_SHARED_PARAMS, "mode": "obj_refine_ei"},
+            quantile_threshold=0.88,
+            bounds_margin_ratio=0.03,
+            dbscan_eps_quantile=0.90,
+        ),
     ),
     ExplorerStrategy(
         "S8_obj",
-        {
-            "strategy_params": {
-                "mode": "obj_refine_lcb",
-                "max_volume_ratio_target": 0.249,  # K: obj 전략 volume clamp 추가
-                "obj_diversity_extra_clusters": 2,  # DSE-E: 1→2
-                "obj_diversity_weight": 0.35,
-                "obj_diversity_min_distance": 0.22,
-                "obj_diversity_close_penalty": 0.80,
-                "obj_diversity_min_dim": 4,
-            },
-            "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.88,  # I: 0.90→0.88 (over_wide 방지 부분 롤백)
-            "bounds_margin_ratio": 0.03,
-            "dbscan_eps_quantile": 0.90,
-        },
+        _strategy_overrides(
+            strategy_params={**_OBJ_SHARED_PARAMS, "mode": "obj_refine_lcb"},
+            quantile_threshold=0.88,
+            bounds_margin_ratio=0.03,
+            dbscan_eps_quantile=0.90,
+        ),
     ),
-    # ── II안: 라우팅 기반 DUAL (routed_v1 정책) ──
-    # obj_ratio를 p_dim/n_per_p/constraints 기반으로 자동 결정.
-    # 연속 disagreement 보정 포함. ratio_max=0.85로 OBJ-like 동작 가능.
     ExplorerStrategy(
         "SR_dual",
-        {
-            "strategy_params": {
-                "mode": "dual_refine_ei",
-                "max_volume_ratio_target": 0.249,
-                "dual_policy_mode": "routed_v1",
-                "dual_total_starts": 40,
-                "dual_obj_ratio_min": 0.25,
-                "dual_obj_ratio_max": 0.85,
-                "dual_center_tilt_strength": 0.45,
-                "dual_center_tilt_aniso_gamma": 0.6,
-                "dual_disagree_iou_ref": 0.30,
-                "pred_cluster_beta": 0.20,
-                "pred_refine_bounds_scale": 1.50,
-                "pred_multistart_det_fraction": 0.35,
-                "pred_cluster_max_count": 22,
-                "obj_diversity_extra_clusters": 3,
-                "obj_diversity_weight": 0.35,
-                "obj_diversity_min_distance": 0.18,
-                "obj_diversity_close_penalty": 0.80,
-                "obj_diversity_min_dim": 4,
-            },
-            "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.86,
-            "bounds_margin_ratio": 0.03,
-            "dbscan_eps_quantile": 0.88,
-        },
+        _strategy_overrides(
+            strategy_params={**_ROUTED_DUAL_SHARED_PARAMS},
+            quantile_threshold=0.86,
+            bounds_margin_ratio=0.03,
+            dbscan_eps_quantile=0.88,
+        ),
     ),
-    # ── III-A: Adaptive EI/LCB 분할 DUAL ──
-    # pred 측은 EI(탐색), obj 측은 LCB(수렴)로 acquisition 분할.
-    # routed_v1 정책과 결합하여 최적 obj_ratio + 분할 acquisition 동시 적용.
     ExplorerStrategy(
         "SA_dual",
-        {
-            "strategy_params": {
-                "mode": "dual_refine_ei",
-                "max_volume_ratio_target": 0.249,
-                "dual_policy_mode": "routed_v1",
-                "dual_acq_split": True,
-                "dual_total_starts": 40,
-                "dual_obj_ratio_min": 0.25,
-                "dual_obj_ratio_max": 0.85,
-                "dual_center_tilt_strength": 0.45,
-                "dual_center_tilt_aniso_gamma": 0.6,
-                "dual_disagree_iou_ref": 0.30,
-                "pred_cluster_beta": 0.20,
-                "pred_refine_bounds_scale": 1.50,
-                "pred_multistart_det_fraction": 0.35,
-                "pred_cluster_max_count": 22,
-                "obj_diversity_extra_clusters": 3,
-                "obj_diversity_weight": 0.35,
-                "obj_diversity_min_distance": 0.18,
-                "obj_diversity_close_penalty": 0.80,
-                "obj_diversity_min_dim": 4,
-            },
-            "bounds_expansion_mode": "fi_aware",
-            "quantile_threshold": 0.86,
-            "bounds_margin_ratio": 0.03,
-            "dbscan_eps_quantile": 0.88,
-        },
+        _strategy_overrides(
+            strategy_params={**_ROUTED_DUAL_SHARED_PARAMS, "dual_acq_split": True},
+            quantile_threshold=0.86,
+            bounds_margin_ratio=0.03,
+            dbscan_eps_quantile=0.88,
+        ),
     ),
 ]
 

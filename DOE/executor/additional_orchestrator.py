@@ -95,6 +95,7 @@ class AdditionalDOEOrchestrator:
         budget_policy: str = "consume_all",
         phase1_global_ratio: Optional[float] = None,
         phase2_global_ratio: Optional[float] = None,
+        phase2_disable_boundary_sampling: bool = True,
         phase2_gate1_score_min: float = 0.55,
         phase2_gate2_score_min: float = 0.75,
         phase2_gate2_score_sticky_min: float = 0.65,
@@ -116,6 +117,19 @@ class AdditionalDOEOrchestrator:
         phase2_min_used_budget_ratio: float = 0.3,
         phase2_min_used_budget_ratio_high_crate: float = 0.5,
         phase2_high_crate_threshold: float = 0.85,
+        phase2_g2_saturation_threshold: float = 0.92,
+        phase2_g2_saturation_min_remaining: float = 0.20,
+        global_bucket_minima_enabled: bool = True,
+        global_bucket_minima_strict: bool = False,
+        global_boundary_high_crate_threshold: float = 0.80,
+        phase1_min_top: int = 1,
+        phase1_min_margin: int = 1,
+        phase1_min_boundary_any: int = 1,
+        phase1_min_boundary_classic_hc: int = 1,
+        phase1_min_boundary_cross_hc: int = 1,
+        phase2_min_top: int = 1,
+        phase2_min_margin: int = 1,
+        global_bucket_plan_multiplier: int = 3,
         early_stop_min_used_budget_ratio: float = 0.5,
         early_stop_min_usable_np_ratio: float = 20.0,
         stop_span_ratio_threshold: float = 0.3,
@@ -242,6 +256,7 @@ class AdditionalDOEOrchestrator:
             raise ValueError("phase1_global_ratio and phase2_global_ratio are required")
         self.phase1_global_ratio = float(phase1_global_ratio)
         self.phase2_global_ratio = float(phase2_global_ratio)
+        self.phase2_disable_boundary_sampling = bool(phase2_disable_boundary_sampling)
         self.phase2_gate1_score_min = float(phase2_gate1_score_min)
         self.phase2_gate2_score_min = float(phase2_gate2_score_min)
         self.phase2_gate2_score_sticky_min = float(phase2_gate2_score_sticky_min)
@@ -297,6 +312,31 @@ class AdditionalDOEOrchestrator:
         self.phase2_high_crate_threshold = float(phase2_high_crate_threshold)
         if not (0.0 <= self.phase2_high_crate_threshold <= 1.0):
             raise ValueError("phase2_high_crate_threshold must be in [0, 1]")
+        # DOE-2 gate2 saturation guard params
+        self.phase2_g2_saturation_threshold = float(phase2_g2_saturation_threshold)
+        if not (0.0 <= self.phase2_g2_saturation_threshold <= 1.0):
+            raise ValueError("phase2_g2_saturation_threshold must be in [0, 1]")
+        self.phase2_g2_saturation_min_remaining = float(phase2_g2_saturation_min_remaining)
+        if not (0.0 <= self.phase2_g2_saturation_min_remaining <= 1.0):
+            raise ValueError("phase2_g2_saturation_min_remaining must be in [0, 1]")
+        # Bucket minima (DOE-3 대체)
+        self.global_bucket_minima_enabled = bool(global_bucket_minima_enabled)
+        self.global_bucket_minima_strict = bool(global_bucket_minima_strict)
+        self.global_boundary_high_crate_threshold = float(global_boundary_high_crate_threshold)
+        if not (0.0 <= self.global_boundary_high_crate_threshold <= 1.0):
+            raise ValueError("global_boundary_high_crate_threshold must be in [0, 1]")
+        self.phase1_min_top = int(max(0, int(phase1_min_top)))
+        self.phase1_min_margin = int(max(0, int(phase1_min_margin)))
+        self.phase1_min_boundary_any = int(max(0, int(phase1_min_boundary_any)))
+        self.phase1_min_boundary_classic_hc = int(max(0, int(phase1_min_boundary_classic_hc)))
+        self.phase1_min_boundary_cross_hc = int(max(0, int(phase1_min_boundary_cross_hc)))
+        self.phase2_min_top = int(max(0, int(phase2_min_top)))
+        self.phase2_min_margin = int(max(0, int(phase2_min_margin)))
+        self.global_bucket_plan_multiplier = int(max(1, int(global_bucket_plan_multiplier)))
+        # 상태 추적
+        self._g2_saturation_trigger_count = 0
+        self._last_phase1_n_exec: int | None = None
+        self._bucket_min_relaxed_count = 0
         self.early_stop_min_used_budget_ratio = float(early_stop_min_used_budget_ratio)
         if not (0.0 <= self.early_stop_min_used_budget_ratio <= 1.0):
             raise ValueError("early_stop_min_used_budget_ratio must be in [0, 1]")
@@ -903,6 +943,56 @@ class AdditionalDOEOrchestrator:
             self._set_failure("FAILED_BUDGET", stage=round_idx)
         return bool(executed)
 
+    def _resolve_bucket_minima(self, *, phase: int) -> dict[str, int]:
+        """phase/제약/crate 상태에 따라 bucket별 최소 개수 반환.
+
+        Drop priority (유지 우선순위): top > margin > boundary_* > random
+        (random은 min 보장 없음 — 부족 시 먼저 포기됨)
+
+        Returns:
+            dict mapping bucket name → minimum count. 활성 버킷만 포함.
+        """
+        if not self.global_bucket_minima_enabled:
+            return {}
+        has_c = bool(self.has_pre_constraints)
+        is_hc = bool(
+            has_c
+            and float(self.constraint_rate_hat) < float(self.global_boundary_high_crate_threshold)
+        )
+        minima: dict[str, int] = {}
+        if int(phase) == 2:
+            # phase2: boundary는 phase2_disable_boundary_sampling=True로 이미 off
+            # top + (constraint 있으면 margin) 만 보장
+            if self.phase2_min_top > 0:
+                minima["top"] = int(self.phase2_min_top)
+            if has_c and self.phase2_min_margin > 0:
+                minima["margin"] = int(self.phase2_min_margin)
+            return minima
+        # phase == 1
+        if self.phase1_min_top > 0:
+            minima["top"] = int(self.phase1_min_top)
+        if has_c and self.phase1_min_margin > 0:
+            minima["margin"] = int(self.phase1_min_margin)
+        if has_c and is_hc:
+            # high_crate: boundary_classic + boundary_cross 분리
+            if self.phase1_min_boundary_classic_hc > 0:
+                minima["boundary_classic"] = int(self.phase1_min_boundary_classic_hc)
+            if self.phase1_min_boundary_cross_hc > 0:
+                minima["boundary_cross"] = int(self.phase1_min_boundary_cross_hc)
+        else:
+            # normal constraint or no constraint: boundary_any 하나만
+            if self.phase1_min_boundary_any > 0:
+                minima["boundary_any"] = int(self.phase1_min_boundary_any)
+        return minima
+
+    def _bucket_minima_boundary_sum(self, minima: dict[str, int]) -> int:
+        """boundary 계열 minima 합계 (planning pool floor 계산용)."""
+        return int(
+            minima.get("boundary_any", 0)
+            + minima.get("boundary_classic", 0)
+            + minima.get("boundary_cross", 0)
+        )
+
     def _update_constraint_ratio(self, *, n_generated: int, n_feasible: int) -> None:
         if n_generated <= 0:
             return
@@ -1455,6 +1545,32 @@ class AdditionalDOEOrchestrator:
                 remaining=remaining,
             )
 
+            # ── Bucket minima: n_exec floor 계산 ──
+            _bm_minima_stage = self._resolve_bucket_minima(phase=phase) if self.global_bucket_minima_enabled else {}
+            _bm_min_sum = int(sum(_bm_minima_stage.values()))
+            _bm_ratio_g = float(self.phase1_global_ratio if phase == 1 else self.phase2_global_ratio)
+            _bm_n_exec_floor = 0
+            if _bm_min_sum > 0 and _bm_ratio_g > 0.0:
+                import math as _math
+                _bm_n_exec_floor = int(_math.ceil(_bm_min_sum / max(_bm_ratio_g, 1e-9)))
+                # 기존 n_exec보다 크면 상향, remaining 초과 금지
+                if _bm_n_exec_floor > n_exec:
+                    n_exec = int(min(_bm_n_exec_floor, remaining))
+                    alloc_info = dict(alloc_info)
+                    alloc_info["bucket_minima_floor_applied"] = True
+                    alloc_info["bucket_minima_floor"] = int(_bm_n_exec_floor)
+            # ── phase1 non-increasing clamp ──
+            if phase == 1 and self._last_phase1_n_exec is not None:
+                _bm_prev = int(self._last_phase1_n_exec)
+                # floor도 고려: floor보다는 낮추지 않음
+                _bm_lo = max(_bm_n_exec_floor, 1)
+                if n_exec > _bm_prev and _bm_prev >= _bm_lo:
+                    n_exec = _bm_prev
+                    alloc_info = dict(alloc_info)
+                    alloc_info["phase1_monotone_clamped"] = True
+            if phase == 1:
+                self._last_phase1_n_exec = int(n_exec)
+
             # -----------------------------
             # 1) Build surrogates (bundle)
             # -----------------------------
@@ -1504,14 +1620,37 @@ class AdditionalDOEOrchestrator:
                 boundary_ratio *= float(self.global_boundary_constraint_boost)
                 boundary_ratio = min(boundary_ratio, 1.0)
             boundary_ratio *= float(0.9 ** round_idx)
+            # zero_streak — 원래 동작(수렴 신호) 그대로 유지. minima와 orthogonal.
             if self._anchor_spread_zero_streak >= self.stop_anchor_spread_streak and (not diversity_boost_active):
                 boundary_ratio = 0.0
             if diversity_boost_active:
                 boundary_ratio = max(boundary_ratio, float(self.diversity_boundary_floor_ratio))
+            if int(phase) == 2 and self.phase2_disable_boundary_sampling:
+                # Phase-2에서는 boundary 버킷을 비활성화하고 global 예산을
+                # margin/top/random 쪽으로만 사용한다.
+                boundary_ratio = 0.0
 
             n_boundary = int(round(n_global * boundary_ratio))
             if n_boundary > 0 and n_global >= 2 and n_boundary < 2:
                 n_boundary = 2
+            # Bucket minima — 매 stage 독립 floor (boundary_ratio/zero_streak과 무관)
+            # boundary 후보 candidate 존재 여부는 generation 후 exec 단계에서 graceful skip
+            _bm_minima_boundary = self._bucket_minima_boundary_sum(_bm_minima_stage)
+            if (
+                self.global_bucket_minima_enabled
+                and _bm_minima_boundary > 0
+                and int(phase) == 1
+                and n_global >= 2
+            ):
+                _plan_required = int(_bm_minima_boundary) * int(self.global_bucket_plan_multiplier)
+                _plan_cap = max(1, int(n_global - 1))
+                _plan_target = int(min(_plan_required, _plan_cap))
+                if n_boundary < _plan_target:
+                    n_boundary = int(_plan_target)
+                    # zero_streak으로 ratio=0이어도 minima floor가 우선
+                    # 최소 ratio 복원 (generation 코드가 ratio>0을 요구할 수 있음)
+                    if boundary_ratio == 0.0:
+                        boundary_ratio = float(_plan_target) / float(max(n_global, 1))
             spans, _ = compute_spans_lbs(self.bounds)
             offset = spans * tol
 
@@ -2021,6 +2160,64 @@ class AdditionalDOEOrchestrator:
                     n_margin_exec = 0
                 n_top_exec = int(round(n_pick * self.global_top_ratio))
                 n_top_exec = min(max(n_top_exec, 0), n_pick)
+
+                # ── Bucket minima 적용 (drop priority: top>margin>boundary>random) ──
+                # actual feasible 후보가 있는 경우에만 minima 적용 (graceful degrade)
+                _bm_achieved: dict[str, int] = {}
+                _bm_dropped: list[str] = []
+                if self.global_bucket_minima_enabled and n_pick >= 1 and _bm_minima_stage:
+                    _avail_boundary = int(np.asarray(boundary_work, dtype=bool).sum()) if boundary_work.size == Xg_work.shape[0] else 0
+                    _avail_margin = int(margins_work.size) if (self.has_pre_constraints and margins_work.size > 0) else 0
+                    _avail_top = int(Xg_work.shape[0])
+                    _remaining_slots = int(n_pick)
+                    # Priority 1: top
+                    _req_top = int(_bm_minima_stage.get("top", 0))
+                    _take_top = min(_req_top, _avail_top, _remaining_slots)
+                    if _req_top > 0 and _take_top == 0:
+                        _bm_dropped.append("top")
+                    if _take_top > 0:
+                        _bm_achieved["top"] = _take_top
+                        if n_top_exec < _take_top:
+                            n_top_exec = int(_take_top)
+                        _remaining_slots -= _take_top
+                    # Priority 2: margin (constraint 있을 때만)
+                    _req_margin = int(_bm_minima_stage.get("margin", 0))
+                    _take_margin = min(_req_margin, _avail_margin, _remaining_slots)
+                    if _req_margin > 0 and _take_margin == 0:
+                        _bm_dropped.append("margin")
+                    if _take_margin > 0:
+                        _bm_achieved["margin"] = _take_margin
+                        if n_margin_exec < _take_margin:
+                            n_margin_exec = int(_take_margin)
+                        _remaining_slots -= _take_margin
+                    # Priority 3: boundary (classic + cross + any 합산, 세부 구분은 planning에서)
+                    _req_boundary = int(
+                        _bm_minima_stage.get("boundary_any", 0)
+                        + _bm_minima_stage.get("boundary_classic", 0)
+                        + _bm_minima_stage.get("boundary_cross", 0)
+                    )
+                    _take_boundary = min(_req_boundary, _avail_boundary, _remaining_slots)
+                    if _req_boundary > 0 and _take_boundary == 0:
+                        _bm_dropped.append("boundary")
+                    if _take_boundary > 0:
+                        _bm_achieved["boundary"] = _take_boundary
+                        if n_boundary_exec < _take_boundary:
+                            n_boundary_exec = int(_take_boundary)
+                        _remaining_slots -= _take_boundary
+                    # random은 min 보장 없음 — drop priority 최하위
+                    if _bm_dropped:
+                        self._bucket_min_relaxed_count += 1
+                        if self.global_bucket_minima_strict:
+                            self._set_failure(
+                                f"FAILED_BUCKET_MINIMA:{','.join(_bm_dropped)}",
+                                stage=round_idx,
+                            )
+                        else:
+                            print(
+                                f"[AdditionalDOE] bucket_min_relaxed stage={round_idx} "
+                                f"dropped={_bm_dropped} req={_bm_minima_stage} "
+                                f"avail(top={_avail_top},margin={_avail_margin},boundary={_avail_boundary})"
+                            )
                 margin_subset_specs: list[tuple[tuple[str, ...], float]] = []
                 if self.global_margin_subset_enabled and n_margin_exec > 0:
                     pre_constraint_ids = self._extract_pre_constraint_ids(constraints_work)
@@ -2594,6 +2791,13 @@ class AdditionalDOEOrchestrator:
                     "can_enter_phase2_by_gate1": can_enter_phase2_by_gate1,
                     "can_enter_phase2_by_gate2": can_enter_phase2_by_gate2,
                     "remaining_budget_before_exec": int(remaining),
+                    "bucket_min_required": dict(_bm_minima_stage),
+                    "bucket_min_boundary_sum": int(_bm_minima_boundary),
+                    "bucket_min_high_crate": bool(
+                        self.has_pre_constraints
+                        and float(self.constraint_rate_hat) < float(self.global_boundary_high_crate_threshold)
+                    ),
+                    "n_exec_floor": int(_bm_n_exec_floor),
                 }
             )
 
@@ -2683,8 +2887,37 @@ class AdditionalDOEOrchestrator:
             if gate_stop:
                 break
 
+            # DOE-2: gate2 saturation 가드 — phase2 진입 후 g2_ema 포화 + 고제약 +
+            # 예산 잔여 충분 시 다음 stage에 diversity injection 강제
+            _doe2_trigger = False
+            try:
+                _g2_ema_val = float(self._gate2_ema) if self._gate2_ema is not None else None
+            except Exception:
+                _g2_ema_val = None
+            _next_is_phase2 = bool(next_phase == 2 or self._ever_phase2)
+            _used_ratio_now = float(self.budget.used) / float(max(self.total_budget, 1))
+            _remaining_ratio_now = max(0.0, 1.0 - _used_ratio_now)
+            _is_high_crate_now = bool(
+                self.has_pre_constraints
+                and float(self.constraint_rate_hat) < self.phase2_high_crate_threshold
+            )
+            if (
+                _next_is_phase2
+                and _g2_ema_val is not None
+                and _g2_ema_val >= self.phase2_g2_saturation_threshold
+                and _is_high_crate_now
+                and _remaining_ratio_now >= self.phase2_g2_saturation_min_remaining
+            ):
+                _doe2_trigger = True
+                self._g2_saturation_trigger_count += 1
+                print(
+                    f"[AdditionalDOE] DOE-2 g2 saturation: g2_ema={_g2_ema_val:.3f} "
+                    f"crate={self.constraint_rate_hat:.3f} remaining={_remaining_ratio_now:.2f} "
+                    f"→ diversity_boost forced for stage {round_idx+1}"
+                )
+
             # increase round only when actual execution happened
-            self._collapse_diversity_pending = bool(collapse_detected)
+            self._collapse_diversity_pending = bool(collapse_detected or _doe2_trigger)
             round_idx += 1
             phase = next_phase
 
@@ -2878,6 +3111,7 @@ class AdditionalDOEOrchestrator:
             "phase2_gate1_score_min": float(self.phase2_gate1_score_min),
             "phase2_gate2_score_min": float(self.phase2_gate2_score_min),
             "phase2_gate2_score_sticky_min": float(self.phase2_gate2_score_sticky_min),
+            "phase2_disable_boundary_sampling": bool(self.phase2_disable_boundary_sampling),
             "gate_smoothing_enabled": bool(self.gate_smoothing_enabled),
             "gate_ema_alpha": float(self.gate_ema_alpha),
             "gate_ema_warmup_stages": int(self.gate_ema_warmup_stages),
@@ -2895,6 +3129,22 @@ class AdditionalDOEOrchestrator:
             "phase2_min_used_budget_ratio": float(self.phase2_min_used_budget_ratio),
             "phase2_min_used_budget_ratio_high_crate": float(self.phase2_min_used_budget_ratio_high_crate),
             "phase2_high_crate_threshold": float(self.phase2_high_crate_threshold),
+            "phase2_g2_saturation_threshold": float(self.phase2_g2_saturation_threshold),
+            "phase2_g2_saturation_min_remaining": float(self.phase2_g2_saturation_min_remaining),
+            "g2_saturation_trigger_count": int(self._g2_saturation_trigger_count),
+            # Bucket minima 진단 (DOE-3 대체)
+            "global_bucket_minima_enabled": bool(self.global_bucket_minima_enabled),
+            "global_bucket_minima_strict": bool(self.global_bucket_minima_strict),
+            "global_boundary_high_crate_threshold": float(self.global_boundary_high_crate_threshold),
+            "phase1_min_top": int(self.phase1_min_top),
+            "phase1_min_margin": int(self.phase1_min_margin),
+            "phase1_min_boundary_any": int(self.phase1_min_boundary_any),
+            "phase1_min_boundary_classic_hc": int(self.phase1_min_boundary_classic_hc),
+            "phase1_min_boundary_cross_hc": int(self.phase1_min_boundary_cross_hc),
+            "phase2_min_top": int(self.phase2_min_top),
+            "phase2_min_margin": int(self.phase2_min_margin),
+            "global_bucket_plan_multiplier": int(self.global_bucket_plan_multiplier),
+            "bucket_min_relaxed_count": int(self._bucket_min_relaxed_count),
             "phase2_np_gate_last": phase2_np_gate_last,
             "gate2_phase_threshold_used_last": gate2_phase_threshold_used_last,
             "early_stop_min_used_budget_ratio": float(self.early_stop_min_used_budget_ratio),

@@ -2259,6 +2259,58 @@ class ExplorerOrchestrator:
                 pred_center = _bounds_center(pred_bounds)
                 obj_center = _bounds_center(obj_bounds)
                 cur_center = _bounds_center(selected_bounds)
+                # EXP-1: 고제약 + low IoU 시 obj_center를 top-K best-objective weighted mean으로 대체
+                try:
+                    _exp1_k = int(strategy_params_local.get("dual_obj_center_top_k_high_crate", 3))
+                    _exp1_iou_thr = float(strategy_params_local.get("dual_obj_center_top_k_iou_thr", 0.20))
+                    _exp1_crate_thr = float(strategy_params_local.get("dual_obj_center_top_k_crate_thr", 0.85))
+                    _exp1_crate_hat = float(_meta_get("constraint_rate_hat", 1.0))
+                except Exception:
+                    _exp1_k, _exp1_iou_thr, _exp1_crate_thr, _exp1_crate_hat = 3, 0.20, 0.85, 1.0
+                _exp1_iou_cur = _bounds_iou_ratio(pred_bounds, obj_bounds) if pred_bounds is not None and obj_bounds is not None else None
+                _exp1_triggered = bool(
+                    has_pre_constraints
+                    and np.isfinite(_exp1_crate_hat)
+                    and _exp1_crate_hat < _exp1_crate_thr
+                    and _exp1_iou_cur is not None
+                    and _exp1_iou_cur < _exp1_iou_thr
+                    and obj_center is not None
+                    and isinstance(y_obj, np.ndarray)
+                    and y_obj.size >= 1
+                    and isinstance(X_obj, np.ndarray)
+                    and X_obj.shape[0] >= 1
+                    and int(_exp1_k) >= 1
+                )
+                if _exp1_triggered:
+                    try:
+                        X_obj_arr = np.asarray(X_obj, dtype=float)
+                        y_obj_arr = np.asarray(y_obj, dtype=float).reshape(-1)
+                        if objective_sense == "min":
+                            order = np.argsort(y_obj_arr)
+                            scores = -y_obj_arr
+                        else:
+                            order = np.argsort(-y_obj_arr)
+                            scores = y_obj_arr
+                        top_idx = order[: max(1, int(_exp1_k))]
+                        if top_idx.size >= 1:
+                            top_X = X_obj_arr[top_idx]
+                            top_scores = scores[top_idx]
+                            _norm = float(np.max(np.abs(top_scores))) + 1e-12
+                            _shift = float(np.max(top_scores))
+                            w = np.exp((top_scores - _shift) / _norm)
+                            w = w / max(float(np.sum(w)), 1e-12)
+                            obj_center_topk = np.asarray(
+                                np.sum(top_X * w.reshape(-1, 1), axis=0), dtype=float
+                            )
+                            _delta = float(np.linalg.norm(obj_center_topk - obj_center))
+                            print(
+                                f"[Explorer] EXP-1 top-K obj center override: k={top_idx.size} "
+                                f"iou={_exp1_iou_cur:.3f} crate={_exp1_crate_hat:.3f} "
+                                f"center_shift={_delta:.4f}"
+                            )
+                            obj_center = obj_center_topk
+                    except Exception as _e:
+                        print(f"[Explorer] EXP-1 top-K fallback failed: {_e}")
                 if pred_center is not None and obj_center is not None and cur_center is not None:
                     bias_obj = float(
                         np.clip(
@@ -2326,11 +2378,12 @@ class ExplorerOrchestrator:
                 pred_obj_center_l1_norm = center_l1
                 conf_low = float(np.clip(float(strategy_params_local.get("pred_cluster_confidence_low", 0.35)), 0.0, 1.0))
                 shift_hi = float(max(float(strategy_params_local.get("pred_refine_shift_high", 0.35)), 0.0))
+                disjoint_iou = float(max(float(strategy_params_local.get("pred_obj_disjoint_iou", 0.05)), 0.0))
                 if pred_bounds is None:
                     pred_obj_miss_case = "pred_bounds_empty"
                 elif obj_bounds is None:
                     pred_obj_miss_case = "obj_bounds_unavailable"
-                elif pred_obj_iou is not None and pred_obj_iou < 0.05:
+                elif pred_obj_iou is not None and pred_obj_iou < disjoint_iou:
                     pred_obj_miss_case = "pred_obj_disjoint"
                 elif center_l1 is not None and center_l1 >= 0.45:
                     pred_obj_miss_case = "pred_obj_center_shift"
@@ -2341,13 +2394,13 @@ class ExplorerOrchestrator:
                 else:
                     pred_obj_miss_case = "pred_obj_aligned_or_unknown"
 
-                # D1: pred-obj disjoint fallback — pred가 obj와 완전 불일치(iou<0.05)이고
+                # D1: pred-obj disjoint fallback — pred가 obj와 불일치(iou<disjoint_iou)이고
                 # confidence도 낮으면 pred bounds 대신 obj bounds를 사용하여 over_shrink 방지
                 if (
                     strategy_alias in {"s4_pred", "s8_pred"}
                     and pred_obj_miss_case == "pred_obj_disjoint"
                     and pred_cluster_confidence is not None
-                    and pred_cluster_confidence < 0.35
+                    and pred_cluster_confidence < conf_low
                     and obj_bounds is not None
                     and selected_bounds is not None
                 ):
@@ -2371,10 +2424,26 @@ class ExplorerOrchestrator:
                     float(strategy_params_local.get("pred_obj_fallback_iou_low", 0.10)),
                     0.0,
                 ))
-                _dsea_blend = float(np.clip(
+                _dsea_blend_base = float(np.clip(
                     float(strategy_params_local.get("pred_obj_fallback_center_blend", 0.5)),
                     0.0, 1.0,
                 ))
+                # EXP-2: 고제약 시 blend 상향 (pred center를 obj 쪽으로 더 강하게 끌어당김)
+                _exp2_blend_high_crate = float(np.clip(
+                    float(strategy_params_local.get("pred_obj_fallback_center_blend_high_crate", 0.75)),
+                    0.0, 1.0,
+                ))
+                _exp2_crate_thr = float(strategy_params_local.get("pred_obj_fallback_crate_thr", 0.85))
+                try:
+                    _exp2_crate_hat = float(_meta_get("constraint_rate_hat", 1.0))
+                except Exception:
+                    _exp2_crate_hat = 1.0
+                _exp2_is_high_crate = bool(
+                    has_pre_constraints
+                    and np.isfinite(_exp2_crate_hat)
+                    and _exp2_crate_hat < _exp2_crate_thr
+                )
+                _dsea_blend = _exp2_blend_high_crate if _exp2_is_high_crate else _dsea_blend_base
                 if (
                     strategy_alias in {"s4_pred", "s8_pred"}
                     and pred_cluster_confidence is not None
@@ -2386,7 +2455,7 @@ class ExplorerOrchestrator:
                     and selected_bounds is not None
                     and not (
                         pred_obj_miss_case == "pred_obj_disjoint"
-                        and pred_cluster_confidence < 0.35
+                        and pred_cluster_confidence < conf_low
                     )
                 ):
                     target_center = (1.0 - _dsea_blend) * pred_center + _dsea_blend * obj_center
@@ -2399,7 +2468,9 @@ class ExplorerOrchestrator:
                         print(
                             f"[Explorer] DSE-A pred_obj fallback blend: "
                             f"conf={pred_cluster_confidence:.3f} iou={pred_obj_iou:.4f} "
-                            f"blend={_dsea_blend:.2f} → center shifted toward obj"
+                            f"blend={_dsea_blend:.2f} "
+                            f"({'high-crate' if _exp2_is_high_crate else 'baseline'}) "
+                            f"→ center shifted toward obj"
                         )
                         selected_bounds = recentred
 
@@ -2423,6 +2494,29 @@ class ExplorerOrchestrator:
 
         if selected_bounds is not None:
             expansion_mode = str(getattr(self.config.system, "bounds_expansion_mode", "uniform")).strip().lower()
+            # EXP-3: 고제약 시 fi_aware → uncertainty_aware 자동 스위치 (state-based)
+            try:
+                _exp3_crate_hat = float(_meta_get("constraint_rate_hat", 1.0))
+            except Exception:
+                _exp3_crate_hat = 1.0
+            _exp3_crate_thr = float(
+                getattr(self.config.system, "bounds_expansion_high_crate_threshold", 0.85)
+            )
+            _exp3_enabled = bool(
+                getattr(self.config.system, "bounds_expansion_high_crate_switch_enabled", True)
+            )
+            if (
+                _exp3_enabled
+                and has_pre_constraints
+                and np.isfinite(_exp3_crate_hat)
+                and _exp3_crate_hat < _exp3_crate_thr
+                and expansion_mode == "fi_aware"
+            ):
+                print(
+                    f"[Explorer] EXP-3 high-crate switch: bounds_expansion_mode "
+                    f"fi_aware → uncertainty_aware (crate={_exp3_crate_hat:.3f} < {_exp3_crate_thr})"
+                )
+                expansion_mode = "uncertainty_aware"
             _w_clip_min = float(getattr(self.config.system, "bounds_weight_clip_min", 0.5))
             _w_clip_max = float(getattr(self.config.system, "bounds_weight_clip_max", 2.0))
             dim_weights = None

@@ -11,55 +11,43 @@ class ExplorerUserConfig:
 
 @dataclass
 class ExplorerSystemConfig:
-    # 샘플 수 (기본 고정값)
+    # 1) 샘플링 크기
     n_samples: int = 10000
-    # DOE 데이터 수 × 배수로 n_samples 계산 (값이 없으면 고정값 사용)
     sample_multiplier: float | None = 4.0
-    # 배수 계산 사용 시 최소/최대 제한
     n_samples_min: int = 500
     n_samples_max: int = 10000
 
-    # 경계 샘플 비율 (0~1)
+    # 2) 경계 샘플링
     boundary_ratio: float = 0.15
-    # 경계 샘플 중 코너 조합 비율 (0~1)
     boundary_corner_ratio: float = 0.5
 
-    # 선택 경계 마진 기본 계수 (adaptive: m = base * (min_v - raw_v) / min_v, raw_v>=min_v면 off)
+    # 3) bounds 확장/클리핑
     bounds_margin_ratio: float = 0.03
-    # 선택 경계 최소 부피비(역마진 floor). raw/final volume이 이 값보다 작으면 확장 시도
     bounds_min_volume_ratio: float = 0.249
-    # bounds 확장 모드:
-    # - "uniform": 차원 가중치 없이 균등 확장(기본)
-    # - "uncertainty_aware": GP σ 기반 가중 확장(실패 시 uniform fallback)
-    # - "fi_aware": FI score 기반 가중 확장(실패 시 uniform fallback)
     bounds_expansion_mode: str = "uniform"
-    # fi_aware / uncertainty_aware 차원별 가중치 clip 범위 [min, max]
-    bounds_weight_clip_min: float = 0.7   # EXP-3: 0.5→0.7, fi_aware 과축소 방지
-    bounds_weight_clip_max: float = 1.5   # EXP-3: 2.0→1.5, 균등에 가깝게 보수화
+    bounds_weight_clip_min: float = 0.7
+    bounds_weight_clip_max: float = 1.5
+    # EXP-3: 고제약(crate_hat < threshold) 시 fi_aware → uncertainty_aware 자동 스위치
+    bounds_expansion_high_crate_switch_enabled: bool = True
+    bounds_expansion_high_crate_threshold: float = 0.85
 
-    # 상위/하위 분위수 기준
-    quantile_threshold: float = 0.85  # I: 0.90→0.85, top-k 범위 확대로 optimum 포함률 향상
-    # 최소 top-k 보장 개수
-    min_topk_count: int = 30  # I: 20→30, 최소 top-k 보장 수 증가
+    # 4) 후보 선택
+    quantile_threshold: float = 0.85
+    min_topk_count: int = 30
 
-    # DBSCAN 설정값
+    # 5) 군집화
     dbscan_min_samples: int = 2
     dbscan_eps_quantile: float = 0.9
 
-    # Post 제약 결합 점수 fallback 람다 (DOE 메타에 post_lambda 없을 때 사용)
+    # 6) post 제약 fallback
     post_lambda_default: float = 2.0
 
-    # 시각화 옵션
+    # 7) 실행/메타
     save_plot: bool = True
-    # 출력 디버그 레벨: off | full
     debug_level: str = "off"
-    # Explorer 전략 ID (배치 실험 구분용)
     strategy_id: str = "S4_dual"
-    # Probe 기반 전략 시작점 개수(미사용 전략에서도 메타 기록용)
     probe_multistart: int = 20
-    # Obj refine bounds 확장 배율 기본값 (strategy_params 미지정 시 사용)
     obj_refine_bounds_scale: float = 1.30
-    # 전략별 추가 파라미터 메타(실험 추적용)
     strategy_params: dict[str, object] = field(default_factory=dict)
 
 
