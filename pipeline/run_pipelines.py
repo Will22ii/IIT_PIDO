@@ -44,7 +44,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="rosenbrock",
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
         n_samples=450,
-        repeats=100,
+        repeats=10,
     ),
     "cantilever_beam": ProblemCase(
         problem_name="cantilever_beam",
@@ -56,7 +56,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="goldstein_price",
         known_optimum={"x1": 0.0, "x2": -1.0},
         n_samples=150,
-        repeats=500,
+        repeats=25,
     ),
     "six_hump_camel": ProblemCase(
         problem_name="six_hump_camel",
@@ -65,7 +65,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": -0.0898, "x2": 0.7126},
         ],
         n_samples=50,
-        repeats=250,
+        repeats=25,
     ),
     "rosenbrock_nodummy": ProblemCase(
         problem_name="rosenbrock_nodummy",
@@ -99,6 +99,13 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
 # Activate only the cases used in this run.
 ACTIVE_PROBLEM_CASES: list[str] = [
     "cantilever_beam",
+    "rosenbrock",
+    "goldstein_price",
+    "six_hump_camel",
+    # "cantilever_beam_nodummy",
+    # "rosenbrock_nodummy",
+    # "goldstein_price_nodummy",
+    # "six_hump_camel_nodummy",
 ]
 
 PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIVE_PROBLEM_CASES]
