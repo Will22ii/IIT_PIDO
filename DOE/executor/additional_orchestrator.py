@@ -599,16 +599,16 @@ class AdditionalDOEOrchestrator:
                     return int(remaining_i + 1)
                 if l_floor_i > 0 and (1.0 - r) <= 1e-12:
                     return int(remaining_i + 1)
-                by_g = int(np.ceil(g_floor_i / max(r, 1e-12))) if g_floor_i > 0 else 0
-                by_l = int(np.ceil(l_floor_i / max(1.0 - r, 1e-12))) if l_floor_i > 0 else 0
+                by_g = int(np.ceil(g_floor_i / max(r, 1e-12) - 1e-9)) if g_floor_i > 0 else 0
+                by_l = int(np.ceil(l_floor_i / max(1.0 - r, 1e-12) - 1e-9)) if l_floor_i > 0 else 0
                 return int(max(base, by_g, by_l))
             r = float(np.clip(self.phase2_global_ratio, 0.0, 1.0))
             if g_floor_i > 0 and r <= 1e-12:
                 return int(remaining_i + 1)
             if l_floor_i > 0 and (1.0 - r) <= 1e-12:
                 return int(remaining_i + 1)
-            by_g = int(np.ceil(g_floor_i / max(r, 1e-12))) if g_floor_i > 0 else 0
-            by_l = int(np.ceil(l_floor_i / max(1.0 - r, 1e-12))) if l_floor_i > 0 else 0
+            by_g = int(np.ceil(g_floor_i / max(r, 1e-12) - 1e-9)) if g_floor_i > 0 else 0
+            by_l = int(np.ceil(l_floor_i / max(1.0 - r, 1e-12) - 1e-9)) if l_floor_i > 0 else 0
             return int(max(base, by_g, by_l))
 
         def _np_band_penalty(n_exec_try: int) -> tuple[float, float]:

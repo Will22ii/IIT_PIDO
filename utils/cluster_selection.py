@@ -14,6 +14,7 @@ def select_top_clusters(
     min_samples: int,
     bounds: list[Tuple[float, float]],
     min_topk_count: int,
+    max_topk_count: int | None,
     eps_quantile: float,
     diversity_extra_clusters: int = 0,
     diversity_weight: float = 0.35,
@@ -45,6 +46,17 @@ def select_top_clusters(
         topk_idx = order[:min_topk_count]
         mask = np.zeros_like(mask, dtype=bool)
         mask[topk_idx] = True
+
+    if max_topk_count is not None:
+        max_topk_count = int(max_topk_count)
+        if max_topk_count > 0 and int(mask.sum()) > max_topk_count:
+            if objective_sense == "min":
+                order = np.argsort(y)
+            else:
+                order = np.argsort(-y)
+            topk_idx = order[:max_topk_count]
+            mask = np.zeros_like(mask, dtype=bool)
+            mask[topk_idx] = True
 
     X_q = X[mask]
     y_q = y[mask]

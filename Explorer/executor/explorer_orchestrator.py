@@ -25,7 +25,6 @@ from Explorer.config import ExplorerConfig
 from utils.boundary_sampling import sample_boundary_corners, sample_boundary_partial
 from utils.cluster_selection import select_top_clusters
 from utils.bounds_utils import compute_spans_lbs
-from utils.dbscan_utils import auto_dbscan_eps_quantile
 from DOE.executor.constraint_filter import (
     evaluate_constraints_batch,
     evaluate_constraints_point,
@@ -43,9 +42,6 @@ from Explorer.executor.explorer_utils import (
 from Explorer.visualization.explorer_plots import (
     plot_dual_cluster_pair,
     plot_bounds_pair,
-    plot_raw_dbscan,
-    plot_raw_known_optimum,
-    plot_raw_overlay,
 )
 from Explorer.visualization.plot_doe_vs_optimum import plot_doe_vs_optimum
 from pipeline.run_context import (
@@ -1212,12 +1208,10 @@ class ExplorerOrchestrator:
         )
         quantile_threshold = float(self.config.system.quantile_threshold)
         if objective_sense == "min":
-            threshold = float(np.quantile(score, 1.0 - quantile_threshold))
-            mask = score <= threshold
+            q_mask = score <= float(np.quantile(score, 1.0 - quantile_threshold))
         else:
-            threshold = float(np.quantile(score, quantile_threshold))
-            mask = score >= threshold
-        df["above_threshold"] = mask
+            q_mask = score >= float(np.quantile(score, quantile_threshold))
+        n_q_samples = int(np.sum(q_mask))
 
         project_root = os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1261,84 +1255,13 @@ class ExplorerOrchestrator:
             else False
         )
         debug_level = _normalize_debug_level(self.config.system.debug_level)
-        keep_debug = debug_level == "full"
-        use_raw = len(selected_features) == 2
-        overlay_path = None
-        if use_raw and keep_debug:
-            overlay_path = plot_raw_overlay(
-                X_all=X,
-                mask=mask,
-                feature_names=selected_features,
-                problem_name=doe_problem_name,
-                project_root=project_root,
-                use_timestamp=bool(use_timestamp),
-                save_path=os.path.join(debug_dir, "raw_overlay.png"),
-            )
-
         save_plot = bool(self.config.system.save_plot)
-        labels = None
-        eps_used = None
-        dbscan_plot_path = None
-        known_optimum_plot_path = None
         dbscan_min_samples = self.config.system.dbscan_min_samples
-        if dbscan_min_samples is not None:
-            try:
-                from sklearn.cluster import DBSCAN
-                from sklearn.preprocessing import StandardScaler
-
-                min_samples = dbscan_min_samples or max(5, 2 * len(selected_features))
-
-                mask = df["above_threshold"].to_numpy(dtype=bool)
-                X_filtered = X[mask]
-                if X_filtered.size:
-                    X_scaled = StandardScaler().fit_transform(X_filtered)
-                    eps = auto_dbscan_eps_quantile(
-                        X_scaled,
-                        min_samples,
-                        float(self.config.system.dbscan_eps_quantile),
-                    )
-                    eps_used = eps
-                    labels = DBSCAN(
-                        eps=eps,
-                        min_samples=min_samples,
-                    ).fit_predict(X_scaled)
-                    cluster_full = np.full(X.shape[0], -1, dtype=int)
-                    cluster_full[mask] = labels
-                    df["cluster"] = cluster_full
-
-                    if save_plot and use_raw:
-                        dbscan_plot_path = plot_raw_dbscan(
-                            X_q90=X_filtered,
-                            labels=labels,
-                            feature_names=selected_features,
-                            problem_name=doe_problem_name,
-                            project_root=project_root,
-                            use_timestamp=bool(use_timestamp),
-                            save_path=os.path.join(debug_dir, "raw_dbscan.png"),
-                        )
-            except Exception as exc:
-                print(f"[Explorer] DBSCAN skipped: {exc}")
 
         x_opt = _resolve_known_optimum(
             self.config.user.known_optimum,
             selected_features,
         )
-        if x_opt is not None and save_plot and use_raw:
-            try:
-                X_q90 = X[mask]
-                if X_q90.size:
-                    known_optimum_plot_path = plot_raw_known_optimum(
-                        X_q90=X_q90,
-                        labels=labels if labels is not None else None,
-                        x_opt=x_opt,
-                        feature_names=selected_features,
-                        problem_name=doe_problem_name,
-                        project_root=project_root,
-                        use_timestamp=bool(use_timestamp),
-                        save_path=os.path.join(debug_dir, "raw_optimum.png"),
-                    )
-            except Exception as exc:
-                print(f"[Explorer] Known optimum plot skipped: {exc}")
 
 
         # -------------------------------------------------
@@ -1372,6 +1295,28 @@ class ExplorerOrchestrator:
         obj_div_min_dim = int(max(1, int(strategy_params.get("obj_diversity_min_dim", 4))))
         if len(selected_features) < obj_div_min_dim:
             obj_div_extra = 0
+        min_topk_count = int(max(1, int(self.config.system.min_topk_count)))
+        max_topk_count_used = None
+        max_topk_count_cfg = getattr(self.config.system, "max_topk_count", None)
+        if max_topk_count_cfg is not None:
+            try:
+                max_topk_count_used = int(max(1, int(max_topk_count_cfg)))
+            except Exception:
+                max_topk_count_used = None
+        elif bool(getattr(self.config.system, "max_topk_count_dynamic_enabled", True)):
+            try:
+                dyn_scale = float(getattr(self.config.system, "max_topk_count_dynamic_scale", 40.0))
+                dyn_bias = float(getattr(self.config.system, "max_topk_count_dynamic_bias", 40.0))
+                dyn_min_raw = int(getattr(self.config.system, "max_topk_count_dynamic_min", 120))
+                dyn_max_raw = int(getattr(self.config.system, "max_topk_count_dynamic_max", 320))
+                dyn_min = min(dyn_min_raw, dyn_max_raw)
+                dyn_max = max(dyn_min_raw, dyn_max_raw)
+                dyn_raw = int(round(dyn_scale * float(len(selected_features)) + dyn_bias))
+                max_topk_count_used = int(np.clip(dyn_raw, dyn_min, dyn_max))
+            except Exception:
+                max_topk_count_used = None
+        if max_topk_count_used is not None:
+            max_topk_count_used = int(max(max_topk_count_used, min_topk_count))
         X_obj = np.empty((0, len(selected_features)))
         y_obj = np.array([], dtype=float)
         try:
@@ -1391,7 +1336,8 @@ class ExplorerOrchestrator:
                 quantile_threshold=quantile_threshold,
                 min_samples=min_samples,
                 bounds=bounds,
-                min_topk_count=int(self.config.system.min_topk_count),
+                min_topk_count=min_topk_count,
+                max_topk_count=max_topk_count_used,
                 eps_quantile=float(self.config.system.dbscan_eps_quantile),
             )
 
@@ -1434,7 +1380,8 @@ class ExplorerOrchestrator:
                 quantile_threshold=quantile_threshold,
                 min_samples=min_samples,
                 bounds=bounds,
-                min_topk_count=int(self.config.system.min_topk_count),
+                min_topk_count=min_topk_count,
+                max_topk_count=max_topk_count_used,
                 eps_quantile=float(self.config.system.dbscan_eps_quantile),
                 diversity_extra_clusters=obj_div_extra,
                 diversity_weight=obj_div_weight,
@@ -2790,6 +2737,15 @@ class ExplorerOrchestrator:
                 "n_samples": n_samples,
                 "sample_multiplier": sample_multiplier,
                 "quantile_threshold": quantile_threshold,
+                "min_topk_count": int(min_topk_count),
+                "max_topk_count": (
+                    None
+                    if getattr(self.config.system, "max_topk_count", None) is None
+                    else int(getattr(self.config.system, "max_topk_count"))
+                ),
+                "max_topk_count_used": (
+                    int(max_topk_count_used) if max_topk_count_used is not None else None
+                ),
                 "dbscan_min_samples": dbscan_min_samples,
                 "debug_level": debug_level,
                 "strategy_id": strategy_id,
@@ -2845,6 +2801,10 @@ class ExplorerOrchestrator:
             "generated_total_after_pre": int(X.shape[0]),
             "generated_boundary": int(X_boundary_raw.shape[0]),
             "r_used": float(r_used),
+            "min_topk_count": int(min_topk_count),
+            "max_topk_count_used": (
+                int(max_topk_count_used) if max_topk_count_used is not None else None
+            ),
             # Pred
             "pred_cluster_signal_mode": pred_cluster_signal_mode,
             "pred_cluster_beta_used": pred_cluster_beta_used,
@@ -2883,13 +2843,8 @@ class ExplorerOrchestrator:
         os.makedirs(os.path.dirname(_analysis_path), exist_ok=True)
         with open(_analysis_path, "w", encoding="utf-8") as _af:
             json.dump(_explorer_analysis_meta, _af, ensure_ascii=False, indent=2, default=str)
-        n_q_samples = int(mask.sum())
-        n_clusters = 0
-        cluster_sizes = []
-        if labels is not None:
-            unique = [int(v) for v in np.unique(labels) if v != -1]
-            n_clusters = len(unique)
-            cluster_sizes = [int((labels == v).sum()) for v in unique]
+        n_clusters = int(pred_stats.get("n_clusters", 0)) if isinstance(pred_stats, dict) else 0
+        cluster_sizes: list[int] = []
         results_summary = {
             "n_candidates_total": int(len(df)),
             "n_q_samples": n_q_samples,
@@ -2907,12 +2862,6 @@ class ExplorerOrchestrator:
         debug_artifacts = {}
         if bounds_path:
             public_artifacts["selected_bounds"] = os.path.relpath(bounds_path, task_dir)
-        if overlay_path:
-            debug_artifacts["raw_overlay"] = os.path.relpath(overlay_path, task_dir)
-        if dbscan_plot_path:
-            debug_artifacts["raw_dbscan"] = os.path.relpath(dbscan_plot_path, task_dir)
-        if known_optimum_plot_path:
-            debug_artifacts["raw_optimum"] = os.path.relpath(known_optimum_plot_path, task_dir)
         if pair_overlay_paths:
             debug_artifacts["pair_dual_clusters"] = [os.path.relpath(p, task_dir) for p in pair_overlay_paths]
         if doe_vs_optimum_plot_paths:
@@ -2938,7 +2887,7 @@ class ExplorerOrchestrator:
         return {
             "csv": task_out["csv"],
             "metadata": task_out["metadata"],
-            "labels": labels,
+            "labels": None,
             "strategy_id": strategy_id,
             "selected_bounds_path": bounds_path,
             "selected_bounds_volume_ratio": vol_ratio,

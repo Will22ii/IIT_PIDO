@@ -13,12 +13,12 @@ class ExplorerUserConfig:
 class ExplorerSystemConfig:
     # 1) 샘플링 크기
     n_samples: int = 10000
-    sample_multiplier: float | None = 4.0
-    n_samples_min: int = 500
+    sample_multiplier: float | None = 20.0
+    n_samples_min: int = 1000
     n_samples_max: int = 10000
 
     # 2) 경계 샘플링
-    boundary_ratio: float = 0.15
+    boundary_ratio: float = 0.2
     boundary_corner_ratio: float = 0.5
 
     # 3) bounds 확장/클리핑
@@ -34,6 +34,13 @@ class ExplorerSystemConfig:
     # 4) 후보 선택
     quantile_threshold: float = 0.85
     min_topk_count: int = 30
+    # DBSCAN 입력 후보 상한 (None이면 동적식 사용)
+    max_topk_count: int | None = None
+    max_topk_count_dynamic_enabled: bool = True
+    max_topk_count_dynamic_scale: float = 40.0
+    max_topk_count_dynamic_bias: float = 40.0
+    max_topk_count_dynamic_min: int = 120
+    max_topk_count_dynamic_max: int = 320
 
     # 5) 군집화
     dbscan_min_samples: int = 2
