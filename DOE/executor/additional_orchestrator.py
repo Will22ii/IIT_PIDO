@@ -68,15 +68,6 @@ class AdditionalDOEOrchestrator:
         total_budget: int,
         init_ratio: float = 0.3,
         exec_ratio: float = 0.1,
-        dynamic_exec_allocation_enabled: bool = True,
-        exec_round_shares: Optional[list[float] | tuple[float, ...]] = (0.24, 0.19, 0.17, 0.15, 0.13, 0.12),
-        exec_eff_weight_gate1: float = 0.45,
-        exec_eff_weight_gate2: float = 0.55,
-        exec_eff_gain_k: float = 0.7,
-        exec_eff_clip_min: float = 0.85,
-        exec_eff_clip_max: float = 1.20,
-        exec_stage_min_ratio: float = 0.08,
-        exec_stage_max_ratio: float = 0.40,
         initial_corner_ratio: float = 0.05,
         global_random_ratio: float = 0.3,
         global_boundary_ratio: float = 0.1,
@@ -142,6 +133,7 @@ class AdditionalDOEOrchestrator:
         probe_std_scale: float = 2.0,
         probe_perturb_ratio: float = 0.02,
         initial_probe_multiplier: float = 2.0,
+        local_exec_min_anchors: int = 2,
         plan_filter_safety: float = 1.2,
         plan_filter_r_floor: float = 0.02,
         success_rate_floor: float = 0.02,
@@ -204,28 +196,6 @@ class AdditionalDOEOrchestrator:
         self.total_budget = int(total_budget)
         self.init_ratio = float(init_ratio)
         self.exec_ratio = float(exec_ratio)
-        self.dynamic_exec_allocation_enabled = bool(dynamic_exec_allocation_enabled)
-        self.exec_round_shares = self._normalize_exec_round_shares(exec_round_shares)
-        self.exec_eff_weight_gate1 = float(exec_eff_weight_gate1)
-        self.exec_eff_weight_gate2 = float(exec_eff_weight_gate2)
-        if self.exec_eff_weight_gate1 < 0.0 or self.exec_eff_weight_gate2 < 0.0:
-            raise ValueError("exec_eff_weight_gate1/2 must be >= 0")
-        if self.exec_eff_weight_gate1 == 0.0 and self.exec_eff_weight_gate2 == 0.0:
-            self.exec_eff_weight_gate1 = 0.45
-            self.exec_eff_weight_gate2 = 0.55
-        self.exec_eff_gain_k = float(exec_eff_gain_k)
-        self.exec_eff_clip_min = float(exec_eff_clip_min)
-        self.exec_eff_clip_max = float(exec_eff_clip_max)
-        if self.exec_eff_clip_min <= 0.0 or self.exec_eff_clip_max <= 0.0:
-            raise ValueError("exec_eff_clip_min/max must be > 0")
-        if self.exec_eff_clip_min > self.exec_eff_clip_max:
-            raise ValueError("exec_eff_clip_min must be <= exec_eff_clip_max")
-        self.exec_stage_min_ratio = float(exec_stage_min_ratio)
-        self.exec_stage_max_ratio = float(exec_stage_max_ratio)
-        if self.exec_stage_min_ratio < 0.0 or self.exec_stage_max_ratio < 0.0:
-            raise ValueError("exec_stage_min_ratio/max_ratio must be >= 0")
-        if self.exec_stage_min_ratio > self.exec_stage_max_ratio:
-            raise ValueError("exec_stage_min_ratio must be <= exec_stage_max_ratio")
         self._initial_budget_used = 0
         self._additional_budget_total = 0
         self.initial_corner_ratio = float(initial_corner_ratio)
@@ -359,6 +329,7 @@ class AdditionalDOEOrchestrator:
         self._ever_phase2 = False
         self._collapse_diversity_pending = False
         self.initial_probe_multiplier = float(initial_probe_multiplier)
+        self.local_exec_min_anchors = int(max(0, int(local_exec_min_anchors)))
         self.plan_filter_safety = float(plan_filter_safety)
         self.plan_filter_r_floor = float(plan_filter_r_floor)
         self.success_rate_floor = float(success_rate_floor)
@@ -473,27 +444,6 @@ class AdditionalDOEOrchestrator:
 
         # Exec selection is handled inline (rank + random mix)
 
-    @staticmethod
-    def _normalize_exec_round_shares(
-        raw: Optional[list[float] | tuple[float, ...]],
-    ) -> list[float]:
-        default = [0.24, 0.19, 0.17, 0.15, 0.13, 0.12]
-        if raw is None:
-            return default
-        vals: list[float] = []
-        for item in raw:
-            try:
-                v = float(item)
-            except Exception:
-                continue
-            if np.isfinite(v) and v > 0.0:
-                vals.append(v)
-        if not vals:
-            return default
-        s = float(sum(vals))
-        if s <= 0.0:
-            return default
-        return [float(v / s) for v in vals]
 
     @staticmethod
     def _extract_pre_constraint_ids(constraints_payloads: list[dict]) -> list[str]:
@@ -592,146 +542,235 @@ class AdditionalDOEOrchestrator:
             out[i] = 1
         return out
 
-    def _estimate_exec_multiplier(self) -> tuple[float, float | None, float | None]:
-        if not self.dynamic_exec_allocation_enabled:
-            return 1.0, None, None
-
-        evaluated = [
-            g for g in self.gate_history
-            if bool(g.get("gate_evaluated", False))
-            and g.get("gate1_score") is not None
-            and g.get("gate2_score") is not None
-            and int(g.get("n_exec", 0)) > 0
-        ]
-        if len(evaluated) < 2:
-            return 1.0, None, None
-
-        w1 = float(self.exec_eff_weight_gate1)
-        w2 = float(self.exec_eff_weight_gate2)
-        w_sum = max(w1 + w2, 1e-12)
-        w1 /= w_sum
-        w2 /= w_sum
-
-        eff_series: list[float] = []
-        for i in range(1, len(evaluated)):
-            prev = evaluated[i - 1]
-            cur = evaluated[i]
-            g1_prev = float(prev.get("gate1_score"))
-            g2_prev = float(prev.get("gate2_score"))
-            g1_cur = float(cur.get("gate1_score"))
-            g2_cur = float(cur.get("gate2_score"))
-            n_cur = max(int(cur.get("n_exec", 0)), 1)
-            dg1 = max(0.0, g1_cur - g1_prev)
-            dg2 = max(0.0, g2_cur - g2_prev)
-            eff = (w1 * dg1 + w2 * dg2) / float(n_cur)
-            eff_series.append(float(eff))
-        if not eff_series:
-            return 1.0, None, None
-
-        eff_prev = float(eff_series[-1])
-        ref_window = eff_series[max(0, len(eff_series) - 3):-1] if len(eff_series) >= 2 else []
-        eff_ref = float(np.mean(ref_window)) if ref_window else float(eff_prev)
-
-        if eff_ref <= 1e-12:
-            mult = 1.0
-        else:
-            rel = (eff_prev - eff_ref) / max(eff_ref, 1e-12)
-            mult = 1.0 + float(self.exec_eff_gain_k) * float(rel)
-        mult = float(np.clip(mult, self.exec_eff_clip_min, self.exec_eff_clip_max))
-        return mult, eff_prev, eff_ref
-
     def _compute_n_exec_for_stage(
         self,
         *,
         round_idx: int,
         remaining: int,
-    ) -> tuple[int, dict[str, float | int | str | None]]:
+        phase: int,
+    ) -> tuple[int, dict[str, int | bool | float]]:
+        """Dynamic stage allocation with priority:
+        1) min floors, 2) phase ratio(strict if possible), 3) prefer >=3 stages,
+        4) prefer around 5 stages and N/p in [5, 7] (soft).
+        """
+
+        def _split_exec(
+            *,
+            n_exec_try: int,
+            strict_ratio: bool,
+        ) -> tuple[bool, int, int, float]:
+            n_i = int(max(n_exec_try, 0))
+            if n_i <= 0:
+                return False, 0, 0, 0.0
+            g_floor = int(global_floor)
+            l_floor = int(local_floor)
+            g_min = int(max(g_floor, 0))
+            g_max = int(n_i - max(l_floor, 0))
+            if g_min > g_max:
+                return False, 0, 0, 0.0
+
+            # phase1: global ratio lower-bound
+            if int(phase) == 1:
+                r = float(np.clip(self.phase1_global_ratio, 0.0, 1.0))
+                g_ratio_min = int(np.ceil(r * float(n_i) - 1e-12)) if strict_ratio else 0
+                g_pick = int(max(g_min, g_ratio_min))
+                if g_pick > g_max:
+                    return False, 0, 0, 0.0
+                l_pick = int(n_i - g_pick)
+                return True, g_pick, l_pick, float(g_pick) / float(max(n_i, 1))
+
+            # phase2: global ratio upper-bound (local-priority)
+            r = float(np.clip(self.phase2_global_ratio, 0.0, 1.0))
+            g_ratio_max = int(np.floor(r * float(n_i) + 1e-12)) if strict_ratio else n_i
+            g_cap = int(min(g_max, g_ratio_max))
+            if g_min > g_cap:
+                return False, 0, 0, 0.0
+            g_pick = int(g_min)  # maximize local by minimizing global
+            l_pick = int(n_i - g_pick)
+            return True, g_pick, l_pick, float(g_pick) / float(max(n_i, 1))
+
+        def _strict_exec_floor() -> int:
+            g_floor_i = int(global_floor)
+            l_floor_i = int(local_floor)
+            base = int(max(g_floor_i + l_floor_i, self.exec_min))
+            if int(phase) == 1:
+                r = float(np.clip(self.phase1_global_ratio, 0.0, 1.0))
+                if g_floor_i > 0 and r <= 1e-12:
+                    return int(remaining_i + 1)
+                if l_floor_i > 0 and (1.0 - r) <= 1e-12:
+                    return int(remaining_i + 1)
+                by_g = int(np.ceil(g_floor_i / max(r, 1e-12))) if g_floor_i > 0 else 0
+                by_l = int(np.ceil(l_floor_i / max(1.0 - r, 1e-12))) if l_floor_i > 0 else 0
+                return int(max(base, by_g, by_l))
+            r = float(np.clip(self.phase2_global_ratio, 0.0, 1.0))
+            if g_floor_i > 0 and r <= 1e-12:
+                return int(remaining_i + 1)
+            if l_floor_i > 0 and (1.0 - r) <= 1e-12:
+                return int(remaining_i + 1)
+            by_g = int(np.ceil(g_floor_i / max(r, 1e-12))) if g_floor_i > 0 else 0
+            by_l = int(np.ceil(l_floor_i / max(1.0 - r, 1e-12))) if l_floor_i > 0 else 0
+            return int(max(base, by_g, by_l))
+
+        def _np_band_penalty(n_exec_try: int) -> tuple[float, float]:
+            p_raw = max(int(len(self.bounds)), 1)
+            np_ratio = float(n_exec_try) / float(p_raw)
+            if np_ratio < 5.0:
+                return float(5.0 - np_ratio), np_ratio
+            if np_ratio > 7.0:
+                return float(np_ratio - 7.0), np_ratio
+            return 0.0, np_ratio
+
+        def _candidate_key(c: dict) -> tuple[float, ...]:
+            stage_ge3_pen = 0.0 if int(c["stages_est"]) >= 3 else 1.0
+            stage5_pen = float(abs(int(c["stages_est"]) - 5))
+            np_pen = float(c["np_penalty"])
+            np_center_pen = float(abs(float(c["np_ratio"]) - 6.0))
+            return (
+                stage_ge3_pen,
+                stage5_pen,
+                np_pen,
+                np_center_pen,
+                float(int(c["stages_est"])),
+                float(int(c["n_exec"])),
+            )
+
         remaining_i = int(max(remaining, 0))
         if remaining_i <= 0:
             return 0, {
                 "alloc_source": "none",
-                "n_exec_base": 0,
-                "n_exec_preclip": 0,
-                "alloc_multiplier": 1.0,
-                "alloc_eff_prev": None,
-                "alloc_eff_ref": None,
-                "alloc_min_stage": 0,
-                "alloc_max_stage": 0,
-                "alloc_additional_budget_total": int(self._additional_budget_total),
+                "global_floor": 0, "local_floor": 0, "exec_floor": 0,
+                "stages_est": 0, "absorbed": False, "min_feasible": True,
             }
 
-        if not self.dynamic_exec_allocation_enabled:
-            min_exec = max(int(self.total_budget * self.exec_ratio), self.exec_min)
-            n_exec = int(min(min_exec, remaining_i))
-            return n_exec, {
-                "alloc_source": "fixed_exec_ratio",
-                "n_exec_base": int(n_exec),
-                "n_exec_preclip": int(n_exec),
-                "alloc_multiplier": 1.0,
-                "alloc_eff_prev": None,
-                "alloc_eff_ref": None,
-                "alloc_min_stage": int(self.exec_min),
-                "alloc_max_stage": int(max(self.exec_min, n_exec)),
-                "alloc_additional_budget_total": int(self._additional_budget_total),
+        minima = self._resolve_bucket_minima(phase=phase)
+        global_floor = int(sum(minima.values()))
+        local_floor = int(self.local_exec_min_anchors)
+        exec_floor = int(max(global_floor + local_floor, self.exec_min))
+        strict_floor = int(_strict_exec_floor())
+        stages_remaining_cap = max(1, int(self.max_additional_stages) - int(round_idx))
+        if remaining_i < exec_floor:
+            return 0, {
+                "alloc_source": "min_infeasible",
+                "global_floor": int(global_floor),
+                "local_floor": int(local_floor),
+                "exec_floor": int(exec_floor),
+                "exec_floor_strict": int(strict_floor),
+                "stages_est": int(stages_remaining_cap),
+                "absorbed": False,
+                "bucket_minima_sum": int(global_floor),
+                "min_feasible": False,
+                "ratio_strict_selected": False,
+                "n_exec_global_pref": 0,
+                "n_exec_local_pref": 0,
             }
 
-        if self._additional_budget_total <= 0:
-            self._additional_budget_total = int(max(remaining_i, 1))
+        strict_candidates: list[dict] = []
+        relaxed_candidates: list[dict] = []
+        for stages_est in range(1, int(stages_remaining_cap) + 1):
+            n_base = int(np.ceil(float(remaining_i) / float(stages_est)))
 
-        shares = list(self.exec_round_shares or [])
-        if not shares:
-            shares = [1.0]
+            n_relaxed = int(max(n_base, exec_floor))
+            if n_relaxed <= remaining_i:
+                ok_relaxed, g_relaxed, l_relaxed, g_ratio_relaxed = _split_exec(
+                    n_exec_try=n_relaxed,
+                    strict_ratio=False,
+                )
+                if ok_relaxed:
+                    np_pen, np_ratio = _np_band_penalty(n_relaxed)
+                    relaxed_candidates.append(
+                        {
+                            "stages_est": int(stages_est),
+                            "n_exec": int(n_relaxed),
+                            "n_exec_global": int(g_relaxed),
+                            "n_exec_local": int(l_relaxed),
+                            "g_ratio": float(g_ratio_relaxed),
+                            "np_penalty": float(np_pen),
+                            "np_ratio": float(np_ratio),
+                        }
+                    )
 
-        if round_idx >= len(shares):
-            return int(remaining_i), {
-                "alloc_source": "dynamic_tail_all_remaining",
-                "n_exec_base": int(remaining_i),
-                "n_exec_preclip": int(remaining_i),
-                "alloc_multiplier": 1.0,
-                "alloc_eff_prev": None,
-                "alloc_eff_ref": None,
-                "alloc_min_stage": int(self.exec_min),
-                "alloc_max_stage": int(remaining_i),
-                "alloc_additional_budget_total": int(self._additional_budget_total),
+            n_strict = int(max(n_base, strict_floor))
+            if n_strict <= remaining_i:
+                ok_strict, g_strict, l_strict, g_ratio_strict = _split_exec(
+                    n_exec_try=n_strict,
+                    strict_ratio=True,
+                )
+                if ok_strict:
+                    np_pen, np_ratio = _np_band_penalty(n_strict)
+                    strict_candidates.append(
+                        {
+                            "stages_est": int(stages_est),
+                            "n_exec": int(n_strict),
+                            "n_exec_global": int(g_strict),
+                            "n_exec_local": int(l_strict),
+                            "g_ratio": float(g_ratio_strict),
+                            "np_penalty": float(np_pen),
+                            "np_ratio": float(np_ratio),
+                        }
+                    )
+
+        if not relaxed_candidates:
+            return 0, {
+                "alloc_source": "min_infeasible",
+                "global_floor": int(global_floor),
+                "local_floor": int(local_floor),
+                "exec_floor": int(exec_floor),
+                "exec_floor_strict": int(strict_floor),
+                "stages_est": int(stages_remaining_cap),
+                "absorbed": False,
+                "bucket_minima_sum": int(global_floor),
+                "min_feasible": False,
+                "ratio_strict_selected": False,
+                "n_exec_global_pref": 0,
+                "n_exec_local_pref": 0,
             }
 
-        base_raw = int(round(float(self._additional_budget_total) * float(shares[round_idx])))
-        if round_idx == len(shares) - 1:
-            return int(remaining_i), {
-                "alloc_source": "dynamic_last_share_all_remaining",
-                "n_exec_base": int(base_raw),
-                "n_exec_preclip": int(remaining_i),
-                "alloc_multiplier": 1.0,
-                "alloc_eff_prev": None,
-                "alloc_eff_ref": None,
-                "alloc_min_stage": int(self.exec_min),
-                "alloc_max_stage": int(remaining_i),
-                "alloc_additional_budget_total": int(self._additional_budget_total),
-            }
+        use_strict = bool(len(strict_candidates) > 0)
+        pool = strict_candidates if use_strict else relaxed_candidates
+        chosen = sorted(pool, key=_candidate_key)[0]
 
-        min_stage = max(int(self.exec_min), int(round(float(self._additional_budget_total) * self.exec_stage_min_ratio)))
-        max_stage = max(min_stage, int(round(float(self._additional_budget_total) * self.exec_stage_max_ratio)))
-        n_base = int(np.clip(base_raw, min_stage, max_stage))
+        n_exec = int(chosen["n_exec"])
+        stages_est = int(chosen["stages_est"])
+        n_exec_global_pref = int(chosen["n_exec_global"])
+        n_exec_local_pref = int(chosen["n_exec_local"])
+        chosen_g_ratio = float(chosen["g_ratio"])
 
-        mult, eff_prev, eff_ref = self._estimate_exec_multiplier()
-        n_preclip = int(round(float(n_base) * float(mult)))
-        n_clipped = int(np.clip(n_preclip, min_stage, max_stage))
-        n_exec = int(min(n_clipped, remaining_i))
-        if remaining_i < self.exec_min:
-            n_exec = int(remaining_i)
-        else:
-            n_exec = max(int(n_exec), int(self.exec_min))
+        # Tail absorb: if next remainder cannot satisfy min floor (or at hard stage cap), absorb now.
+        remaining_after = remaining_i - n_exec
+        is_last_allowed = (round_idx >= self.max_additional_stages - 1)
+        absorbed = False
+        if remaining_after > 0 and (remaining_after < exec_floor or is_last_allowed):
+            n_exec = remaining_i
+            ok_absorb, g_absorb, l_absorb, g_ratio_absorb = _split_exec(
+                n_exec_try=n_exec,
+                strict_ratio=use_strict,
+            )
+            if not ok_absorb:
+                ok_absorb, g_absorb, l_absorb, g_ratio_absorb = _split_exec(
+                    n_exec_try=n_exec,
+                    strict_ratio=False,
+                )
+                use_strict = False
+            if ok_absorb:
+                n_exec_global_pref = int(g_absorb)
+                n_exec_local_pref = int(l_absorb)
+                chosen_g_ratio = float(g_ratio_absorb)
+            absorbed = True
 
         return n_exec, {
-            "alloc_source": "dynamic_efficiency_weighted",
-            "n_exec_base": int(n_base),
-            "n_exec_preclip": int(n_preclip),
-            "alloc_multiplier": float(mult),
-            "alloc_eff_prev": None if eff_prev is None else float(eff_prev),
-            "alloc_eff_ref": None if eff_ref is None else float(eff_ref),
-            "alloc_min_stage": int(min_stage),
-            "alloc_max_stage": int(max_stage),
-            "alloc_additional_budget_total": int(self._additional_budget_total),
+            "alloc_source": "dynamic_priority_ratio_stage_np",
+            "global_floor": int(global_floor),
+            "local_floor": int(local_floor),
+            "exec_floor": int(exec_floor),
+            "exec_floor_strict": int(strict_floor),
+            "stages_est": int(stages_est),
+            "absorbed": bool(absorbed),
+            "bucket_minima_sum": int(global_floor),
+            "min_feasible": True,
+            "ratio_strict_selected": bool(use_strict),
+            "n_exec_global_pref": int(n_exec_global_pref),
+            "n_exec_local_pref": int(n_exec_local_pref),
+            "n_exec_global_ratio_pref": float(chosen_g_ratio),
         }
 
     def _compute_n_plan(self, *, remaining: int, round_idx: int) -> int:
@@ -1473,12 +1512,12 @@ class AdditionalDOEOrchestrator:
         self._update_post_lambda()
         self._initial_budget_used = int(self.budget.used)
         self._additional_budget_total = int(max(self.total_budget - self._initial_budget_used, 0))
-        if self.dynamic_exec_allocation_enabled:
-            print(
-                "[AdditionalDOE] dynamic_exec_allocation "
-                f"enabled=True shares={self.exec_round_shares} "
-                f"additional_budget_total={self._additional_budget_total}"
-            )
+        print(
+            f"[AdditionalDOE] dynamic_priority_ratio_stage_np: "
+            f"additional_budget={self._additional_budget_total} "
+            f"max_stages={self.max_additional_stages} "
+            f"bucket_minima_enabled={self.global_bucket_minima_enabled}"
+        )
 
         # --------------------------------------------
         # Additional DOE loop
@@ -1540,36 +1579,17 @@ class AdditionalDOEOrchestrator:
             # -----------------------------
             # 2) Build X_plan (once per stage)
             # -----------------------------
+            _bm_minima_stage = self._resolve_bucket_minima(phase=phase) if self.global_bucket_minima_enabled else {}
             n_exec, alloc_info = self._compute_n_exec_for_stage(
                 round_idx=round_idx,
                 remaining=remaining,
+                phase=phase,
             )
-
-            # ── Bucket minima: n_exec floor 계산 ──
-            _bm_minima_stage = self._resolve_bucket_minima(phase=phase) if self.global_bucket_minima_enabled else {}
-            _bm_min_sum = int(sum(_bm_minima_stage.values()))
-            _bm_ratio_g = float(self.phase1_global_ratio if phase == 1 else self.phase2_global_ratio)
-            _bm_n_exec_floor = 0
-            if _bm_min_sum > 0 and _bm_ratio_g > 0.0:
-                import math as _math
-                _bm_n_exec_floor = int(_math.ceil(_bm_min_sum / max(_bm_ratio_g, 1e-9)))
-                # 기존 n_exec보다 크면 상향, remaining 초과 금지
-                if _bm_n_exec_floor > n_exec:
-                    n_exec = int(min(_bm_n_exec_floor, remaining))
-                    alloc_info = dict(alloc_info)
-                    alloc_info["bucket_minima_floor_applied"] = True
-                    alloc_info["bucket_minima_floor"] = int(_bm_n_exec_floor)
-            # ── phase1 non-increasing clamp ──
-            if phase == 1 and self._last_phase1_n_exec is not None:
-                _bm_prev = int(self._last_phase1_n_exec)
-                # floor도 고려: floor보다는 낮추지 않음
-                _bm_lo = max(_bm_n_exec_floor, 1)
-                if n_exec > _bm_prev and _bm_prev >= _bm_lo:
-                    n_exec = _bm_prev
-                    alloc_info = dict(alloc_info)
-                    alloc_info["phase1_monotone_clamped"] = True
-            if phase == 1:
-                self._last_phase1_n_exec = int(n_exec)
+            if not bool(alloc_info.get("min_feasible", True)):
+                self._set_failure("FAILED_MIN_EXEC_REQUIREMENT", stage=round_idx)
+                break
+            _bm_n_exec_floor = int(alloc_info.get("exec_floor", 0))
+            _bm_minima_boundary = self._bucket_minima_boundary_sum(_bm_minima_stage)
 
             # -----------------------------
             # 1) Build surrogates (bundle)
@@ -2002,10 +2022,25 @@ class AdditionalDOEOrchestrator:
             # -----------------------------
             # 4) Filter X_plan then select X_exec
             # -----------------------------
-            ratio_global = self.phase1_global_ratio if phase == 1 else self.phase2_global_ratio
-            n_exec_global = int(round(n_exec * ratio_global))
-            n_exec_global = min(max(n_exec_global, 0), n_exec)
-            n_exec_local = n_exec - n_exec_global
+            _global_floor = int(alloc_info.get("global_floor", 0))
+            _local_floor = int(alloc_info.get("local_floor", 0))
+            n_exec_global = int(alloc_info.get("n_exec_global_pref", 0))
+            n_exec_local = int(alloc_info.get("n_exec_local_pref", int(max(n_exec - n_exec_global, 0))))
+            if n_exec_global < 0:
+                n_exec_global = 0
+            if n_exec_local < 0:
+                n_exec_local = 0
+            if (n_exec_global + n_exec_local) != int(n_exec):
+                n_exec_global = int(min(max(n_exec_global, 0), n_exec))
+                n_exec_local = int(max(n_exec - n_exec_global, 0))
+            # hard floor (best-effort)
+            if n_exec >= (_global_floor + _local_floor):
+                if n_exec_global < _global_floor:
+                    n_exec_global = int(_global_floor)
+                    n_exec_local = int(max(n_exec - n_exec_global, 0))
+                if n_exec_local < _local_floor:
+                    n_exec_local = int(_local_floor)
+                    n_exec_global = int(max(n_exec - n_exec_local, 0))
             if gate_stop:
                 # Final stage policy: exploit locally as much as possible.
                 n_exec_global = 0
@@ -2032,8 +2067,9 @@ class AdditionalDOEOrchestrator:
                 f"exec_global/local={n_exec_global}/{n_exec_local} "
                 f"used_ratio={used_budget_ratio:.3f} policy={self.budget_policy} "
                 f"alloc={alloc_info.get('alloc_source')} "
-                f"base={alloc_info.get('n_exec_base')} "
-                f"mult={alloc_info.get('alloc_multiplier')}"
+                f"floor(g/l/t)={alloc_info.get('global_floor')}/{alloc_info.get('local_floor')}/{alloc_info.get('exec_floor')} "
+                f"stages_est={alloc_info.get('stages_est')} "
+                f"absorbed={alloc_info.get('absorbed')}"
             )
 
             spans, lbs = compute_spans_lbs(self.bounds)
@@ -2727,15 +2763,17 @@ class AdditionalDOEOrchestrator:
                     "next_phase": int(next_phase),
                     "n_plan": int(n_plan),
                     "n_exec": int(n_exec),
-                    "n_exec_base": int(alloc_info.get("n_exec_base", n_exec)),
+                    "n_exec_global_floor": int(alloc_info.get("global_floor", 0)),
+                    "n_exec_local_floor": int(alloc_info.get("local_floor", 0)),
+                    "n_exec_floor": int(alloc_info.get("exec_floor", 0)),
                     "n_exec_preclip": int(alloc_info.get("n_exec_preclip", n_exec)),
                     "alloc_source": str(alloc_info.get("alloc_source", "")),
-                    "alloc_multiplier": alloc_info.get("alloc_multiplier"),
-                    "alloc_eff_prev": alloc_info.get("alloc_eff_prev"),
-                    "alloc_eff_ref": alloc_info.get("alloc_eff_ref"),
-                    "alloc_min_stage": alloc_info.get("alloc_min_stage"),
-                    "alloc_max_stage": alloc_info.get("alloc_max_stage"),
-                    "alloc_additional_budget_total": alloc_info.get("alloc_additional_budget_total"),
+                    "alloc_stages_est": alloc_info.get("stages_est"),
+                    "alloc_absorbed": alloc_info.get("absorbed"),
+                    "alloc_min_feasible": bool(alloc_info.get("min_feasible", True)),
+                    "alloc_ratio_strict": bool(alloc_info.get("ratio_strict_selected", False)),
+                    "alloc_exec_floor_strict": alloc_info.get("exec_floor_strict"),
+                    "alloc_bucket_minima_sum": alloc_info.get("bucket_minima_sum"),
                     "n_global_plan": int(n_global),
                     "n_local_plan": int(n_local),
                     "n_exec_global_target": int(n_exec_global),
@@ -3054,20 +3092,7 @@ class AdditionalDOEOrchestrator:
         if self.gate_history:
             phase2_np_gate_last = self.gate_history[-1].get("phase2_np_gate")
             gate2_phase_threshold_used_last = self.gate_history[-1].get("phase2_gate2_threshold_used")
-        alloc_rows = [
-            g for g in self.gate_history
-            if g.get("alloc_multiplier") is not None
-        ]
-        alloc_multiplier_last = alloc_rows[-1].get("alloc_multiplier") if alloc_rows else None
-        alloc_eff_prev_last = alloc_rows[-1].get("alloc_eff_prev") if alloc_rows else None
-        alloc_eff_ref_last = alloc_rows[-1].get("alloc_eff_ref") if alloc_rows else None
-        alloc_multiplier_mean = (
-            float(np.mean([float(g.get("alloc_multiplier")) for g in alloc_rows]))
-            if alloc_rows else None
-        )
-        alloc_dynamic_applied_count = int(
-            sum(1 for g in alloc_rows if str(g.get("alloc_source", "")).startswith("dynamic"))
-        )
+        alloc_rows = [g for g in self.gate_history if g.get("alloc_source") is not None]
         budget_exhausted = bool(self.budget.exhausted())
         terminated_by = (
             str(self.failure_reason)
@@ -3092,22 +3117,10 @@ class AdditionalDOEOrchestrator:
             "usable_n": int(usable_n),
             "usable_n_over_p": float(usable_n_over_p),
             "used_budget_ratio_final": float(used_budget_ratio_final),
-            "dynamic_exec_allocation_enabled": bool(self.dynamic_exec_allocation_enabled),
-            "exec_round_shares": [float(v) for v in self.exec_round_shares],
-            "exec_eff_weight_gate1": float(self.exec_eff_weight_gate1),
-            "exec_eff_weight_gate2": float(self.exec_eff_weight_gate2),
-            "exec_eff_gain_k": float(self.exec_eff_gain_k),
-            "exec_eff_clip_min": float(self.exec_eff_clip_min),
-            "exec_eff_clip_max": float(self.exec_eff_clip_max),
-            "exec_stage_min_ratio": float(self.exec_stage_min_ratio),
-            "exec_stage_max_ratio": float(self.exec_stage_max_ratio),
+            "stage_alloc_mode": "dynamic_priority_ratio_stage_np",
             "global_margin_subset_enabled": bool(self.global_margin_subset_enabled),
             "global_margin_subset_random_k_count": int(self.global_margin_subset_random_k_count),
-            "alloc_multiplier_last": alloc_multiplier_last,
-            "alloc_multiplier_mean": alloc_multiplier_mean,
-            "alloc_eff_prev_last": alloc_eff_prev_last,
-            "alloc_eff_ref_last": alloc_eff_ref_last,
-            "alloc_dynamic_applied_count": alloc_dynamic_applied_count,
+            "alloc_stages_total": len(alloc_rows),
             "phase2_gate1_score_min": float(self.phase2_gate1_score_min),
             "phase2_gate2_score_min": float(self.phase2_gate2_score_min),
             "phase2_gate2_score_sticky_min": float(self.phase2_gate2_score_sticky_min),
@@ -3144,6 +3157,7 @@ class AdditionalDOEOrchestrator:
             "phase2_min_top": int(self.phase2_min_top),
             "phase2_min_margin": int(self.phase2_min_margin),
             "global_bucket_plan_multiplier": int(self.global_bucket_plan_multiplier),
+            "local_exec_min_anchors": int(self.local_exec_min_anchors),
             "bucket_min_relaxed_count": int(self._bucket_min_relaxed_count),
             "phase2_np_gate_last": phase2_np_gate_last,
             "gate2_phase_threshold_used_last": gate2_phase_threshold_used_last,

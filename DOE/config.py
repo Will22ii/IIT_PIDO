@@ -16,8 +16,8 @@ class DOESystemConfig:
     # 1) DOE 기본
     n_samples: int = 120
     force_baseline_initial: bool = False
-    initial_corner_ratio: float = 0.03
-    initial_corner_adaptive_enabled: bool = False
+    initial_corner_ratio: float = 0.1
+    initial_corner_adaptive_enabled: bool = True
     initial_corner_adaptive_np_ratio_max: float = 10.0
     initial_corner_adaptive_low_dim_max: int = 6
     initial_corner_adaptive_ratio_low_dim: float = 0.05
@@ -25,27 +25,20 @@ class DOESystemConfig:
     # 2) Additional DOE: 단계/배분
     additional_init_ratio: float = 0.4
     additional_exec_ratio: float = 0.1
-    dynamic_exec_allocation_enabled: bool = True
-    additional_exec_round_shares: tuple[float, ...] = (0.24, 0.19, 0.17, 0.15, 0.13, 0.12)
-    exec_eff_weight_gate1: float = 0.45
-    exec_eff_weight_gate2: float = 0.55
-    exec_eff_gain_k: float = 0.7
-    exec_eff_clip_min: float = 0.85
-    exec_eff_clip_max: float = 1.20
-    exec_stage_min_ratio: float = 0.08
-    exec_stage_max_ratio: float = 0.40
     additional_initial_probe_multiplier: float = 2.0
+    # n_exec_local_floor: 최소 서로 다른 anchor에서 각 1개 sampling (다양성 보장)
+    local_exec_min_anchors: int = 2
     success_rate_floor: float = 0.02
-    global_boundary_ratio: float = 0.08
+    global_boundary_ratio: float = 0.05
     global_margin_ratio: float = 0.3
     global_margin_subset_enabled: bool = True
     global_margin_subset_random_k_count: int = 2
     global_top_ratio: float = 0.25
     global_boundary_corner_ratio: float = 0.5
-    global_boundary_constraint_boost: float = 1.2
-    global_boundary_margin_cross_ratio: float = 0.6
+    global_boundary_constraint_boost: float = 2.5
+    global_boundary_margin_cross_ratio: float = 0.4
     global_boundary_margin_near_tol: float = 0.03
-    global_margin_obj_alpha: float = 0.75
+    global_margin_obj_alpha: float = 0.5
 
     # 3) Additional DOE: plan 크기
     plan_base_k: float = 200.0
@@ -53,7 +46,7 @@ class DOESystemConfig:
     plan_decay: float = 0.9
     plan_filter_safety: float = 1.2
     plan_filter_r_floor: float = 0.02
-    max_additional_stages: int = 12
+    max_additional_stages: int = 10
 
     # 4) Gate
     gate1_ratio: float = 0.3
@@ -156,6 +149,7 @@ class DOESystemConfig:
     diversity_injection_min_points: int = 2
     diversity_injection_max_ratio: float = 0.40
     diversity_boundary_floor_ratio: float = 0.12
+    # budget_policy == "adaptive_early_stop"일 때 추가 라운드/예산 소진 기준
     min_additional_rounds: int = 6
     early_stop_min_used_budget_ratio: float = 0.50
     early_stop_min_usable_np_ratio: float = 20.0
