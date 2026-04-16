@@ -105,6 +105,10 @@ class DOESystemConfig:
     # True면 phase=2에서 boundary 샘플 할당을 0으로 강제
     phase2_disable_boundary_sampling: bool = True
     phase2_gate1_score_min: float = 0.55
+    # gate1이 threshold 바로 아래인 경우, gate2 strong 신호면 phase2 진입 rescue 허용
+    phase2_gate1_rescue_enabled: bool = True
+    phase2_gate1_rescue_band: float = 0.03
+    phase2_gate1_rescue_gate2_min: float = 0.85
     phase2_gate2_score_min: float = 0.75
     phase2_gate2_score_sticky_min: float = 0.65
     phase2_min_usable_np_ratio: float = 10.0

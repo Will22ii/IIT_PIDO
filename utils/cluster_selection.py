@@ -5,6 +5,27 @@ import numpy as np
 from utils.dbscan_utils import auto_dbscan_eps_quantile
 
 
+def _boundary_touch_score(
+    point: np.ndarray | None,
+    bounds: list[Tuple[float, float]],
+    eps_ratio: float = 0.05,
+) -> float:
+    """DSE-5: 점이 design boundary(lb/ub) 근접한 차원의 비율(0..1)."""
+    if point is None:
+        return 0.0
+    p = np.asarray(point, dtype=float).reshape(-1)
+    if p.size != len(bounds):
+        return 0.0
+    eps_r = float(max(eps_ratio, 0.0))
+    touches = 0
+    for j, (lb, ub) in enumerate(bounds):
+        span = max(float(ub) - float(lb), 1e-12)
+        eps = eps_r * span
+        if (float(p[j]) - float(lb)) <= eps or (float(ub) - float(p[j])) <= eps:
+            touches += 1
+    return float(touches) / float(max(len(bounds), 1))
+
+
 def select_top_clusters(
     *,
     X: np.ndarray,
@@ -21,6 +42,8 @@ def select_top_clusters(
     diversity_min_distance: float = 0.22,
     diversity_close_penalty: float = 0.8,
     diversity_min_dim: int = 4,
+    boundary_touch_bonus_weight: float = 0.30,
+    boundary_touch_eps_ratio: float = 0.05,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     if X.size == 0 or y.size == 0:
         return np.empty((0, X.shape[1] if X.ndim == 2 else 0)), np.array([], dtype=int), {}
@@ -89,6 +112,7 @@ def select_top_clusters(
             {
                 "label": label,
                 "best_val": float(y_q[best_local]),
+                "best_point": np.asarray(X_q[best_local], dtype=float).reshape(-1),
                 "points": X_q[idx],
                 "center": np.mean(X_q[idx], axis=0),
                 "indices_local": idx.astype(int),
@@ -158,6 +182,9 @@ def select_top_clusters(
                 dists.append(max(d, 0.0))
             return float(min(dists)) if dists else 0.0
 
+        # DSE-5: design 경계 근접 cluster quality bonus (state-based, optimum 미사용)
+        boundary_bonus_w = float(max(boundary_touch_bonus_weight, 0.0))
+
         for _ in range(int(diversity_extra_clusters)):
             if not candidates:
                 break
@@ -167,6 +194,11 @@ def select_top_clusters(
             for i, c in enumerate(candidates):
                 rank = int(rank_map.get(c["label"], n_rank))
                 quality = 1.0 - (float(rank) / float(n_rank))
+                if boundary_bonus_w > 0.0:
+                    bt_score = _boundary_touch_score(
+                        c.get("best_point"), bounds, eps_ratio=boundary_touch_eps_ratio
+                    )
+                    quality = quality + boundary_bonus_w * float(bt_score)
                 cand_center = np.asarray(c["center"], dtype=float).reshape(-1)
                 min_dist = _norm_min_dist(cand_center, selected)
                 close_penalty = close_pen * max(dist_floor - min_dist, 0.0)

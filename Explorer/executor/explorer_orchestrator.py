@@ -39,6 +39,11 @@ from Explorer.executor.explorer_utils import (
     resolve_bounds,
     resolve_selected_features,
 )
+from Explorer.executor.routing import (
+    RouterInput,
+    RouterOutput,
+    route_v2,
+)
 from Explorer.visualization.explorer_plots import (
     plot_dual_cluster_pair,
     plot_bounds_pair,
@@ -1288,6 +1293,8 @@ class ExplorerOrchestrator:
         pred_multistart_det_fraction_used = None
         pred_refine_bounds_scale_used = None
         pred_n_starts_used = None
+        pred_overconf_guard_triggered = False
+        pred_overconf_guard_reason = None
         obj_div_extra = int(max(0, int(strategy_params.get("obj_diversity_extra_clusters", 0))))
         obj_div_weight = float(strategy_params.get("obj_diversity_weight", 0.35))
         obj_div_min_dist = float(strategy_params.get("obj_diversity_min_distance", 0.22))
@@ -1492,6 +1499,8 @@ class ExplorerOrchestrator:
         dual_center_tilt_strength_used_mean = None
         dual_center_tilt_applied = False
         dual_center_hint = None
+        # routed_v2: dual 모드 내부 라우터. 활성화되면 obj_ratio/tilt/cap/expansion/dse2 override
+        routed_v2_decision: RouterOutput | None = None
 
         if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred", "s4_obj", "s8_obj"}:
             source_mode = "dual"
@@ -1536,6 +1545,49 @@ class ExplorerOrchestrator:
             obj_refine_bounds_scale = float(
                 max(float(strategy_params_local.get("obj_refine_bounds_scale", obj_refine_bounds_scale_default)), 1.0)
             )
+            if source_mode == "pred" and strategy_alias in {"s4_pred", "s8_pred"}:
+                overconf_guard_enabled = bool(strategy_params_local.get("pred_overconf_guard_enabled", False))
+                if overconf_guard_enabled:
+                    overconf_conf_high = float(
+                        np.clip(float(strategy_params_local.get("pred_overconf_conf_high", 0.58)), 0.0, 1.0)
+                    )
+                    overconf_iou_high = float(max(float(strategy_params_local.get("pred_overconf_iou_high", 0.24)), 0.0))
+                    overconf_scale_boost = float(max(float(strategy_params_local.get("pred_overconf_scale_boost", 0.0)), 0.0))
+                    overconf_scale_cap = float(
+                        max(
+                            float(strategy_params_local.get("pred_overconf_scale_cap", max(pred_refine_bounds_scale, 1.0))),
+                            1.0,
+                        )
+                    )
+                    overconf_det_fraction = float(
+                        np.clip(
+                            float(strategy_params_local.get("pred_overconf_det_fraction", pred_multistart_det_fraction)),
+                            0.0,
+                            1.0,
+                        )
+                    )
+                    overconf_iou_now = _bounds_iou_ratio(pred_bounds, obj_bounds)
+                    if (
+                        pred_cluster_confidence is not None
+                        and np.isfinite(pred_cluster_confidence)
+                        and overconf_iou_now is not None
+                        and np.isfinite(overconf_iou_now)
+                        and float(pred_cluster_confidence) >= overconf_conf_high
+                        and float(overconf_iou_now) >= overconf_iou_high
+                    ):
+                        pred_refine_bounds_scale = float(
+                            np.clip(pred_refine_bounds_scale + overconf_scale_boost, 1.0, overconf_scale_cap)
+                        )
+                        pred_multistart_det_fraction = float(overconf_det_fraction)
+                        pred_overconf_guard_triggered = True
+                        pred_overconf_guard_reason = (
+                            f"conf={float(pred_cluster_confidence):.3f}, iou={float(overconf_iou_now):.4f}"
+                        )
+                        print(
+                            "[Explorer] pred-overconf guard applied: "
+                            f"{pred_overconf_guard_reason} -> "
+                            f"scale={pred_refine_bounds_scale:.3f}, det_frac={pred_multistart_det_fraction:.3f}"
+                        )
             pred_multistart_det_fraction_used = float(pred_multistart_det_fraction)
             pred_refine_bounds_scale_used = float(pred_refine_bounds_scale)
             if source_mode == "dual":
@@ -1621,6 +1673,75 @@ class ExplorerOrchestrator:
                     dual_disagreement_triggered = bool(
                         dual_disagreement_iou is not None and dual_disagreement_iou < _iou_ref
                     )
+                elif dual_policy_mode == "routed_v2":
+                    # ── routed_v2: 결정 트리 라우터 (Explorer/executor/routing.py) ──
+                    # disagreement 신호를 미리 계산
+                    pred_center = _bounds_center(pred_bounds)
+                    obj_center = _bounds_center(obj_bounds)
+                    if pred_center is not None and obj_center is not None:
+                        spans = np.array(
+                            [max(float(ub) - float(lb), 1e-12) for lb, ub in bounds],
+                            dtype=float,
+                        )
+                        dual_disagreement_center_l1_norm = float(
+                            np.mean(np.abs(obj_center - pred_center) / spans)
+                        )
+                    dual_disagreement_iou = _bounds_iou_ratio(pred_bounds, obj_bounds)
+
+                    _routed_overrides = strategy_params_local.get("routed_v2_overrides", None)
+                    if not isinstance(_routed_overrides, dict):
+                        _routed_overrides = None
+
+                    _router_state = RouterInput(
+                        p_dim=int(d),
+                        has_pre_constraints=bool(has_pre_constraints),
+                        has_post_constraints=bool(has_post_constraints),
+                        usable_n=int(_meta_get("usable_n", 0) or 0),
+                        usable_n_over_p=float(dual_np_ratio_used) if dual_np_ratio_used is not None else 0.0,
+                        constraint_rate_hat=float(_meta_get("constraint_rate_hat", 1.0) or 1.0),
+                        doe_gate1_pass_rate=_meta_get("doe_gate1_pass_rate", None),
+                        doe_gate2_pass_rate=_meta_get("doe_gate2_pass_rate", None),
+                        doe_gate1_score_last=_meta_get("doe_gate1_score_last", None),
+                        doe_gate2_score_last=_meta_get("doe_gate2_score_last", None),
+                        phase2_entered=bool(_meta_get("phase2_entered", False)),
+                        phase2_transition_count=int(_meta_get("phase2_transition_count", 0) or 0),
+                        doe_collapse_detected_count=int(_meta_get("doe_collapse_detected_count", 0) or 0),
+                        doe_diversity_injection_applied_count=int(
+                            _meta_get("doe_diversity_injection_applied_count", 0) or 0
+                        ),
+                        pred_cluster_confidence=pred_cluster_confidence,
+                        pred_cluster_sigma_mean_selected=pred_cluster_sigma_mean_selected,
+                        pred_refine_shift_norm=None,  # refine 단계에서 assign — routed 시점 미가용
+                        pred_obj_iou=dual_disagreement_iou,
+                        dual_disagreement_iou=dual_disagreement_iou,
+                        dual_disagreement_center_l1_norm=dual_disagreement_center_l1_norm,
+                    )
+                    routed_v2_decision = route_v2(_router_state, overrides=_routed_overrides)
+                    obj_ratio = float(routed_v2_decision.obj_ratio)
+                    # tilt override: routed_v2가 high-crate/severe-disag 로직을 포함하므로
+                    # 기존 _dseb_tilt_eff 결과를 override
+                    dual_center_tilt_strength_base = float(np.clip(
+                        routed_v2_decision.tilt_strength, 0.0, 1.0
+                    ))
+                    print(
+                        f"[Explorer] routed_v2: p_dim={d}, n/p={float(dual_np_ratio_used or 0):.1f}, "
+                        f"crate={float(_meta_get('constraint_rate_hat', 1.0) or 1.0):.3f}, "
+                        f"iou={dual_disagreement_iou}, pred_conf={pred_cluster_confidence}"
+                    )
+                    print(
+                        f"[Explorer] routed_v2 decision: acq={routed_v2_decision.acq_mode}, "
+                        f"obj_ratio={routed_v2_decision.obj_ratio:.3f}, "
+                        f"tilt={routed_v2_decision.tilt_strength:.3f}, "
+                        f"expansion={routed_v2_decision.expansion_mode}, "
+                        f"cap={routed_v2_decision.cap_target:.3f}, "
+                        f"dse2_iou={routed_v2_decision.dse2_iou_threshold:.3f}"
+                    )
+                    for _r in routed_v2_decision.reason_trace:
+                        print(f"[Explorer]   - {_r}")
+                    dual_disagreement_triggered = bool(
+                        dual_disagreement_iou is not None
+                        and dual_disagreement_iou < float(routed_v2_decision.dse2_iou_threshold)
+                    )
                 else:
                     np_ratio_now = float(dual_np_ratio_used) if dual_np_ratio_used is not None else 0.0
                     if np_ratio_now <= np_ratio_low:
@@ -1667,10 +1788,11 @@ class ExplorerOrchestrator:
                         obj_ratio = max(obj_ratio, 0.70)
 
                 # DSE-B: 고제약(crate_hat < threshold) 시 obj_ratio bonus
+                # routed_v2 활성 시 자체 high-crate 로직이 있으므로 중복 적용 방지
                 _dseb_obj_bonus = float(strategy_params_local.get(
                     "dual_high_crate_obj_ratio_bonus", 0.10
                 ))
-                if _dseb_is_high_crate and _dseb_obj_bonus > 0.0:
+                if _dseb_is_high_crate and _dseb_obj_bonus > 0.0 and routed_v2_decision is None:
                     obj_ratio += float(_dseb_obj_bonus)
                     print(
                         f"[Explorer] DSE-B high-crate bonus: crate_hat={_dseb_crate_hat:.3f} "
@@ -2441,6 +2563,12 @@ class ExplorerOrchestrator:
 
         if selected_bounds is not None:
             expansion_mode = str(getattr(self.config.system, "bounds_expansion_mode", "uniform")).strip().lower()
+            # routed_v2 override: 라우터가 expansion_mode를 결정한 경우 우선 적용
+            if routed_v2_decision is not None:
+                expansion_mode = str(routed_v2_decision.expansion_mode).strip().lower()
+                print(
+                    f"[Explorer] routed_v2 override expansion_mode={expansion_mode}"
+                )
             # EXP-3: 고제약 시 fi_aware → uncertainty_aware 자동 스위치 (state-based)
             try:
                 _exp3_crate_hat = float(_meta_get("constraint_rate_hat", 1.0))
@@ -2528,6 +2656,44 @@ class ExplorerOrchestrator:
             if pred_cluster_confidence is not None and pred_cluster_confidence < 0.4:
                 _margin_ratio = max(_margin_ratio, 0.06)
 
+            # DSE-2: dual disagreement이 매우 낮을 때(pred·obj 클러스터 거의 분리)
+            # selected_bounds를 pred ∪ obj로 확장. 후속 vol cap이 boundary-pin과 함께
+            # 두 region의 corner를 보존할 수 있도록 함. dual 모드(s4/s8)에 한정.
+            _dse2_strategy_params = dict(self.config.system.strategy_params or {})
+            _dse2_iou_threshold = float(_dse2_strategy_params.get(
+                "dse2_low_iou_union_threshold", 0.20
+            ))
+            # routed_v2 override: 라우터가 더 보수적/공격적 임계값 결정 가능
+            if routed_v2_decision is not None:
+                _dse2_iou_threshold = float(routed_v2_decision.dse2_iou_threshold)
+            if (
+                strategy_alias in {"s4", "s8"}
+                and pred_bounds is not None
+                and obj_bounds is not None
+                and dual_disagreement_iou is not None
+                and np.isfinite(float(dual_disagreement_iou))
+                and float(dual_disagreement_iou) < _dse2_iou_threshold
+                and selected_bounds is not None
+                and len(selected_bounds) == len(bounds)
+                and len(pred_bounds) == len(bounds)
+                and len(obj_bounds) == len(bounds)
+            ):
+                _union_bounds: list[tuple[float, float]] = []
+                for (s_lb, s_ub), (p_lb, p_ub), (o_lb, o_ub), (g_lb, g_ub) in zip(
+                    selected_bounds, pred_bounds, obj_bounds, bounds
+                ):
+                    _u_lb = float(max(min(s_lb, p_lb, o_lb), g_lb))
+                    _u_ub = float(min(max(s_ub, p_ub, o_ub), g_ub))
+                    if _u_ub < _u_lb:
+                        _u_lb, _u_ub = _u_ub, _u_lb
+                    _union_bounds.append((_u_lb, _u_ub))
+                selected_bounds = _union_bounds
+                print(
+                    f"[Explorer] DSE-2 low-IoU union: iou={float(dual_disagreement_iou):.4f} "
+                    f"< {_dse2_iou_threshold:.2f} → selected_bounds = pred ∪ obj "
+                    f"(boundary-pin-aware cap 적용 예정)"
+                )
+
             selected_bounds = apply_bounds_margin(
                 selected_bounds=selected_bounds,
                 bounds=bounds,
@@ -2539,6 +2705,12 @@ class ExplorerOrchestrator:
 
             strategy_params = dict(self.config.system.strategy_params or {})
             dual_cap_raw = strategy_params.get("max_volume_ratio_target", None)
+            # routed_v2 override: 라우터가 cap을 0.30 등으로 완화한 경우 우선 적용
+            if routed_v2_decision is not None:
+                dual_cap_raw = float(routed_v2_decision.cap_target)
+                print(
+                    f"[Explorer] routed_v2 override max_volume_ratio_target={dual_cap_raw:.3f}"
+                )
             if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred", "s4_obj", "s8_obj"} and dual_cap_raw is not None:  # K: pred/obj 전략에도 volume cap 적용
                 try:
                     dual_volume_cap_target = float(dual_cap_raw)
@@ -2595,6 +2767,55 @@ class ExplorerOrchestrator:
                                     f"{dual_volume_ratio_before_cap:.4f} -> {vol_after_cap:.4f} "
                                     f"(target={dual_volume_cap_target:.4f})"
                                 )
+
+        # DSE-1: boundary-touch shift — selected_points에 design boundary 근접 점이
+        # 있는데 post-cap selected_bounds가 해당 boundary에서 떨어져 있으면, width를
+        # 유지한 채 그 boundary 쪽으로 shift. volume 변화 없음.
+        # 일반화 규칙(state-based): 어떤 차원에서 cluster 점들의 max(또는 min)가
+        # design ub(lb)의 ε 이내이지만 현재 bounds가 그 boundary에 닿지 않으면 shift.
+        if (
+            selected_bounds is not None
+            and isinstance(selected_points, np.ndarray)
+            and selected_points.ndim == 2
+            and selected_points.shape[0] > 0
+            and len(selected_bounds) == len(bounds)
+            and selected_points.shape[1] == len(bounds)
+        ):
+            _dse1_strategy_params = dict(self.config.system.strategy_params or {})
+            _dse1_eps_ratio = float(_dse1_strategy_params.get(
+                "dse1_boundary_touch_eps_ratio", 0.05
+            ))
+            _dse1_shifted: list[tuple[int, str]] = []
+            _dse1_new_bounds: list[tuple[float, float]] = []
+            for j, ((s_lb, s_ub), (g_lb, g_ub)) in enumerate(
+                zip(selected_bounds, bounds)
+            ):
+                span_g = max(float(g_ub) - float(g_lb), 1e-12)
+                eps_g = float(_dse1_eps_ratio) * span_g
+                col = np.asarray(selected_points[:, j], dtype=float)
+                col_max = float(np.max(col))
+                col_min = float(np.min(col))
+                touches_ub = (float(g_ub) - col_max) <= eps_g
+                touches_lb = (col_min - float(g_lb)) <= eps_g
+                far_from_ub = (float(g_ub) - float(s_ub)) > eps_g
+                far_from_lb = (float(s_lb) - float(g_lb)) > eps_g
+                width = max(float(s_ub) - float(s_lb), 0.0)
+                new_lb, new_ub = float(s_lb), float(s_ub)
+                if touches_ub and far_from_ub and not (touches_lb and far_from_lb):
+                    new_ub = float(g_ub)
+                    new_lb = float(max(float(g_lb), new_ub - width))
+                    _dse1_shifted.append((j, "ub"))
+                elif touches_lb and far_from_lb and not (touches_ub and far_from_ub):
+                    new_lb = float(g_lb)
+                    new_ub = float(min(float(g_ub), new_lb + width))
+                    _dse1_shifted.append((j, "lb"))
+                _dse1_new_bounds.append((new_lb, new_ub))
+            if _dse1_shifted:
+                selected_bounds = _dse1_new_bounds
+                print(
+                    f"[Explorer] DSE-1 boundary-touch shift: dims={_dse1_shifted} "
+                    f"(width-preserving)"
+                )
 
         if selected_bounds is not None:
             vol_ratio = _volume_ratio_for_bounds(selected_bounds, bounds)
@@ -2818,6 +3039,8 @@ class ExplorerOrchestrator:
             "pred_multistart_det_fraction_used": pred_multistart_det_fraction_used,
             "pred_refine_bounds_scale_used": pred_refine_bounds_scale_used,
             "pred_n_starts_used": pred_n_starts_used,
+            "pred_overconf_guard_triggered": bool(pred_overconf_guard_triggered),
+            "pred_overconf_guard_reason": pred_overconf_guard_reason,
             # Dual
             "dual_policy_mode": dual_policy_mode,
             "dual_total_starts_target": dual_total_starts_target,
@@ -2836,6 +3059,9 @@ class ExplorerOrchestrator:
             "dual_center_tilt_applied": bool(dual_center_tilt_applied),
             "dual_volume_cap_target": dual_volume_cap_target,
             "dual_volume_ratio_before_cap": dual_volume_ratio_before_cap,
+            "router_decision": (
+                routed_v2_decision.to_dict() if routed_v2_decision is not None else None
+            ),
         }
         _safe_strategy_id = _normalize_strategy_id(strategy_id)
         _analysis_filename = f"analysis_{_safe_strategy_id}.json" if _safe_strategy_id else "analysis.json"

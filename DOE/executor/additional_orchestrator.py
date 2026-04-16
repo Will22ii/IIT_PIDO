@@ -88,6 +88,9 @@ class AdditionalDOEOrchestrator:
         phase2_global_ratio: Optional[float] = None,
         phase2_disable_boundary_sampling: bool = True,
         phase2_gate1_score_min: float = 0.55,
+        phase2_gate1_rescue_enabled: bool = True,
+        phase2_gate1_rescue_band: float = 0.03,
+        phase2_gate1_rescue_gate2_min: float = 0.85,
         phase2_gate2_score_min: float = 0.75,
         phase2_gate2_score_sticky_min: float = 0.65,
         gate_smoothing_enabled: bool = True,
@@ -228,10 +231,17 @@ class AdditionalDOEOrchestrator:
         self.phase2_global_ratio = float(phase2_global_ratio)
         self.phase2_disable_boundary_sampling = bool(phase2_disable_boundary_sampling)
         self.phase2_gate1_score_min = float(phase2_gate1_score_min)
+        self.phase2_gate1_rescue_enabled = bool(phase2_gate1_rescue_enabled)
+        self.phase2_gate1_rescue_band = float(phase2_gate1_rescue_band)
+        self.phase2_gate1_rescue_gate2_min = float(phase2_gate1_rescue_gate2_min)
         self.phase2_gate2_score_min = float(phase2_gate2_score_min)
         self.phase2_gate2_score_sticky_min = float(phase2_gate2_score_sticky_min)
         if not (0.0 <= self.phase2_gate1_score_min <= 1.0):
             raise ValueError("phase2_gate1_score_min must be in [0, 1]")
+        if not (0.0 <= self.phase2_gate1_rescue_band <= 1.0):
+            raise ValueError("phase2_gate1_rescue_band must be in [0, 1]")
+        if not (0.0 <= self.phase2_gate1_rescue_gate2_min <= 1.0):
+            raise ValueError("phase2_gate1_rescue_gate2_min must be in [0, 1]")
         if not (0.0 <= self.phase2_gate2_score_min <= 1.0):
             raise ValueError("phase2_gate2_score_min must be in [0, 1]")
         if not (0.0 <= self.phase2_gate2_score_sticky_min <= 1.0):
@@ -1887,6 +1897,9 @@ class AdditionalDOEOrchestrator:
             can_enter_phase2_by_gate1 = None
             can_enter_phase2_by_gate2 = None
             gate2_phase_threshold = None
+            phase2_gate1_rescue_triggered = False
+            phase2_gate1_rescue_band_lower = None
+            phase2_gate1_rescue_gate2_min_used = None
             if n_exec < self.exec_min:
                 print(
                     f"[AdditionalDOE] stage={round_idx} n_exec={n_exec} < exec_min={self.exec_min}, "
@@ -2003,6 +2016,38 @@ class AdditionalDOEOrchestrator:
                     gate1_score_for_phase2 is not None
                     and gate1_score_for_phase2 >= self.phase2_gate1_score_min
                 )
+                if self.phase2_gate1_rescue_enabled:
+                    phase2_gate1_rescue_band_lower = float(
+                        max(0.0, self.phase2_gate1_score_min - self.phase2_gate1_rescue_band)
+                    )
+                    phase2_gate1_rescue_gate2_min_used = float(self.phase2_gate1_rescue_gate2_min)
+                if (
+                    (not can_enter_phase2_by_gate1)
+                    and self.phase2_gate1_rescue_enabled
+                    and gate1_score_for_phase2 is not None
+                    and gate2_score_for_phase2 is not None
+                ):
+                    rescue_in_band = bool(
+                        phase2_gate1_rescue_band_lower is not None
+                        and phase2_gate1_rescue_band_lower
+                        <= float(gate1_score_for_phase2)
+                        < float(self.phase2_gate1_score_min)
+                    )
+                    rescue_gate2_strong = bool(
+                        float(gate2_score_for_phase2) >= float(self.phase2_gate1_rescue_gate2_min)
+                    )
+                    if rescue_in_band and rescue_gate2_strong:
+                        can_enter_phase2_by_gate1 = True
+                        phase2_gate1_rescue_triggered = True
+                        phase2_decision_source = f"{phase2_decision_source}_rescue"
+                        print(
+                            "[AdditionalDOE] phase2_gate1_rescue "
+                            f"stage={round_idx} source={phase2_decision_source} "
+                            f"g1={float(gate1_score_for_phase2):.3f} "
+                            f"band=[{phase2_gate1_rescue_band_lower:.3f}, {float(self.phase2_gate1_score_min):.3f}) "
+                            f"g2={float(gate2_score_for_phase2):.3f} "
+                            f"g2_min={float(self.phase2_gate1_rescue_gate2_min):.3f}"
+                        )
                 gate2_phase_threshold = float(
                     self.phase2_gate2_score_sticky_min if int(phase) == 2 else self.phase2_gate2_score_min
                 )
@@ -2819,6 +2864,11 @@ class AdditionalDOEOrchestrator:
                     "diversity_sample_count": int(diversity_sample_count),
                     "diversity_hit_rate": diversity_hit_rate,
                     "phase2_gate1_score_min": float(self.phase2_gate1_score_min),
+                    "phase2_gate1_rescue_enabled": bool(self.phase2_gate1_rescue_enabled),
+                    "phase2_gate1_rescue_band": float(self.phase2_gate1_rescue_band),
+                    "phase2_gate1_rescue_band_lower": phase2_gate1_rescue_band_lower,
+                    "phase2_gate1_rescue_gate2_min": phase2_gate1_rescue_gate2_min_used,
+                    "phase2_gate1_rescue_triggered": bool(phase2_gate1_rescue_triggered),
                     "phase2_gate2_score_min": float(self.phase2_gate2_score_min),
                     "phase2_gate2_score_sticky_min": float(self.phase2_gate2_score_sticky_min),
                     "phase2_np_gate": float(phase2_np_gate),
@@ -3051,6 +3101,9 @@ class AdditionalDOEOrchestrator:
                 if int(g.get("phase", 1)) == 1 and int(g.get("next_phase", 1)) == 2
             )
         )
+        phase2_gate1_rescue_trigger_count = int(
+            sum(1 for g in self.gate_history if bool(g.get("phase2_gate1_rescue_triggered", False)))
+        )
         gate_stop_raw_count = int(
             sum(1 for g in self.gate_history if bool(g.get("gate_stop_raw", False)))
         )
@@ -3122,6 +3175,10 @@ class AdditionalDOEOrchestrator:
             "global_margin_subset_random_k_count": int(self.global_margin_subset_random_k_count),
             "alloc_stages_total": len(alloc_rows),
             "phase2_gate1_score_min": float(self.phase2_gate1_score_min),
+            "phase2_gate1_rescue_enabled": bool(self.phase2_gate1_rescue_enabled),
+            "phase2_gate1_rescue_band": float(self.phase2_gate1_rescue_band),
+            "phase2_gate1_rescue_gate2_min": float(self.phase2_gate1_rescue_gate2_min),
+            "phase2_gate1_rescue_trigger_count": int(phase2_gate1_rescue_trigger_count),
             "phase2_gate2_score_min": float(self.phase2_gate2_score_min),
             "phase2_gate2_score_sticky_min": float(self.phase2_gate2_score_sticky_min),
             "phase2_disable_boundary_sampling": bool(self.phase2_disable_boundary_sampling),

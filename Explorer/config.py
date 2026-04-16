@@ -37,10 +37,10 @@ class ExplorerSystemConfig:
     # DBSCAN 입력 후보 상한 (None이면 동적식 사용)
     max_topk_count: int | None = None
     max_topk_count_dynamic_enabled: bool = True
-    max_topk_count_dynamic_scale: float = 40.0
+    max_topk_count_dynamic_scale: float = 60.0
     max_topk_count_dynamic_bias: float = 40.0
     max_topk_count_dynamic_min: int = 120
-    max_topk_count_dynamic_max: int = 320
+    max_topk_count_dynamic_max: int = 500
 
     # 5) 군집화
     dbscan_min_samples: int = 2

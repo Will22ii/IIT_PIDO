@@ -162,14 +162,21 @@ _DUAL_SHARED_PARAMS: dict[str, Any] = {
 _PRED_SHARED_PARAMS: dict[str, Any] = {
     "max_volume_ratio_target": 0.249,
     "pred_cluster_beta": 0.20,
-    "pred_refine_bounds_scale": 1.30,
-    "pred_multistart_det_fraction": 0.35,
-    "pred_cluster_confidence_low": 0.40,
+    "pred_refine_bounds_scale": 1.38,
+    "pred_multistart_det_fraction": 0.22,
+    "pred_cluster_confidence_low": 0.42,
     "pred_refine_shift_high": 0.30,
     "pred_obj_disjoint_iou": 0.05,
-    "pred_obj_fallback_conf_high": 0.40,
-    "pred_obj_fallback_iou_low": 0.18,
-    "pred_obj_fallback_center_blend": 0.65,
+    "pred_obj_fallback_conf_high": 0.50,
+    "pred_obj_fallback_iou_low": 0.12,
+    "pred_obj_fallback_center_blend": 0.58,
+    # pred-only overconfidence guard (no obj starts; no dual conversion)
+    "pred_overconf_guard_enabled": True,
+    "pred_overconf_conf_high": 0.58,
+    "pred_overconf_iou_high": 0.24,
+    "pred_overconf_scale_boost": 0.12,
+    "pred_overconf_det_fraction": 0.18,
+    "pred_overconf_scale_cap": 1.55,
 }
 
 # OBJ base (S4/S8)

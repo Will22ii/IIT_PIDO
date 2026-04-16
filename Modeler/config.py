@@ -101,7 +101,7 @@ class ModelerSystemConfig:
 
     # 7) Bootstrap stability
     fi_bootstrap_enabled: bool = True
-    fi_bootstrap_np_threshold: float = 10.0
+    fi_bootstrap_np_threshold: float = 50.0
     fi_bootstrap_rounds: int = 20
     fi_bootstrap_sample_ratio: float = 0.8
     fi_bootstrap_min_freq: float = 0.73

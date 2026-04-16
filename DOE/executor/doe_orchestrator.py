@@ -71,6 +71,9 @@ DEFAULT_ADDITIONAL_CFG = {
     "phase2_global_ratio": 0.2,
     "phase2_disable_boundary_sampling": True,
     "phase2_gate1_score_min": 0.55,
+    "phase2_gate1_rescue_enabled": True,
+    "phase2_gate1_rescue_band": 0.03,
+    "phase2_gate1_rescue_gate2_min": 0.85,
     "phase2_gate2_score_min": 0.75,
     "phase2_gate2_score_sticky_min": 0.65,
     "gate_smoothing_enabled": True,
@@ -792,6 +795,9 @@ def run_doe_orchestrator(
         phase2_global_ratio=cfg["phase2_global_ratio"],
         phase2_disable_boundary_sampling=cfg.get("phase2_disable_boundary_sampling", True),
         phase2_gate1_score_min=cfg.get("phase2_gate1_score_min", 0.55),
+        phase2_gate1_rescue_enabled=cfg.get("phase2_gate1_rescue_enabled", True),
+        phase2_gate1_rescue_band=cfg.get("phase2_gate1_rescue_band", 0.03),
+        phase2_gate1_rescue_gate2_min=cfg.get("phase2_gate1_rescue_gate2_min", 0.85),
         phase2_gate2_score_min=cfg.get("phase2_gate2_score_min", 0.75),
         phase2_gate2_score_sticky_min=cfg.get("phase2_gate2_score_sticky_min", 0.65),
         gate_smoothing_enabled=cfg.get("gate_smoothing_enabled", True),
@@ -896,6 +902,7 @@ def run_doe_orchestrator(
         "gate1_score", "gate1_score_ema", "gate1_pass",
         "gate2_score", "gate2_score_ema", "gate2_pass",
         "usable_n", "collapse_detected", "diversity_boost_active",
+        "phase2_gate1_rescue_triggered",
     }
     _raw_gh = diagnostics.get("gate_history") or []
     _slim_gh = [
@@ -974,6 +981,10 @@ def run_doe_orchestrator(
         "phase2_transition_count": diagnostics.get("phase2_transition_count"),
         "phase2_np_gate_last": diagnostics.get("phase2_np_gate_last"),
         "phase2_gate1_score_min": diagnostics.get("phase2_gate1_score_min"),
+        "phase2_gate1_rescue_enabled": diagnostics.get("phase2_gate1_rescue_enabled"),
+        "phase2_gate1_rescue_band": diagnostics.get("phase2_gate1_rescue_band"),
+        "phase2_gate1_rescue_gate2_min": diagnostics.get("phase2_gate1_rescue_gate2_min"),
+        "phase2_gate1_rescue_trigger_count": diagnostics.get("phase2_gate1_rescue_trigger_count"),
         "phase2_gate2_score_min": diagnostics.get("phase2_gate2_score_min"),
         "phase2_gate2_score_sticky_min": diagnostics.get("phase2_gate2_score_sticky_min"),
         "phase2_min_used_budget_ratio": diagnostics.get("phase2_min_used_budget_ratio"),
