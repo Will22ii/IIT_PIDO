@@ -107,7 +107,7 @@ class AdditionalDOEOrchestrator:
         diversity_boundary_floor_ratio: float = 0.12,
         min_additional_rounds: int = 2,
         phase2_min_usable_np_ratio: float = 15.0,
-        phase2_np_ratio_cap_scale: float = 0.75,
+        phase2_np_ratio_cap_scale: float = 0.74,
         phase2_min_used_budget_ratio: float = 0.3,
         phase2_min_used_budget_ratio_high_crate: float = 0.5,
         phase2_high_crate_threshold: float = 0.85,

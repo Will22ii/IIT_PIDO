@@ -56,7 +56,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="goldstein_price",
         known_optimum={"x1": 0.0, "x2": -1.0},
         n_samples=150,
-        repeats=25,
+        repeats=10,
     ),
     "six_hump_camel": ProblemCase(
         problem_name="six_hump_camel",
@@ -65,7 +65,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": -0.0898, "x2": 0.7126},
         ],
         n_samples=50,
-        repeats=25,
+        repeats=20,
     ),
     "rosenbrock_nodummy": ProblemCase(
         problem_name="rosenbrock_nodummy",
@@ -131,7 +131,7 @@ def _strategy_overrides(
 # DUAL base (S4/S8)
 _DUAL_SHARED_PARAMS: dict[str, Any] = {
     "max_volume_ratio_target": 0.249,
-    "dual_policy_mode": "np_dim_disagreement_v1",
+    "dual_policy_mode": "routed_v2",
     "dual_total_starts": 40,
     "dual_np_ratio_low": 12.0,
     "dual_np_ratio_high": 24.0,
@@ -161,6 +161,7 @@ _DUAL_SHARED_PARAMS: dict[str, Any] = {
 # PRED base (S4/S8): includes pred-obj disjoint safety fallback.
 _PRED_SHARED_PARAMS: dict[str, Any] = {
     "max_volume_ratio_target": 0.249,
+    "dual_policy_mode": "routed_v2",
     "pred_cluster_beta": 0.20,
     "pred_refine_bounds_scale": 1.38,
     "pred_multistart_det_fraction": 0.22,
@@ -182,6 +183,7 @@ _PRED_SHARED_PARAMS: dict[str, Any] = {
 # OBJ base (S4/S8)
 _OBJ_SHARED_PARAMS: dict[str, Any] = {
     "max_volume_ratio_target": 0.249,
+    "dual_policy_mode": "routed_v2",
     "obj_diversity_extra_clusters": 2,
     "obj_diversity_weight": 0.35,
     "obj_diversity_min_distance": 0.22,
@@ -193,7 +195,7 @@ _OBJ_SHARED_PARAMS: dict[str, Any] = {
 _ROUTED_DUAL_SHARED_PARAMS: dict[str, Any] = {
     "mode": "dual_refine_ei",
     "max_volume_ratio_target": 0.249,
-    "dual_policy_mode": "routed_v1",
+    "dual_policy_mode": "routed_v2",
     "dual_total_starts": 40,
     "dual_obj_ratio_min": 0.25,
     "dual_obj_ratio_max": 0.85,

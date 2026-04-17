@@ -104,7 +104,7 @@ class ModelerSystemConfig:
     fi_bootstrap_np_threshold: float = 50.0
     fi_bootstrap_rounds: int = 20
     fi_bootstrap_sample_ratio: float = 0.8
-    fi_bootstrap_min_freq: float = 0.73
+    fi_bootstrap_min_freq: float = 0.65
     fi_bootstrap_min_freq_low_data: float = 0.78
     fi_bootstrap_min_freq_very_low_data: float = 0.55
     fi_bootstrap_rescue_global_floor: float = 0.83

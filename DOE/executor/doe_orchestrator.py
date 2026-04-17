@@ -4,9 +4,11 @@ import json
 import os
 import re
 import hashlib
+import inspect
 import numpy as np
 import pandas as pd
 
+from DOE.config import DOESystemConfig, build_additional_cfg_from_system
 from utils.boundary_sampling import sample_boundary_corners_random
 from utils.feasibility import evaluate_feasibility
 from utils.result_saver import ResultSaver
@@ -26,120 +28,7 @@ from Modeler.executor.hpo_runner import HPORunner
 from pipeline.run_context import RunContext, update_run_index
 
 
-DEFAULT_ADDITIONAL_CFG = {
-    "init_ratio": 0.4,
-    "exec_ratio": 0.1,
-    "initial_corner_ratio": 0.06,
-    "global_boundary_ratio": 0.21,
-    "global_margin_ratio": 0.2,
-    "global_margin_subset_enabled": True,
-    "global_margin_subset_random_k_count": 2,
-    "global_top_ratio": 0.2,
-    "global_boundary_corner_ratio": 0.4,
-    "plan_base_k": 200.0,
-    "plan_remaining_cap": 3.0,
-    "plan_decay": 0.85,
-    "gate1_ratio": 0.5,
-    "gate1_pass_ratio": 0.4,
-    "local_anchor_max_base": 8,
-    "local_anchor_max_decay": 0.9,
-    "local_anchor_best_k": 3,
-    "local_anchor_small_k": 2,
-    "local_anchor_best_ratio": 0.35,
-    "local_anchor_small_ratio": 0.2,
-    "local_radius_ratio_phase1": 0.15,
-    "local_radius_ratio_phase2": 0.05,
-    "local_top_p": 0.5,
-    "local_top_k_min": 10,
-    "local_dbscan_min_samples": 2,
-    "local_dbscan_q_eps": 0.8,
-    "local_dbscan_eps_max": 0.3,
-    "local_min_radius_ratio": 0.01,
-    "local_tol_ratio": 0.2,
-    "local_refine_min_points": 15,
-    "local_cluster_delta_ratio": 0.02,
-    "local_singleton_box_ratio": 0.03,
-    "local_phase1_kappa": 0.75,
-    "local_phase2_kappa": 0.5,
-    "local_base_perturb_ratio": 0.02,
-    "gate2_k": 2,
-    "gate2_cdf_level": 0.9,
-    "gate2_ratio_threshold": 0.9,
-    "gate2_relax_factor": 1.1,
-    "budget_policy": "consume_all",
-    "phase1_global_ratio": 0.8,
-    "phase2_global_ratio": 0.2,
-    "phase2_disable_boundary_sampling": True,
-    "phase2_gate1_score_min": 0.55,
-    "phase2_gate1_rescue_enabled": True,
-    "phase2_gate1_rescue_band": 0.03,
-    "phase2_gate1_rescue_gate2_min": 0.85,
-    "phase2_gate2_score_min": 0.75,
-    "phase2_gate2_score_sticky_min": 0.65,
-    "gate_smoothing_enabled": True,
-    "gate_ema_alpha": 0.35,
-    "gate_ema_warmup_stages": 2,
-    "gate_smoothing_use_for_phase2": True,
-    "gate_smoothing_use_for_stop": True,
-    "collapse_span_ratio_threshold": 0.22,
-    "collapse_anchor_streak_threshold": 2,
-    "collapse_min_stage": 2,
-    "diversity_injection_ratio": 0.20,
-    "diversity_injection_min_points": 2,
-    "diversity_injection_max_ratio": 0.40,
-    "diversity_boundary_floor_ratio": 0.12,
-    "min_additional_rounds": 3,
-    "phase2_min_usable_np_ratio": 10.0,
-    "phase2_np_ratio_cap_scale": 0.75,
-    "phase2_min_used_budget_ratio": 0.3,
-    "phase2_min_used_budget_ratio_high_crate": 0.5,
-    "phase2_high_crate_threshold": 0.85,
-    "phase2_g2_saturation_threshold": 0.92,
-    "phase2_g2_saturation_min_remaining": 0.20,
-    # Bucket minima (DOE-3 대체)
-    "global_bucket_minima_enabled": True,
-    "global_bucket_minima_strict": False,
-    "global_boundary_high_crate_threshold": 0.80,
-    "phase1_min_top": 1,
-    "phase1_min_margin": 1,
-    "phase1_min_boundary_any": 1,
-    "phase1_min_boundary_classic_hc": 1,
-    "phase1_min_boundary_cross_hc": 1,
-    "phase2_min_top": 1,
-    "phase2_min_margin": 1,
-    "global_bucket_plan_multiplier": 3,
-    "early_stop_min_used_budget_ratio": 0.5,
-    "early_stop_min_usable_np_ratio": 20.0,
-    "stop_span_ratio_threshold": 0.3,
-    "stop_anchor_spread_streak": 2,
-    "stop_min_usable_np_ratio": 20.0,
-    "probe_stage_enabled": True,
-    "probe_top_ratio": 0.3,
-    "probe_max_points": 5,
-    "probe_min_range_ratio": 0.25,
-    "probe_std_scale": 2.0,
-    "probe_perturb_ratio": 0.02,
-    "initial_probe_multiplier": 2.0,
-    "local_exec_min_anchors": 2,
-    "success_rate_floor": 0.02,
-    "plan_filter_safety": 1.2,
-    "plan_filter_r_floor": 0.02,
-    "max_additional_stages": 10,
-    "local_constraint_retry_count": 1,
-    "local_constraint_shrink_factor": 0.5,
-    "local_constraint_min_factor": 2.0,
-    "local_exec_pick_mode": "random",
-    "post_use_penalty": True,
-    "post_lambda_init": 2.0,
-    "post_lambda_min": 0.25,
-    "post_lambda_max": 8.0,
-    "post_lambda_power": 1.0,
-    "post_feasible_rate_floor": 0.05,
-    "post_clf_min_samples": 30,
-    "post_clf_min_pos": 5,
-    "post_clf_min_neg": 5,
-    "local_gp_use_white_kernel": False,
-}
+DEFAULT_ADDITIONAL_CFG = build_additional_cfg_from_system(DOESystemConfig())
 
 
 def _normalize_debug_level(value: str | None) -> str:
@@ -704,6 +593,10 @@ def run_doe_orchestrator(
             additional_doe=False,
             run_context=run_context,
             system_config_snapshot=system_snapshot,
+            resolved_params_extra={
+                "constraint_rate_hat": float(r_hat),
+                "constraint_r_hat": float(r_hat),
+            },
             task_name=task_name,
             constraint_defs=constraint_defs,
             debug_level=str(run_cfg.get("debug_level", "off")),
@@ -718,6 +611,19 @@ def run_doe_orchestrator(
     # Additional DOE branch
     # -------------------------------------------------
     cfg = dict(DEFAULT_ADDITIONAL_CFG)
+    cfg["initial_corner_ratio"] = float(run_cfg.get("initial_corner_ratio", cfg["initial_corner_ratio"]))
+    cfg["initial_probe_multiplier"] = float(run_cfg.get("initial_probe_multiplier", cfg["initial_probe_multiplier"]))
+    cfg["plan_filter_safety"] = float(run_cfg.get("plan_filter_safety", cfg["plan_filter_safety"]))
+    cfg["plan_filter_r_floor"] = float(run_cfg.get("plan_filter_r_floor", cfg["plan_filter_r_floor"]))
+    cfg["success_rate_floor"] = float(run_cfg.get("success_rate_floor", cfg["success_rate_floor"]))
+    if run_cfg.get("initial_corner_ratio_base") is not None:
+        cfg["initial_corner_ratio_base"] = float(run_cfg["initial_corner_ratio_base"])
+    if run_cfg.get("initial_corner_ratio_policy") is not None:
+        cfg["initial_corner_ratio_policy"] = str(run_cfg["initial_corner_ratio_policy"])
+    if run_cfg.get("initial_corner_np_ratio") is not None:
+        cfg["initial_corner_np_ratio"] = float(run_cfg["initial_corner_np_ratio"])
+    if run_cfg.get("initial_corner_p_dim") is not None:
+        cfg["initial_corner_p_dim"] = int(run_cfg["initial_corner_p_dim"])
     if additional_cfg:
         cfg.update(additional_cfg)
     cfg_hash = hashlib.sha1(
@@ -765,128 +671,40 @@ def run_doe_orchestrator(
     bounds = [(v["lb"], v["ub"]) for v in variables]
     baseline = np.array([v["baseline"] for v in variables], dtype=float)
 
-    orchestrator = AdditionalDOEOrchestrator(
-        bounds=bounds,
-        sampler=sampler,
-        evaluate_func=evaluate_func,
-        feasibility_func=evaluate_feasibility,
-        var_names=var_names,
-        constraint_defs=constraint_defs,
-        surrogate_factory=surrogate_factory,
-        gate1=gate1,
-        gate2=gate2,
-        gate_manager=gate_manager,
-        rng=rng,
-        total_budget=total_budget,
-        init_ratio=cfg["init_ratio"],
-        exec_ratio=cfg["exec_ratio"],
-        initial_corner_ratio=cfg.get("initial_corner_ratio", initial_corner_ratio),
-        global_boundary_ratio=cfg.get("global_boundary_ratio", 0.1),
-        global_margin_ratio=cfg.get("global_margin_ratio", 0.2),
-        global_margin_subset_enabled=cfg.get("global_margin_subset_enabled", True),
-        global_margin_subset_random_k_count=cfg.get("global_margin_subset_random_k_count", 2),
-        global_top_ratio=cfg.get("global_top_ratio", 0.2),
-        global_boundary_corner_ratio=cfg.get("global_boundary_corner_ratio", 0.5),
-        plan_base_k=cfg["plan_base_k"],
-        plan_remaining_cap=cfg["plan_remaining_cap"],
-        plan_decay=cfg["plan_decay"],
-        budget_policy=cfg.get("budget_policy", "consume_all"),
-        phase1_global_ratio=cfg["phase1_global_ratio"],
-        phase2_global_ratio=cfg["phase2_global_ratio"],
-        phase2_disable_boundary_sampling=cfg.get("phase2_disable_boundary_sampling", True),
-        phase2_gate1_score_min=cfg.get("phase2_gate1_score_min", 0.55),
-        phase2_gate1_rescue_enabled=cfg.get("phase2_gate1_rescue_enabled", True),
-        phase2_gate1_rescue_band=cfg.get("phase2_gate1_rescue_band", 0.03),
-        phase2_gate1_rescue_gate2_min=cfg.get("phase2_gate1_rescue_gate2_min", 0.85),
-        phase2_gate2_score_min=cfg.get("phase2_gate2_score_min", 0.75),
-        phase2_gate2_score_sticky_min=cfg.get("phase2_gate2_score_sticky_min", 0.65),
-        gate_smoothing_enabled=cfg.get("gate_smoothing_enabled", True),
-        gate_ema_alpha=cfg.get("gate_ema_alpha", 0.35),
-        gate_ema_warmup_stages=cfg.get("gate_ema_warmup_stages", 2),
-        gate_smoothing_use_for_phase2=cfg.get("gate_smoothing_use_for_phase2", True),
-        gate_smoothing_use_for_stop=cfg.get("gate_smoothing_use_for_stop", True),
-        collapse_span_ratio_threshold=cfg.get("collapse_span_ratio_threshold", 0.22),
-        collapse_anchor_streak_threshold=cfg.get("collapse_anchor_streak_threshold", 2),
-        collapse_min_stage=cfg.get("collapse_min_stage", 2),
-        diversity_injection_ratio=cfg.get("diversity_injection_ratio", 0.20),
-        diversity_injection_min_points=cfg.get("diversity_injection_min_points", 2),
-        diversity_injection_max_ratio=cfg.get("diversity_injection_max_ratio", 0.40),
-        diversity_boundary_floor_ratio=cfg.get("diversity_boundary_floor_ratio", 0.12),
-        min_additional_rounds=cfg["min_additional_rounds"],
-        phase2_min_usable_np_ratio=cfg.get("phase2_min_usable_np_ratio", 10.0),
-        phase2_np_ratio_cap_scale=cfg.get("phase2_np_ratio_cap_scale", 0.75),
-        phase2_min_used_budget_ratio=cfg.get("phase2_min_used_budget_ratio", 0.3),
-        phase2_min_used_budget_ratio_high_crate=cfg.get("phase2_min_used_budget_ratio_high_crate", 0.5),
-        phase2_high_crate_threshold=cfg.get("phase2_high_crate_threshold", 0.85),
-        phase2_g2_saturation_threshold=cfg.get("phase2_g2_saturation_threshold", 0.92),
-        phase2_g2_saturation_min_remaining=cfg.get("phase2_g2_saturation_min_remaining", 0.20),
-        global_bucket_minima_enabled=cfg.get("global_bucket_minima_enabled", True),
-        global_bucket_minima_strict=cfg.get("global_bucket_minima_strict", False),
-        global_boundary_high_crate_threshold=cfg.get("global_boundary_high_crate_threshold", 0.80),
-        phase1_min_top=cfg.get("phase1_min_top", 1),
-        phase1_min_margin=cfg.get("phase1_min_margin", 1),
-        phase1_min_boundary_any=cfg.get("phase1_min_boundary_any", 1),
-        phase1_min_boundary_classic_hc=cfg.get("phase1_min_boundary_classic_hc", 1),
-        phase1_min_boundary_cross_hc=cfg.get("phase1_min_boundary_cross_hc", 1),
-        phase2_min_top=cfg.get("phase2_min_top", 1),
-        phase2_min_margin=cfg.get("phase2_min_margin", 1),
-        global_bucket_plan_multiplier=cfg.get("global_bucket_plan_multiplier", 3),
-        early_stop_min_used_budget_ratio=cfg.get("early_stop_min_used_budget_ratio", 0.5),
-        early_stop_min_usable_np_ratio=cfg.get("early_stop_min_usable_np_ratio", 20.0),
-        stop_span_ratio_threshold=cfg["stop_span_ratio_threshold"],
-        stop_anchor_spread_streak=cfg["stop_anchor_spread_streak"],
-        stop_min_usable_np_ratio=cfg.get("stop_min_usable_np_ratio", 20.0),
-        probe_stage_enabled=cfg.get("probe_stage_enabled", True),
-        probe_top_ratio=cfg.get("probe_top_ratio", 0.3),
-        probe_max_points=cfg.get("probe_max_points", 5),
-        probe_min_range_ratio=cfg.get("probe_min_range_ratio", 0.25),
-        probe_std_scale=cfg.get("probe_std_scale", 2.0),
-        probe_perturb_ratio=cfg.get("probe_perturb_ratio", 0.02),
-        initial_probe_multiplier=cfg.get("initial_probe_multiplier", 2.0),
-        local_exec_min_anchors=cfg.get("local_exec_min_anchors", 2),
-        plan_filter_safety=cfg.get("plan_filter_safety", 1.2),
-        plan_filter_r_floor=cfg.get("plan_filter_r_floor", 0.02),
-        success_rate_floor=cfg.get("success_rate_floor", success_rate_floor),
-        max_additional_stages=cfg.get("max_additional_stages", 10),
-        local_anchor_max_base=cfg.get("local_anchor_max_base", 8),
-        local_anchor_max_decay=cfg.get("local_anchor_max_decay", 0.9),
-        local_anchor_best_k=cfg.get("local_anchor_best_k", 3),
-        local_anchor_small_k=cfg.get("local_anchor_small_k", 2),
-        local_anchor_best_ratio=cfg.get("local_anchor_best_ratio", 0.35),
-        local_anchor_small_ratio=cfg.get("local_anchor_small_ratio", 0.2),
-        local_radius_ratio_phase1=cfg["local_radius_ratio_phase1"],
-        local_radius_ratio_phase2=cfg["local_radius_ratio_phase2"],
-        local_top_p=cfg["local_top_p"],
-        local_top_k_min=cfg["local_top_k_min"],
-        local_dbscan_min_samples=cfg["local_dbscan_min_samples"],
-        local_dbscan_q_eps=cfg["local_dbscan_q_eps"],
-        local_dbscan_eps_max=cfg["local_dbscan_eps_max"],
-        local_min_radius_ratio=cfg["local_min_radius_ratio"],
-        local_tol_ratio=cfg["local_tol_ratio"],
-        local_refine_min_points=cfg.get("local_refine_min_points", 15),
-        local_cluster_delta_ratio=cfg.get("local_cluster_delta_ratio", 0.02),
-        local_singleton_box_ratio=cfg.get("local_singleton_box_ratio", 0.03),
-        local_phase1_kappa=cfg.get("local_phase1_kappa", 0.75),
-        local_phase2_kappa=cfg.get("local_phase2_kappa", 0.5),
-        local_base_perturb_ratio=cfg.get("local_base_perturb_ratio", 0.02),
-        local_constraint_retry_count=cfg.get("local_constraint_retry_count", 1),
-        local_constraint_shrink_factor=cfg.get("local_constraint_shrink_factor", 0.5),
-        local_constraint_min_factor=cfg.get("local_constraint_min_factor", 2.0),
-        local_exec_pick_mode=cfg.get("local_exec_pick_mode", "random"),
-        post_use_penalty=cfg.get("post_use_penalty", True),
-        post_lambda_init=cfg.get("post_lambda_init", 2.0),
-        post_lambda_min=cfg.get("post_lambda_min", 0.25),
-        post_lambda_max=cfg.get("post_lambda_max", 8.0),
-        post_lambda_power=cfg.get("post_lambda_power", 1.0),
-        post_feasible_rate_floor=cfg.get("post_feasible_rate_floor", 0.05),
-        post_clf_min_samples=cfg.get("post_clf_min_samples", 30),
-        post_clf_min_pos=cfg.get("post_clf_min_pos", 5),
-        post_clf_min_neg=cfg.get("post_clf_min_neg", 5),
-        hpo_runner=hpo_runner,
-        force_baseline=force_baseline,
-        local_gp_seed=seed,
-        local_gp_use_white_kernel=cfg.get("local_gp_use_white_kernel", False),
-    )
+    orchestrator_kwargs = {
+        "bounds": bounds,
+        "sampler": sampler,
+        "evaluate_func": evaluate_func,
+        "feasibility_func": evaluate_feasibility,
+        "var_names": var_names,
+        "constraint_defs": constraint_defs,
+        "surrogate_factory": surrogate_factory,
+        "gate1": gate1,
+        "gate2": gate2,
+        "gate_manager": gate_manager,
+        "rng": rng,
+        "total_budget": total_budget,
+        "hpo_runner": hpo_runner,
+        "force_baseline": force_baseline,
+        "local_gp_seed": seed,
+    }
+    valid_kwargs = set(inspect.signature(AdditionalDOEOrchestrator.__init__).parameters.keys())
+    valid_kwargs.discard("self")
+    for key, value in cfg.items():
+        if key in valid_kwargs and key not in orchestrator_kwargs:
+            orchestrator_kwargs[key] = value
+
+    missing_required = [
+        key for key in ("phase1_global_ratio", "phase2_global_ratio")
+        if key not in orchestrator_kwargs or orchestrator_kwargs[key] is None
+    ]
+    if missing_required:
+        raise ValueError(
+            "Missing required Additional DOE config keys: "
+            + ", ".join(missing_required)
+        )
+
+    orchestrator = AdditionalDOEOrchestrator(**orchestrator_kwargs)
 
     results = orchestrator.run(
         baseline=baseline,
@@ -915,6 +733,8 @@ def run_doe_orchestrator(
         "p_dim": diagnostics.get("p_dim"),
         "usable_n": diagnostics.get("usable_n"),
         "usable_n_over_p": diagnostics.get("usable_n_over_p"),
+        "constraint_rate_hat": diagnostics.get("constraint_rate_hat"),
+        "constraint_r_hat": diagnostics.get("constraint_rate_hat"),
         "has_pre_constraints": diagnostics.get("has_pre_constraints"),
         "has_post_constraints": diagnostics.get("has_post_constraints"),
         "budget_used": diagnostics.get("budget_used"),

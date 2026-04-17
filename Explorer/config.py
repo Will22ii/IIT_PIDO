@@ -30,6 +30,23 @@ class ExplorerSystemConfig:
     # EXP-3: 고제약(crate_hat < threshold) 시 fi_aware → uncertainty_aware 자동 스위치
     bounds_expansion_high_crate_switch_enabled: bool = True
     bounds_expansion_high_crate_threshold: float = 0.85
+    # pre-constraint 기반 side-aware 보정 (전략 공통)
+    constraint_aware_enabled: bool = True
+    # 경계 인접 판정 비율(설계공간 span 대비)
+    constraint_aware_edge_ratio: float = 0.05
+    # side probe 설정(선택점 기반 제약 샘플링)
+    constraint_aware_probe_anchor_max: int = 16
+    constraint_aware_probe_steps: int = 3
+    constraint_aware_min_side_samples: int = 24
+    # side 보호 판정 기준(rate_winner >= min, diff >= gap)
+    constraint_aware_side_rate_min: float = 0.55
+    constraint_aware_side_rate_gap: float = 0.12
+    # 보호 side가 추론되면 cap 이전에 boundary 쪽으로 width-preserving shift
+    constraint_aware_pre_shift_enabled: bool = True
+    # volume-cap shrink 단계에서 side-aware pin/절단 우선순위 적용
+    constraint_aware_use_for_volume_cap: bool = True
+    # volume-cap 내부 boundary pin 허용 오차(기존 하드코딩 0.02 대체)
+    volume_cap_boundary_pin_tol_ratio: float = 0.02
 
     # 4) 후보 선택
     quantile_threshold: float = 0.85
@@ -53,8 +70,13 @@ class ExplorerSystemConfig:
     save_plot: bool = True
     debug_level: str = "off"
     strategy_id: str = "S4_dual"
+    # Dual source_mode 기본 정책 라우터
+    dual_policy_mode_default: str = "routed_v2"
     probe_multistart: int = 20
     obj_refine_bounds_scale: float = 1.30
+    # Dual tilt disagreement reference (mean disagreement / ref, clipped to [0.8, 1.5])
+    # 전략 파라미터에 값이 없으면 이 시스템 기본값을 사용
+    dual_tilt_disagree_ref: float = 0.10
     strategy_params: dict[str, object] = field(default_factory=dict)
 
 

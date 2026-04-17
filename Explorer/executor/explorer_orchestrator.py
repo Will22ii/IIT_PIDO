@@ -271,6 +271,10 @@ def _shrink_bounds_to_target_volume(
     global_bounds: list[tuple[float, float]],
     target_volume_ratio: float,
     center: np.ndarray | None = None,
+    boundary_pin_tol_ratio: float = 0.02,
+    force_pin_lo: list[bool] | None = None,
+    force_pin_hi: list[bool] | None = None,
+    preferred_shrink_side: list[str | None] | None = None,
 ) -> list[tuple[float, float]] | None:
     if selected_bounds is None or len(selected_bounds) != len(global_bounds):
         return selected_bounds
@@ -315,18 +319,28 @@ def _shrink_bounds_to_target_volume(
     alpha = float((float(target_volume_ratio) / float(current_volume)) ** (1.0 / float(active_dims)))
     alpha = float(np.clip(alpha, 0.0, 1.0))
 
-    # 대안A: 경계 인접 감지 — 축소 전 selected_bounds가 설계공간 경계에 닿아 있으면
-    # 해당 면을 고정(pin)하고 반대쪽만 축소하여 corner-solution optimum 보존
-    _bnd_tol = 0.02
+    # 경계 인접 감지 + 외부 pin 힌트
+    _bnd_tol = float(np.clip(float(boundary_pin_tol_ratio), 0.0, 0.5))
+    _pref: list[str | None] = []
+    if isinstance(preferred_shrink_side, list) and len(preferred_shrink_side) == d:
+        for item in preferred_shrink_side:
+            sval = str(item).strip().lower() if item is not None else ""
+            _pref.append(sval if sval in {"lb", "ub"} else None)
+    else:
+        _pref = [None] * d
     pin_lo: list[bool] = []
     pin_hi: list[bool] = []
     for j, ((lo, hi), (gl, gu), span) in enumerate(zip(out, glb, spans)):
+        ext_lo = bool(force_pin_lo[j]) if isinstance(force_pin_lo, list) and len(force_pin_lo) == d else False
+        ext_hi = bool(force_pin_hi[j]) if isinstance(force_pin_hi, list) and len(force_pin_hi) == d else False
         if span <= 0.0:
-            pin_lo.append(False)
-            pin_hi.append(False)
+            pin_lo.append(ext_lo)
+            pin_hi.append(ext_hi)
         else:
-            pin_lo.append((lo - gl) < _bnd_tol * span)
-            pin_hi.append((gu - hi) < _bnd_tol * span)
+            pin_lo.append(((lo - gl) < _bnd_tol * span) or ext_lo)
+            pin_hi.append(((gu - hi) < _bnd_tol * span) or ext_hi)
+        if pin_lo[-1] and pin_hi[-1]:
+            _pref[j] = None
 
     # Pass 1: boundary-aware uniform shrink.
     pass1: list[tuple[float, float]] = []
@@ -342,6 +356,12 @@ def _shrink_bounds_to_target_volume(
         elif pin_hi[j] and not pin_lo[j]:
             hi_new = gu
             lo_new = float(np.clip(gu - tgt_w, gl, gu))
+        elif _pref[j] == "lb":
+            lo_new = float(np.clip(hi - tgt_w, gl, gu))
+            hi_new = float(np.clip(hi, gl, gu))
+        elif _pref[j] == "ub":
+            lo_new = float(np.clip(lo, gl, gu))
+            hi_new = float(np.clip(lo + tgt_w, gl, gu))
         else:
             cc = float(c[j]) if c is not None else 0.5 * (lo + hi)
             cc = float(np.clip(cc, gl, gu))
@@ -400,6 +420,10 @@ def _shrink_bounds_to_target_volume(
             hi_new -= min(cut, max(hi_new - lo_new, 0.0))
         elif pin_hi[j] and not pin_lo[j]:
             lo_new += min(cut, max(hi_new - lo_new, 0.0))
+        elif _pref[j] == "lb":
+            lo_new += min(cut, max(hi_new - lo_new, 0.0))
+        elif _pref[j] == "ub":
+            hi_new -= min(cut, max(hi_new - lo_new, 0.0))
         else:
             cc = float(c[j]) if c is not None else 0.5 * (lo + hi)
             cc = float(np.clip(cc, lo, hi))
@@ -443,6 +467,12 @@ def _shrink_bounds_to_target_volume(
             elif pin_hi[j] and not pin_lo[j]:
                 hi_new = gu
                 lo_new = float(np.clip(gu - w, gl, gu))
+            elif _pref[j] == "lb":
+                lo_new = float(np.clip(hi - w, gl, gu))
+                hi_new = float(np.clip(hi, gl, gu))
+            elif _pref[j] == "ub":
+                lo_new = float(np.clip(lo, gl, gu))
+                hi_new = float(np.clip(lo + w, gl, gu))
             else:
                 mid = 0.5 * (lo + hi)
                 lo_new = float(np.clip(mid - 0.5 * w, gl, gu - w))
@@ -453,6 +483,244 @@ def _shrink_bounds_to_target_volume(
         out = out2
 
     return out
+
+
+def _infer_constraint_side_policy(
+    *,
+    selected_points: np.ndarray,
+    selected_features: list[str],
+    global_bounds: list[tuple[float, float]],
+    pre_constraint_defs: list[dict],
+    edge_ratio: float = 0.05,
+    probe_anchor_max: int = 16,
+    probe_steps: int = 3,
+    min_side_samples: int = 24,
+    side_rate_min: float = 0.55,
+    side_rate_gap: float = 0.12,
+) -> dict | None:
+    X = np.asarray(selected_points, dtype=float)
+    d = len(global_bounds)
+    if (
+        X.ndim != 2
+        or X.shape[0] == 0
+        or X.shape[1] != d
+        or d == 0
+        or not selected_features
+        or len(selected_features) != d
+        or not pre_constraint_defs
+    ):
+        return None
+
+    feas_mask, _, _ = evaluate_constraints_batch(
+        X=X,
+        var_names=selected_features,
+        constraint_defs=pre_constraint_defs,
+        scope="pre",
+    )
+    anchors = X[feas_mask]
+    if anchors.shape[0] == 0:
+        return None
+
+    if anchors.shape[0] > int(max(probe_anchor_max, 1)):
+        step = max(anchors.shape[0] // int(max(probe_anchor_max, 1)), 1)
+        anchors = anchors[::step][: int(max(probe_anchor_max, 1))]
+
+    steps = int(max(probe_steps, 2))
+    t_grid = np.linspace(0.5, 1.0, num=steps, dtype=float)
+    min_side_n = int(max(min_side_samples, 1))
+    edge_r = float(np.clip(float(edge_ratio), 0.0, 0.5))
+    rate_min = float(np.clip(float(side_rate_min), 0.0, 1.0))
+    rate_gap = float(np.clip(float(side_rate_gap), 0.0, 1.0))
+
+    probe_points: list[np.ndarray] = []
+    probe_dim: list[int] = []
+    probe_side: list[str] = []
+
+    near_lb_hits = np.zeros((d,), dtype=int)
+    near_ub_hits = np.zeros((d,), dtype=int)
+    for a in anchors:
+        for j, (g_lb, g_ub) in enumerate(global_bounds):
+            gl = float(min(g_lb, g_ub))
+            gu = float(max(g_lb, g_ub))
+            span = max(gu - gl, 0.0)
+            if span <= 0.0:
+                continue
+            xj = float(np.clip(a[j], gl, gu))
+            if (xj - gl) <= edge_r * span:
+                near_lb_hits[j] += 1
+            if (gu - xj) <= edge_r * span:
+                near_ub_hits[j] += 1
+            dist_lb = max(xj - gl, 0.0)
+            dist_ub = max(gu - xj, 0.0)
+            if dist_lb > 0.0:
+                for t in t_grid:
+                    x = a.copy()
+                    x[j] = float(xj - t * dist_lb)
+                    probe_points.append(x)
+                    probe_dim.append(j)
+                    probe_side.append("lb")
+            if dist_ub > 0.0:
+                for t in t_grid:
+                    x = a.copy()
+                    x[j] = float(xj + t * dist_ub)
+                    probe_points.append(x)
+                    probe_dim.append(j)
+                    probe_side.append("ub")
+
+    if not probe_points:
+        return None
+
+    X_probe = np.asarray(probe_points, dtype=float)
+    probe_mask, _, _ = evaluate_constraints_batch(
+        X=X_probe,
+        var_names=selected_features,
+        constraint_defs=pre_constraint_defs,
+        scope="pre",
+    )
+
+    side_n = {"lb": np.zeros((d,), dtype=int), "ub": np.zeros((d,), dtype=int)}
+    side_ok = {"lb": np.zeros((d,), dtype=int), "ub": np.zeros((d,), dtype=int)}
+    for idx, ok in enumerate(probe_mask):
+        j = int(probe_dim[idx])
+        side = probe_side[idx]
+        side_n[side][j] += 1
+        if bool(ok):
+            side_ok[side][j] += 1
+
+    protect_lb = [False] * d
+    protect_ub = [False] * d
+    prefer_shrink_side: list[str | None] = [None] * d
+    score_rows: list[dict] = []
+    min_edge_hits = max(2, int(np.ceil(0.2 * anchors.shape[0])))
+
+    for j in range(d):
+        n_lb = int(side_n["lb"][j])
+        n_ub = int(side_n["ub"][j])
+        r_lb = float(side_ok["lb"][j] / max(n_lb, 1))
+        r_ub = float(side_ok["ub"][j] / max(n_ub, 1))
+        diff = r_ub - r_lb  # +: UB side가 더 feasible
+
+        strong_cmp = (
+            n_lb >= min_side_n
+            and n_ub >= min_side_n
+            and max(r_lb, r_ub) >= rate_min
+            and abs(diff) >= rate_gap
+        )
+        if strong_cmp:
+            if diff > 0:
+                protect_ub[j] = True
+                prefer_shrink_side[j] = "lb"
+            else:
+                protect_lb[j] = True
+                prefer_shrink_side[j] = "ub"
+
+        # 경계 근접 feasible anchor 신호가 충분하면 보조 pin 적용
+        if near_lb_hits[j] >= min_edge_hits and not protect_ub[j]:
+            protect_lb[j] = True
+            if prefer_shrink_side[j] is None:
+                prefer_shrink_side[j] = "ub"
+        if near_ub_hits[j] >= min_edge_hits and not protect_lb[j]:
+            protect_ub[j] = True
+            if prefer_shrink_side[j] is None:
+                prefer_shrink_side[j] = "lb"
+
+        if protect_lb[j] and protect_ub[j]:
+            # 동시 보호 충돌 시 rate가 더 높은 쪽만 유지
+            if r_lb > r_ub:
+                protect_ub[j] = False
+                prefer_shrink_side[j] = "ub"
+            elif r_ub > r_lb:
+                protect_lb[j] = False
+                prefer_shrink_side[j] = "lb"
+            else:
+                protect_lb[j] = False
+                protect_ub[j] = False
+                prefer_shrink_side[j] = None
+
+        score_rows.append(
+            {
+                "dim": int(j),
+                "n_lb": n_lb,
+                "n_ub": n_ub,
+                "rate_lb": r_lb,
+                "rate_ub": r_ub,
+                "near_lb_hits": int(near_lb_hits[j]),
+                "near_ub_hits": int(near_ub_hits[j]),
+                "protect_lb": bool(protect_lb[j]),
+                "protect_ub": bool(protect_ub[j]),
+                "prefer_shrink_side": prefer_shrink_side[j],
+            }
+        )
+
+    if not any(protect_lb) and not any(protect_ub):
+        return {
+            "protect_lb": protect_lb,
+            "protect_ub": protect_ub,
+            "prefer_shrink_side": prefer_shrink_side,
+            "score_rows": score_rows,
+            "anchor_count": int(anchors.shape[0]),
+            "probe_count": int(X_probe.shape[0]),
+            "feasible_selected_count": int(anchors.shape[0]),
+        }
+
+    return {
+        "protect_lb": protect_lb,
+        "protect_ub": protect_ub,
+        "prefer_shrink_side": prefer_shrink_side,
+        "score_rows": score_rows,
+        "anchor_count": int(anchors.shape[0]),
+        "probe_count": int(X_probe.shape[0]),
+        "feasible_selected_count": int(anchors.shape[0]),
+    }
+
+
+def _apply_constraint_side_shift(
+    *,
+    selected_bounds: list[tuple[float, float]] | None,
+    global_bounds: list[tuple[float, float]],
+    protect_lb: list[bool] | None,
+    protect_ub: list[bool] | None,
+) -> tuple[list[tuple[float, float]] | None, list[tuple[int, str]]]:
+    if (
+        selected_bounds is None
+        or len(selected_bounds) != len(global_bounds)
+        or not isinstance(protect_lb, list)
+        or not isinstance(protect_ub, list)
+        or len(protect_lb) != len(global_bounds)
+        or len(protect_ub) != len(global_bounds)
+    ):
+        return selected_bounds, []
+
+    out: list[tuple[float, float]] = []
+    shifted: list[tuple[int, str]] = []
+    for j, ((s_lb, s_ub), (g_lb, g_ub)) in enumerate(zip(selected_bounds, global_bounds)):
+        gl = float(min(g_lb, g_ub))
+        gu = float(max(g_lb, g_ub))
+        lo = float(np.clip(min(s_lb, s_ub), gl, gu))
+        hi = float(np.clip(max(s_lb, s_ub), gl, gu))
+        width = max(hi - lo, 0.0)
+        if width <= 0.0 or gu <= gl:
+            out.append((lo, hi))
+            continue
+
+        if bool(protect_lb[j]) and not bool(protect_ub[j]):
+            lo_new = gl
+            hi_new = float(min(gl + width, gu))
+            out.append((lo_new, hi_new))
+            if abs(lo_new - lo) > 1e-12 or abs(hi_new - hi) > 1e-12:
+                shifted.append((j, "lb"))
+            continue
+        if bool(protect_ub[j]) and not bool(protect_lb[j]):
+            hi_new = gu
+            lo_new = float(max(gu - width, gl))
+            out.append((lo_new, hi_new))
+            if abs(lo_new - lo) > 1e-12 or abs(hi_new - hi) > 1e-12:
+                shifted.append((j, "ub"))
+            continue
+
+        out.append((lo, hi))
+
+    return out, shifted
 
 
 def _normal_cdf(z: np.ndarray) -> np.ndarray:
@@ -1591,7 +1859,12 @@ class ExplorerOrchestrator:
             pred_multistart_det_fraction_used = float(pred_multistart_det_fraction)
             pred_refine_bounds_scale_used = float(pred_refine_bounds_scale)
             if source_mode == "dual":
-                dual_policy_mode = str(strategy_params_local.get("dual_policy_mode", "np_dim_disagreement_v1")).strip().lower()
+                dual_policy_mode = str(
+                    strategy_params_local.get(
+                        "dual_policy_mode",
+                        getattr(self.config.system, "dual_policy_mode_default", "routed_v2"),
+                    )
+                ).strip().lower()
                 dual_total_starts_target = int(max(4, int(strategy_params_local.get("dual_total_starts", 40))))
                 dual_total_starts_used = int(dual_total_starts_target)
                 dual_np_ratio_used = (
@@ -2412,7 +2685,12 @@ class ExplorerOrchestrator:
                     )
                     # D6: disagreement 크기에 비례하여 base_tilt 동적 스케일링
                     # mean_disagreement가 클수록 obj 방향으로 더 강하게 tilt
-                    _disagree_ref = float(strategy_params_local.get("dual_tilt_disagree_ref", 0.15))
+                    _disagree_ref = float(
+                        strategy_params_local.get(
+                            "dual_tilt_disagree_ref",
+                            getattr(self.config.system, "dual_tilt_disagree_ref", 0.10),
+                        )
+                    )
                     _disagree_scale = float(np.clip(mean_disagreement / max(_disagree_ref, 1e-9), 0.8, 1.5))
                     base_tilt = float(np.clip(base_tilt * _disagree_scale, 0.0, 0.75))
                     tilt_weights = np.clip(
@@ -2560,8 +2838,67 @@ class ExplorerOrchestrator:
         dual_volume_cap_target = None
         dual_volume_ratio_before_cap = None
         dual_volume_cap_applied = False
+        constraint_aware_enabled = bool(getattr(self.config.system, "constraint_aware_enabled", True))
+        constraint_aware_policy_applied = False
+        constraint_aware_shifted_dims: list[tuple[int, str]] = []
+        constraint_aware_probe_count: int | None = None
+        constraint_aware_anchor_count: int | None = None
+        constraint_aware_side_scores: list[dict] | None = None
+        constraint_aware_policy: dict | None = None
 
         if selected_bounds is not None:
+            if (
+                constraint_aware_enabled
+                and has_pre_constraints
+                and isinstance(selected_points, np.ndarray)
+                and selected_points.ndim == 2
+                and selected_points.shape[0] > 0
+            ):
+                constraint_aware_policy = _infer_constraint_side_policy(
+                    selected_points=selected_points,
+                    selected_features=selected_features,
+                    global_bounds=bounds,
+                    pre_constraint_defs=pre_constraint_defs,
+                    edge_ratio=float(getattr(self.config.system, "constraint_aware_edge_ratio", 0.05)),
+                    probe_anchor_max=int(getattr(self.config.system, "constraint_aware_probe_anchor_max", 16)),
+                    probe_steps=int(getattr(self.config.system, "constraint_aware_probe_steps", 3)),
+                    min_side_samples=int(getattr(self.config.system, "constraint_aware_min_side_samples", 24)),
+                    side_rate_min=float(getattr(self.config.system, "constraint_aware_side_rate_min", 0.55)),
+                    side_rate_gap=float(getattr(self.config.system, "constraint_aware_side_rate_gap", 0.12)),
+                )
+                if isinstance(constraint_aware_policy, dict):
+                    constraint_aware_probe_count = int(constraint_aware_policy.get("probe_count", 0))
+                    constraint_aware_anchor_count = int(constraint_aware_policy.get("anchor_count", 0))
+                    constraint_aware_side_scores = constraint_aware_policy.get("score_rows", [])
+                    _pin_lb = [bool(v) for v in constraint_aware_policy.get("protect_lb", [])]
+                    _pin_ub = [bool(v) for v in constraint_aware_policy.get("protect_ub", [])]
+                    constraint_aware_policy_applied = bool(any(_pin_lb) or any(_pin_ub))
+                    if (
+                        constraint_aware_policy_applied
+                        and bool(getattr(self.config.system, "constraint_aware_pre_shift_enabled", True))
+                    ):
+                        selected_bounds_shifted, _shifted = _apply_constraint_side_shift(
+                            selected_bounds=selected_bounds,
+                            global_bounds=bounds,
+                            protect_lb=_pin_lb,
+                            protect_ub=_pin_ub,
+                        )
+                        if selected_bounds_shifted is not None:
+                            selected_bounds = selected_bounds_shifted
+                            constraint_aware_shifted_dims = list(_shifted)
+                    if constraint_aware_policy_applied:
+                        _dim_msgs = []
+                        for _j, _name in enumerate(selected_features):
+                            _lb = bool(_pin_lb[_j]) if _j < len(_pin_lb) else False
+                            _ub = bool(_pin_ub[_j]) if _j < len(_pin_ub) else False
+                            if _lb or _ub:
+                                _dim_msgs.append(f"{_name}(lb={_lb},ub={_ub})")
+                        if _dim_msgs:
+                            print(
+                                "[Explorer] constraint-aware side policy: "
+                                + ", ".join(_dim_msgs)
+                            )
+
             expansion_mode = str(getattr(self.config.system, "bounds_expansion_mode", "uniform")).strip().lower()
             # routed_v2 override: 라우터가 expansion_mode를 결정한 경우 우선 적용
             if routed_v2_decision is not None:
@@ -2752,6 +3089,36 @@ class ExplorerOrchestrator:
                             global_bounds=bounds,
                             target_volume_ratio=dual_volume_cap_target,
                             center=center_hint,
+                            boundary_pin_tol_ratio=float(
+                                getattr(self.config.system, "volume_cap_boundary_pin_tol_ratio", 0.02)
+                            ),
+                            force_pin_lo=(
+                                [bool(v) for v in constraint_aware_policy.get("protect_lb", [])]
+                                if (
+                                    constraint_aware_enabled
+                                    and bool(getattr(self.config.system, "constraint_aware_use_for_volume_cap", True))
+                                    and isinstance(constraint_aware_policy, dict)
+                                )
+                                else None
+                            ),
+                            force_pin_hi=(
+                                [bool(v) for v in constraint_aware_policy.get("protect_ub", [])]
+                                if (
+                                    constraint_aware_enabled
+                                    and bool(getattr(self.config.system, "constraint_aware_use_for_volume_cap", True))
+                                    and isinstance(constraint_aware_policy, dict)
+                                )
+                                else None
+                            ),
+                            preferred_shrink_side=(
+                                list(constraint_aware_policy.get("prefer_shrink_side", []))
+                                if (
+                                    constraint_aware_enabled
+                                    and bool(getattr(self.config.system, "constraint_aware_use_for_volume_cap", True))
+                                    and isinstance(constraint_aware_policy, dict)
+                                )
+                                else None
+                            ),
                         )
                         if selected_bounds_cap is not None:
                             vol_after_cap = _volume_ratio_for_bounds(selected_bounds_cap, bounds)
@@ -2971,6 +3338,24 @@ class ExplorerOrchestrator:
                 "debug_level": debug_level,
                 "strategy_id": strategy_id,
                 "probe_multistart": int(self.config.system.probe_multistart),
+                "dual_policy_mode_default": str(
+                    getattr(self.config.system, "dual_policy_mode_default", "routed_v2")
+                ),
+                "dual_tilt_disagree_ref": float(
+                    getattr(self.config.system, "dual_tilt_disagree_ref", 0.10)
+                ),
+                "constraint_aware_enabled": bool(getattr(self.config.system, "constraint_aware_enabled", True)),
+                "constraint_aware_edge_ratio": float(getattr(self.config.system, "constraint_aware_edge_ratio", 0.05)),
+                "constraint_aware_probe_anchor_max": int(getattr(self.config.system, "constraint_aware_probe_anchor_max", 16)),
+                "constraint_aware_probe_steps": int(getattr(self.config.system, "constraint_aware_probe_steps", 3)),
+                "constraint_aware_min_side_samples": int(getattr(self.config.system, "constraint_aware_min_side_samples", 24)),
+                "constraint_aware_side_rate_min": float(getattr(self.config.system, "constraint_aware_side_rate_min", 0.55)),
+                "constraint_aware_side_rate_gap": float(getattr(self.config.system, "constraint_aware_side_rate_gap", 0.12)),
+                "constraint_aware_pre_shift_enabled": bool(getattr(self.config.system, "constraint_aware_pre_shift_enabled", True)),
+                "constraint_aware_use_for_volume_cap": bool(getattr(self.config.system, "constraint_aware_use_for_volume_cap", True)),
+                "volume_cap_boundary_pin_tol_ratio": float(
+                    getattr(self.config.system, "volume_cap_boundary_pin_tol_ratio", 0.02)
+                ),
                 "strategy_params": dict(self.config.system.strategy_params or {}),
             },
             "previous": previous,
@@ -2993,6 +3378,11 @@ class ExplorerOrchestrator:
             "strategy_alias": strategy_alias,
             "strategy_mode": strategy_mode,
             "dual_volume_cap_applied": bool(dual_volume_cap_applied),
+            "constraint_aware_enabled": bool(constraint_aware_enabled),
+            "constraint_aware_policy_applied": bool(constraint_aware_policy_applied),
+            "constraint_aware_probe_count": constraint_aware_probe_count,
+            "constraint_aware_anchor_count": constraint_aware_anchor_count,
+            "constraint_aware_shifted_dims": constraint_aware_shifted_dims,
         }
 
         # --- Analysis metadata (artifacts/meta/analysis_<strategy>.json) ---
@@ -3016,6 +3406,14 @@ class ExplorerOrchestrator:
             "has_post_constraints": bool(has_post_constraints),
             "selected_bounds_volume_ratio": vol_ratio,
             "dual_volume_cap_applied": bool(dual_volume_cap_applied),
+            "constraint_aware_enabled": bool(constraint_aware_enabled),
+            "constraint_aware_policy_applied": bool(constraint_aware_policy_applied),
+            "constraint_aware_probe_count": constraint_aware_probe_count,
+            "constraint_aware_anchor_count": constraint_aware_anchor_count,
+            "constraint_aware_shifted_dims": constraint_aware_shifted_dims,
+            "constraint_aware_side_scores": (
+                constraint_aware_side_scores if isinstance(constraint_aware_side_scores, list) else []
+            ),
             "post_penalty_active": bool(has_post_penalty),
             "post_lambda": float(post_lambda),
             "generated_total_raw": int(pre_generated),
