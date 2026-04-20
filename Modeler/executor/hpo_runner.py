@@ -61,6 +61,10 @@ def _resolve_bounds(
     return float(low), float(high)
 
 
+def _has_space_key(space: dict[str, Any] | None, key: str) -> bool:
+    return isinstance(space, dict) and key in space
+
+
 def make_xgb_search_space(
     *,
     search_space: dict[str, Any] | None = None,
@@ -117,6 +121,26 @@ def make_xgb_search_space(
     gamma_high = max(float(gamma_high), gamma_low)
     child_low = max(float(child_low), 1e-6)
     child_high = max(float(child_high), child_low)
+    use_reg_alpha = _has_space_key(search_space, "reg_alpha")
+    use_reg_lambda = _has_space_key(search_space, "reg_lambda")
+    if use_reg_alpha:
+        reg_alpha_low, reg_alpha_high = _resolve_bounds(
+            space=search_space,
+            key="reg_alpha",
+            default_low=0.0,
+            default_high=1.0,
+        )
+        reg_alpha_low = max(float(reg_alpha_low), 0.0)
+        reg_alpha_high = max(float(reg_alpha_high), reg_alpha_low)
+    if use_reg_lambda:
+        reg_lambda_low, reg_lambda_high = _resolve_bounds(
+            space=search_space,
+            key="reg_lambda",
+            default_low=1.0,
+            default_high=10.0,
+        )
+        reg_lambda_low = max(float(reg_lambda_low), 1e-6)
+        reg_lambda_high = max(float(reg_lambda_high), reg_lambda_low)
 
     # integer params need valid integer bounds with low <= high.
     n_est_low_i = max(int(round(n_est_low)), 1)
@@ -125,7 +149,7 @@ def make_xgb_search_space(
     depth_high_i = max(int(round(depth_high)), depth_low_i)
 
     def _search_space_fn(trial: optuna.Trial) -> Dict:
-        return {
+        params: Dict[str, Any] = {
             "n_estimators": trial.suggest_int("n_estimators", n_est_low_i, n_est_high_i),
             "learning_rate": trial.suggest_float("learning_rate", lr_low, lr_high, log=True),
             "max_depth": trial.suggest_int("max_depth", depth_low_i, depth_high_i),
@@ -134,6 +158,11 @@ def make_xgb_search_space(
             "colsample_bytree": trial.suggest_float("colsample_bytree", cols_low, cols_high),
             "gamma": trial.suggest_float("gamma", gamma_low, gamma_high),
         }
+        if use_reg_alpha:
+            params["reg_alpha"] = trial.suggest_float("reg_alpha", reg_alpha_low, reg_alpha_high, log=True)
+        if use_reg_lambda:
+            params["reg_lambda"] = trial.suggest_float("reg_lambda", reg_lambda_low, reg_lambda_high, log=True)
+        return params
 
     return _search_space_fn
 
@@ -193,7 +222,7 @@ class HPORunner:
 
     - FixedKFoldSplitter
     - XGBoost only (current policy)
-    - Robust objective (mean + lambda * std)
+    - Robust objective (mean + lambda_std * std + lambda_gap * overfit_gap)
     - ResultSaver based persistence
     """
 
@@ -202,6 +231,7 @@ class HPORunner:
         *,
         n_trials: int = 80,
         lambda_std: float = 0.5,
+        lambda_gap: float = 0.0,
         use_timestamp: bool = True,
         show_optuna_log: bool = False,
         search_space: dict[str, Any] | None = None,
@@ -211,6 +241,7 @@ class HPORunner:
     ):
         self.n_trials = n_trials
         self.lambda_std = lambda_std
+        self.lambda_gap = float(max(float(lambda_gap), 0.0))
         self.show_optuna_log = bool(show_optuna_log)
         self.search_space = dict(search_space) if isinstance(search_space, dict) else None
         self.hpo_mode = str(hpo_mode)
@@ -265,6 +296,7 @@ class HPORunner:
             base_random_seed=base_random_seed,
             search_space_fn=make_xgb_search_space(search_space=self.search_space),
             lambda_std=self.lambda_std,
+            lambda_gap=self.lambda_gap,
             kfold_splits=kfold_splits,
             pruning_enabled=bool(self.pruning_config["enabled"]),
             pruning_warmup_steps=int(self.pruning_config["n_warmup_steps"]),
@@ -279,6 +311,7 @@ class HPORunner:
             base_random_seed=base_random_seed,
             n_trials=self.n_trials,
             lambda_std=self.lambda_std,
+            lambda_gap=self.lambda_gap,
         )
 
         return result

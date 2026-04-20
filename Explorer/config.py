@@ -23,7 +23,7 @@ class ExplorerSystemConfig:
 
     # 3) bounds 확장/클리핑
     bounds_margin_ratio: float = 0.03
-    bounds_min_volume_ratio: float = 0.249
+    bounds_min_volume_ratio: float = 0.2499
     bounds_expansion_mode: str = "uniform"
     bounds_weight_clip_min: float = 0.7
     bounds_weight_clip_max: float = 1.5
@@ -46,7 +46,7 @@ class ExplorerSystemConfig:
     # volume-cap shrink 단계에서 side-aware pin/절단 우선순위 적용
     constraint_aware_use_for_volume_cap: bool = True
     # volume-cap 내부 boundary pin 허용 오차(기존 하드코딩 0.02 대체)
-    volume_cap_boundary_pin_tol_ratio: float = 0.02
+    volume_cap_boundary_pin_tol_ratio: float = 0.03
 
     # 4) 후보 선택
     quantile_threshold: float = 0.85

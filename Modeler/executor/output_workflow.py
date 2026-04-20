@@ -41,6 +41,7 @@ def save_modeler_outputs(
     hpo_mode: str,
     hpo_n_trials_effective: int | None,
     hpo_lambda_std_effective: float | None,
+    hpo_lambda_gap_effective: float | None,
     best_params: dict | None,
     model_path: str,
     selected_path: str,
@@ -104,14 +105,6 @@ def save_modeler_outputs(
         "anti_collapse_guard_features": [],
         "fi_bootstrap_enabled_effective": False,
         "fi_bootstrap_min_freq_effective": None,
-        "hpo_used": hpo_params_used,
-        "hpo_mode": str(hpo_mode),
-        "hpo_n_trials_effective": (
-            int(hpo_n_trials_effective) if hpo_n_trials_effective is not None else None
-        ),
-        "hpo_lambda_std_effective": (
-            float(hpo_lambda_std_effective) if hpo_lambda_std_effective is not None else None
-        ),
         "kfold_splits": int(kfold_splits),
         "kfold_repeats": int(kfold_repeats),
         "cv_valid_min_est": int(cv_policy["valid_min_est"]),
@@ -170,14 +163,6 @@ def save_modeler_outputs(
         )
 
     hpo_params_csv_path = None
-    if hpo_params_used and best_params:
-        df_params = pd.DataFrame(
-            [{"param": k, "value": v} for k, v in best_params.items()]
-        )
-        _hpo_dir = os.path.dirname(processed_path) if processed_path else os.path.join(task_dir, "artifacts", "meta")
-        hpo_params_csv_path = os.path.join(_hpo_dir, "hpo_best_params.csv")
-        df_params.to_csv(hpo_params_csv_path, index=False)
-        meta_artifacts["hpo_best_params"] = os.path.relpath(hpo_params_csv_path, task_dir)
 
     debug_artifacts = {}
     if keep_debug:

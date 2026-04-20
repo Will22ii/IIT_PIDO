@@ -652,6 +652,24 @@ def _infer_constraint_side_policy(
             }
         )
 
+    # D-B1: anti-anti-optimum guard. boundary 근처에 feasible anchor 가 1건이라도
+    # 있으면 그 방향으로의 directional shrink/shift 를 비활성화한다 (optimum 이
+    # boundary 에 있을 가능성을 보호). protect 플래그는 건드리지 않음.
+    for j in range(d):
+        if (
+            prefer_shrink_side[j] == "lb"
+            and int(near_lb_hits[j]) >= 1
+        ):
+            prefer_shrink_side[j] = None
+        if (
+            prefer_shrink_side[j] == "ub"
+            and int(near_ub_hits[j]) >= 1
+        ):
+            prefer_shrink_side[j] = None
+        # score_rows 도 동기화
+        if j < len(score_rows):
+            score_rows[j]["prefer_shrink_side"] = prefer_shrink_side[j]
+
     if not any(protect_lb) and not any(protect_ub):
         return {
             "protect_lb": protect_lb,
@@ -2741,23 +2759,65 @@ class ExplorerOrchestrator:
                 else:
                     pred_obj_miss_case = "pred_obj_aligned_or_unknown"
 
-                # D1: pred-obj disjoint fallback — pred가 obj와 불일치(iou<disjoint_iou)이고
-                # confidence도 낮으면 pred bounds 대신 obj bounds를 사용하여 over_shrink 방지
+                # D-A1: pred-obj disjoint fallback — iou≈0 이면 pred 와 obj 가 완전 다른 영역.
+                # obj 는 평가 데이터 기반(ground truth), pred 는 모델 예측. dual 계열도 포함.
+                disjoint_fallback_fired = False
                 if (
-                    strategy_alias in {"s4_pred", "s8_pred"}
+                    strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}
                     and pred_obj_miss_case == "pred_obj_disjoint"
-                    and pred_cluster_confidence is not None
-                    and pred_cluster_confidence < conf_low
                     and obj_bounds is not None
                     and selected_bounds is not None
                 ):
+                    pc_str = (
+                        f"{pred_cluster_confidence:.3f}"
+                        if pred_cluster_confidence is not None
+                        else "None"
+                    )
                     print(
-                        f"[Explorer] pred-obj disjoint fallback: pred_conf={pred_cluster_confidence:.3f}, "
+                        f"[Explorer] pred-obj disjoint fallback: pred_conf={pc_str}, "
                         f"iou={pred_obj_iou:.4f} → obj_bounds 사용"
                     )
                     selected_bounds = list(obj_bounds)
                     if X_obj_sel is not None and X_obj_sel.shape[0] > 0:
                         selected_points = _safe_stack([X_obj_sel], n_dim=len(selected_features))
+                    disjoint_fallback_fired = True
+
+                # D-A2: pred_cluster_confidence danger-zone fallback.
+                # 과적합 confidence calibration 실패 구간(pc ∈ [danger_low, danger_high]) 에서
+                # iou 도 낮으면 pred 예측을 신뢰할 수 없음. obj_bounds 로 전환.
+                if (
+                    not disjoint_fallback_fired
+                    and strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}
+                    and pred_cluster_confidence is not None
+                    and obj_bounds is not None
+                    and selected_bounds is not None
+                    and pred_obj_iou is not None
+                ):
+                    _pc_danger_lo = float(np.clip(
+                        float(strategy_params_local.get("pred_conf_danger_low", 0.40)),
+                        0.0, 1.0,
+                    ))
+                    _pc_danger_hi = float(np.clip(
+                        float(strategy_params_local.get("pred_conf_danger_high", 0.60)),
+                        0.0, 1.0,
+                    ))
+                    _pc_danger_iou_max = float(max(
+                        float(strategy_params_local.get("pred_conf_danger_iou_max", 0.15)),
+                        0.0,
+                    ))
+                    if (
+                        _pc_danger_lo <= float(pred_cluster_confidence) < _pc_danger_hi
+                        and float(pred_obj_iou) < _pc_danger_iou_max
+                    ):
+                        print(
+                            f"[Explorer] pred-conf danger-zone fallback: pred_conf="
+                            f"{float(pred_cluster_confidence):.3f} ∈ "
+                            f"[{_pc_danger_lo:.2f},{_pc_danger_hi:.2f}), "
+                            f"iou={float(pred_obj_iou):.4f} → obj_bounds 사용"
+                        )
+                        selected_bounds = list(obj_bounds)
+                        if X_obj_sel is not None and X_obj_sel.shape[0] > 0:
+                            selected_points = _safe_stack([X_obj_sel], n_dim=len(selected_features))
 
                 # DSE-A: high-confidence misleading pred fallback —
                 # pred_conf이 높지만(>=0.45) iou가 매우 낮으면(<0.10) EI 표면이
@@ -3090,7 +3150,7 @@ class ExplorerOrchestrator:
                             target_volume_ratio=dual_volume_cap_target,
                             center=center_hint,
                             boundary_pin_tol_ratio=float(
-                                getattr(self.config.system, "volume_cap_boundary_pin_tol_ratio", 0.02)
+                                getattr(self.config.system, "volume_cap_boundary_pin_tol_ratio", 0.03)
                             ),
                             force_pin_lo=(
                                 [bool(v) for v in constraint_aware_policy.get("protect_lb", [])]
@@ -3150,7 +3210,7 @@ class ExplorerOrchestrator:
         ):
             _dse1_strategy_params = dict(self.config.system.strategy_params or {})
             _dse1_eps_ratio = float(_dse1_strategy_params.get(
-                "dse1_boundary_touch_eps_ratio", 0.05
+                "dse1_boundary_touch_eps_ratio", 0.03
             ))
             _dse1_shifted: list[tuple[int, str]] = []
             _dse1_new_bounds: list[tuple[float, float]] = []
@@ -3354,7 +3414,7 @@ class ExplorerOrchestrator:
                 "constraint_aware_pre_shift_enabled": bool(getattr(self.config.system, "constraint_aware_pre_shift_enabled", True)),
                 "constraint_aware_use_for_volume_cap": bool(getattr(self.config.system, "constraint_aware_use_for_volume_cap", True)),
                 "volume_cap_boundary_pin_tol_ratio": float(
-                    getattr(self.config.system, "volume_cap_boundary_pin_tol_ratio", 0.02)
+                    getattr(self.config.system, "volume_cap_boundary_pin_tol_ratio", 0.03)
                 ),
                 "strategy_params": dict(self.config.system.strategy_params or {}),
             },

@@ -17,23 +17,47 @@ XGB_PARAM_TYPES = {
     "colsample_bytree": float,
     "learning_rate": float,
     "gamma": float,
+    "reg_alpha": float,
+    "reg_lambda": float,
 }
 
-DEFAULT_HPO_N_TRIALS = 20
+DEFAULT_HPO_N_TRIALS = 10
 DEFAULT_HPO_LAMBDA_STD = 0.5
+DEFAULT_HPO_LAMBDA_GAP = 0.2
 DEFAULT_LOW_DATA_HPO_N_TRIALS = 10
 DEFAULT_PRUNING_PERCENTILE = 85.0
 DEFAULT_PRUNING_STARTUP_TRIALS = 12
 DEFAULT_PRUNING_MIN_COMPLETED_TRIALS = 8
 DEFAULT_PRUNING_INTERVAL_STEPS = 1
-DEFAULT_LOW_DATA_XGB_SEARCH_SPACE: dict[str, tuple[float, float]] = {
-    "n_estimators": (250, 600),
-    "learning_rate": (0.02, 0.08),
-    "max_depth": (3, 5),
-    "min_child_weight": (1.0, 8.0),
+DEFAULT_MODELER_XGB_SEARCH_SPACE: dict[str, tuple[float, float]] = {
+    "n_estimators": (80, 200),
+    "learning_rate": (0.01, 0.10),
+    "max_depth": (2, 4),
+    "min_child_weight": (3.0, 12.0),
     "subsample": (0.7, 0.9),
     "colsample_bytree": (0.6, 0.9),
-    "gamma": (0.05, 0.3),
+    "gamma": (0.5, 2.0),
+    "reg_alpha": (0.1, 10.0),
+    "reg_lambda": (1.0, 30.0),
+}
+DEFAULT_MODELER_LOW_DATA_XGB_SEARCH_SPACE: dict[str, tuple[float, float]] = {
+    "n_estimators": (60, 160),
+    "learning_rate": (0.02, 0.10),
+    "max_depth": (2, 4),
+    "min_child_weight": (3.0, 10.0),
+    "subsample": (0.7, 0.9),
+    "colsample_bytree": (0.6, 0.9),
+    "gamma": (0.5, 2.0),
+    "reg_alpha": (0.1, 8.0),
+    "reg_lambda": (1.0, 20.0),
+}
+MODELER_HPO_GUARDRAILS: dict[str, dict[str, float]] = {
+    "n_estimators": {"high_max": 200.0},
+    "max_depth": {"high_max": 4.0},
+    "min_child_weight": {"low_min": 3.0},
+    "gamma": {"low_min": 0.5},
+    "reg_alpha": {"low_min": 0.1},
+    "reg_lambda": {"low_min": 1.0},
 }
 
 
@@ -44,6 +68,7 @@ class HPOResolveResult:
     hpo_mode: str
     hpo_n_trials_effective: int | None
     hpo_lambda_std_effective: float | None
+    hpo_lambda_gap_effective: float | None
 
 
 def _safe_int(value: Any, *, default: int, min_value: int = 1) -> int:
@@ -89,11 +114,62 @@ def _canonical_search_space(space: Any) -> dict[str, list[float]] | None:
     return out if out else None
 
 
+def _merge_search_space(
+    *,
+    base_space: dict[str, tuple[float, float]],
+    override_space: dict[str, list[float]] | None,
+) -> dict[str, list[float]]:
+    merged: dict[str, list[float]] = {
+        str(k): [float(v[0]), float(v[1])]
+        for k, v in base_space.items()
+    }
+    if isinstance(override_space, dict):
+        for key, value in override_space.items():
+            if isinstance(value, (list, tuple)) and len(value) == 2:
+                merged[str(key)] = [float(value[0]), float(value[1])]
+    return merged
+
+
+def _apply_modeler_hpo_guardrails(
+    *,
+    search_space: dict[str, list[float]],
+) -> dict[str, list[float]]:
+    out: dict[str, list[float]] = {}
+    for key, value in search_space.items():
+        if not (isinstance(value, (list, tuple)) and len(value) == 2):
+            continue
+        low = float(value[0])
+        high = float(value[1])
+        if not np.isfinite(low) or not np.isfinite(high):
+            continue
+        if high < low:
+            low, high = high, low
+        rule = MODELER_HPO_GUARDRAILS.get(str(key), {})
+        if "high_max" in rule:
+            high = min(high, float(rule["high_max"]))
+            low = min(low, high)
+        if "low_min" in rule:
+            low = max(low, float(rule["low_min"]))
+            high = max(high, low)
+        out[str(key)] = [float(low), float(high)]
+    return out
+
+
+def _resolve_modeler_search_space(
+    *,
+    base_space: dict[str, tuple[float, float]],
+    override_raw: Any,
+) -> dict[str, list[float]]:
+    override = _canonical_search_space(override_raw)
+    merged = _merge_search_space(base_space=base_space, override_space=override)
+    return _apply_modeler_hpo_guardrails(search_space=merged)
+
+
 def _resolve_hpo_policy(
     *,
     hpo_config: dict | None,
     low_data: bool,
-) -> tuple[str, int, float, dict[str, list[float]] | None]:
+) -> tuple[str, int, float, float, dict[str, list[float]] | None]:
     cfg = hpo_config or {}
     constrained_enabled = bool(cfg.get("low_data_constrained_enabled", True))
     if bool(low_data) and constrained_enabled:
@@ -108,9 +184,15 @@ def _resolve_hpo_policy(
             default=DEFAULT_HPO_LAMBDA_STD,
             min_value=0.0,
         )
-        search_space = _canonical_search_space(cfg.get("low_data_search_space"))
-        if search_space is None:
-            search_space = _canonical_search_space(DEFAULT_LOW_DATA_XGB_SEARCH_SPACE)
+        lambda_gap = _safe_float(
+            cfg.get("low_data_lambda_gap", cfg.get("lambda_gap", DEFAULT_HPO_LAMBDA_GAP)),
+            default=DEFAULT_HPO_LAMBDA_GAP,
+            min_value=0.0,
+        )
+        search_space = _resolve_modeler_search_space(
+            base_space=DEFAULT_MODELER_LOW_DATA_XGB_SEARCH_SPACE,
+            override_raw=cfg.get("low_data_search_space"),
+        )
     else:
         mode = "default"
         n_trials = _safe_int(
@@ -123,8 +205,16 @@ def _resolve_hpo_policy(
             default=DEFAULT_HPO_LAMBDA_STD,
             min_value=0.0,
         )
-        search_space = _canonical_search_space(cfg.get("search_space"))
-    return mode, int(n_trials), float(lambda_std), search_space
+        lambda_gap = _safe_float(
+            cfg.get("lambda_gap", DEFAULT_HPO_LAMBDA_GAP),
+            default=DEFAULT_HPO_LAMBDA_GAP,
+            min_value=0.0,
+        )
+        search_space = _resolve_modeler_search_space(
+            base_space=DEFAULT_MODELER_XGB_SEARCH_SPACE,
+            override_raw=cfg.get("search_space"),
+        )
+    return mode, int(n_trials), float(lambda_std), float(lambda_gap), search_space
 
 
 def _resolve_pruning_policy(
@@ -214,12 +304,14 @@ def resolve_hpo_params(
     hpo_mode = "disabled"
     hpo_n_trials_effective: int | None = None
     hpo_lambda_std_effective: float | None = None
+    hpo_lambda_gap_effective: float | None = None
 
     if model_name == "xgb":
         (
             hpo_mode,
             hpo_n_trials_effective,
             hpo_lambda_std_effective,
+            hpo_lambda_gap_effective,
             hpo_search_space,
         ) = _resolve_hpo_policy(
             hpo_config=hpo_config,
@@ -240,7 +332,16 @@ def resolve_hpo_params(
     if use_hpo:
         hpo_runner = HPORunner(
             n_trials=int(hpo_n_trials_effective or DEFAULT_HPO_N_TRIALS),
-            lambda_std=float(hpo_lambda_std_effective or DEFAULT_HPO_LAMBDA_STD),
+            lambda_std=(
+                float(hpo_lambda_std_effective)
+                if hpo_lambda_std_effective is not None
+                else float(DEFAULT_HPO_LAMBDA_STD)
+            ),
+            lambda_gap=(
+                float(hpo_lambda_gap_effective)
+                if hpo_lambda_gap_effective is not None
+                else float(DEFAULT_HPO_LAMBDA_GAP)
+            ),
             use_timestamp=use_timestamp,
             search_space=hpo_search_space,
             hpo_mode=hpo_mode,
@@ -252,6 +353,7 @@ def resolve_hpo_params(
             f"mode={hpo_mode} "
             f"n_trials={hpo_n_trials_effective} "
             f"lambda_std={hpo_lambda_std_effective} "
+            f"lambda_gap={hpo_lambda_gap_effective} "
             f"sampler={hpo_sampler_name}"
         )
 
@@ -276,4 +378,5 @@ def resolve_hpo_params(
         hpo_mode=hpo_mode,
         hpo_n_trials_effective=hpo_n_trials_effective,
         hpo_lambda_std_effective=hpo_lambda_std_effective,
+        hpo_lambda_gap_effective=hpo_lambda_gap_effective,
     )
