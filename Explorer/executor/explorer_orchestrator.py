@@ -2792,7 +2792,7 @@ class ExplorerOrchestrator:
                 )
                 _dsea_blend = _exp2_blend_high_crate if _exp2_is_high_crate else _dsea_blend_base
                 if (
-                    strategy_alias in {"s4_pred", "s8_pred"}
+                    strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}
                     and pred_cluster_confidence is not None
                     and pred_cluster_confidence >= _dsea_conf_high
                     and pred_obj_iou is not None
