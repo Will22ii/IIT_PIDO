@@ -108,6 +108,7 @@ def finalize_selected_features(
     keep_debug: bool,
     use_score_drop: bool,
     min_features: int = 2,
+    guard_force_fill: bool = False,
 ) -> SelectionFinalizeResult:
     selected_features = selected_df[selected_df["selected"]]["feature"].tolist()
     if not selected_features:
@@ -187,8 +188,10 @@ def finalize_selected_features(
                 if feat and feat not in current_set and _is_quality(row):
                     selected_features.append(feat)
                     current_set.add(feat)
-            # 2차 fallback: 품질 후보가 부족하면 기존 로직대로 score 상위 보충
-            if len(selected_features) < int(min_features):
+            # 2차 fallback: 품질 후보가 부족하면 score 상위 보충.
+            # guard_force_fill=False면 품질 미달 feature 강제 보충을 건너뛰고
+            # min_features 미달을 허용한다(L2).
+            if len(selected_features) < int(min_features) and bool(guard_force_fill):
                 for _, row in ranked.iterrows():
                     if len(selected_features) >= int(min_features):
                         break

@@ -39,6 +39,7 @@ def run_bootstrap_stability(
     rescue_global_floor: float = 0.0,
     rescue_very_low_data_only: bool = True,
     rescue_perm_floor: float = 0.0,
+    rescue_min_freq: float = 0.0,
     very_low_data_n_threshold: int = 55,
 ) -> pd.DataFrame:
     """Bootstrap Stability Selection: 서브샘플 K회 반복 → 선택 빈도 < min_freq인 feature 제거."""
@@ -188,14 +189,18 @@ def run_bootstrap_stability(
         if row["selected"] and row["bootstrap_freq"] < min_freq:
             gs = float(row.get("global_score", 0.0))
             perm_rate = float(row.get("perm_selection_rate", 0.0))
+            boot_freq = float(row.get("bootstrap_freq", 0.0))
             is_rescue_core = bool(row.get("bootstrap_rescue_core", False))
+            # L3: 극단적으로 불안정한 freq는 어느 경로로도 구제 차단
+            freq_floor_ok = boot_freq >= float(rescue_min_freq)
             rescue_by_core = (
-                is_rescue_core and gs >= float(rescue_global_floor)
+                is_rescue_core and gs >= float(rescue_global_floor) and freq_floor_ok
             )
             rescue_by_perm = (
                 float(rescue_perm_floor) > 0.0
                 and perm_rate >= float(rescue_perm_floor)
                 and gs >= float(rescue_global_floor)
+                and freq_floor_ok
             )
             if rescue_active and (rescue_by_core or rescue_by_perm):
                 tag = "core" if rescue_by_core else "perm"

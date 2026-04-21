@@ -141,6 +141,19 @@ THRESH = {
     "dse2_high_conf_threshold": 0.55,
     "dse2_iou_high_conf": 0.18,
     "dse2_iou_default": 0.22,
+    # DSE-2 adaptive relax (uncertainty-aware)
+    "dse2_low_conf_threshold": 0.58,
+    "dse2_low_conf_bonus": 0.02,
+    "dse2_low_g2_pass_threshold": 0.60,
+    "dse2_low_g2_pass_bonus": 0.01,
+    "dse2_shift_high_threshold": 0.035,
+    "dse2_shift_high_bonus": 0.02,
+    "dse2_disagree_center_high_threshold": 0.10,
+    "dse2_disagree_center_high_bonus": 0.02,
+    "dse2_low_np_threshold": 14.0,
+    "dse2_low_np_bonus": 0.01,
+    "dse2_iou_min": 0.16,
+    "dse2_iou_max": 0.26,
 }
 
 
@@ -290,16 +303,62 @@ def route_v2(
     # ─────────────────────────────────────────────────────────────
     # (F) DSE-2 trigger threshold
     # pred_conf 높을수록 conservative (덜 자주 union)
+    # uncertainty 신호(low conf / low gate2 / high shift / high center disagreement
+    # / low n/p)에서는 threshold를 완화해 union 빈도를 높인다.
     # ─────────────────────────────────────────────────────────────
+    base_dse2_iou: float
     if pc is not None and pc >= T["dse2_high_conf_threshold"]:
-        dse2_iou = T["dse2_iou_high_conf"]
+        base_dse2_iou = float(T["dse2_iou_high_conf"])
         R.append(
-            f"dse2_iou={dse2_iou:.2f} (pred_conf={pc:.3f}>="
+            f"dse2_iou base={base_dse2_iou:.2f} (pred_conf={pc:.3f}>="
             f"{T['dse2_high_conf_threshold']:.2f} → narrower trigger)"
         )
     else:
-        dse2_iou = T["dse2_iou_default"]
-        R.append(f"dse2_iou={dse2_iou:.2f} (default/low pred conf)")
+        base_dse2_iou = float(T["dse2_iou_default"])
+        R.append(f"dse2_iou base={base_dse2_iou:.2f} (default/low pred conf)")
+
+    dse2_relax = 0.0
+    relax_reasons: list[str] = []
+    if pc is None or float(pc) < float(T["dse2_low_conf_threshold"]):
+        _bonus = float(T["dse2_low_conf_bonus"])
+        dse2_relax += _bonus
+        relax_reasons.append(f"low_conf(+{_bonus:.2f})")
+    if g2p is not None and float(g2p) < float(T["dse2_low_g2_pass_threshold"]):
+        _bonus = float(T["dse2_low_g2_pass_bonus"])
+        dse2_relax += _bonus
+        relax_reasons.append(f"low_g2(+{_bonus:.2f})")
+    if (
+        state.pred_refine_shift_norm is not None
+        and float(state.pred_refine_shift_norm) >= float(T["dse2_shift_high_threshold"])
+    ):
+        _bonus = float(T["dse2_shift_high_bonus"])
+        dse2_relax += _bonus
+        relax_reasons.append(f"high_shift(+{_bonus:.2f})")
+    if (
+        state.dual_disagreement_center_l1_norm is not None
+        and float(state.dual_disagreement_center_l1_norm)
+        >= float(T["dse2_disagree_center_high_threshold"])
+    ):
+        _bonus = float(T["dse2_disagree_center_high_bonus"])
+        dse2_relax += _bonus
+        relax_reasons.append(f"high_center_disag(+{_bonus:.2f})")
+    if np_r < float(T["dse2_low_np_threshold"]):
+        _bonus = float(T["dse2_low_np_bonus"])
+        dse2_relax += _bonus
+        relax_reasons.append(f"low_np(+{_bonus:.2f})")
+
+    dse2_iou = _clip(
+        float(base_dse2_iou + dse2_relax),
+        float(T["dse2_iou_min"]),
+        float(T["dse2_iou_max"]),
+    )
+    if relax_reasons:
+        R.append(
+            f"dse2_iou relax: base={base_dse2_iou:.2f} +{dse2_relax:.2f} "
+            f"→ {dse2_iou:.2f} ({', '.join(relax_reasons)})"
+        )
+    else:
+        R.append(f"dse2_iou final={dse2_iou:.2f} (no uncertainty relax)")
 
     return RouterOutput(
         acq_mode=acq_mode,

@@ -61,8 +61,11 @@ class FeatureSelectionConfig:
     stability_drop_min_rate_normal: float = 0.60
     # disagreement penalty
     disagreement_penalty_enabled: bool = True
-    disagreement_threshold: float = 0.25
-    disagreement_penalty_scale: float = 0.40
+    disagreement_threshold: float = 0.20
+    disagreement_penalty_scale: float = 0.80
+    # perm-dominant override gating (L1)
+    perm_dominant_perm_threshold: float = 0.93
+    perm_dominant_gap_ceil: float = 0.25
     # very_low_data drop veto
     drop_veto_enabled: bool = True
     drop_veto_threshold: float = 0.03
@@ -99,6 +102,7 @@ class FeatureSelectionConfig:
     fi_bootstrap_rescue_global_floor: float = 0.78
     fi_bootstrap_rescue_very_low_data_only: bool = False
     fi_bootstrap_rescue_perm_floor: float = 0.85
+    fi_bootstrap_rescue_min_freq: float = 0.30
     # quantile policy
     quantile_top_ratio_default: float = 0.30
     quantile_top_ratio_p_le_6: float = 0.50
@@ -924,8 +928,17 @@ class FeatureSelector:
                 dp_penalty = dp_penalty * dampening
                 out["redundancy_suspect"] = redundancy_suspect
 
-            # D: Perm-dominant override — perm ≥ 0.93인 feature는 disagreement penalty 50% 감면
-            perm_dominant = out["perm_selection_rate"] >= 0.93
+            # D: Perm-dominant override — perm ≥ threshold AND (perm-drop gap) ≤ ceil
+            # L1: plant-dummy signature(perm>>drop)를 override에서 제외하기 위해 gap 상한 추가
+            _pd_thr = float(getattr(self.config, "perm_dominant_perm_threshold", 0.93))
+            _pd_gap = float(getattr(self.config, "perm_dominant_gap_ceil", 0.25))
+            _gap_arr = (
+                _safe_numeric(out["perm_selection_rate"])
+                - _safe_numeric(out["drop_selection_rate"])
+            )
+            perm_dominant = (
+                (out["perm_selection_rate"] >= _pd_thr) & (_gap_arr <= _pd_gap)
+            )
             dp_penalty = dp_penalty * np.where(perm_dominant, 0.5, 1.0)
 
             out["disagreement"] = disagreement
@@ -1094,11 +1107,18 @@ class FeatureSelector:
             index=out.index,
         ).astype(bool)
 
-        # D: Perm-dominant override — perm_vote ≥ 0.93이면 stability 강제 통과
-        # 근거: perm importance가 매우 높은 feature는 실질적 영향력이 있다는 강한 증거.
-        # drop 채널의 낮은 점수는 다중공선성(다른 correlated feature가 보상)일 가능성이 높음.
-        # 0.90→0.93 강화: dummy 혼입 방지 (d2 perm=0.918 같은 경계 사례 차단)
-        perm_dominant_override = out["perm_selection_rate"] >= 0.93
+        # D: Perm-dominant override — perm_vote ≥ threshold AND (perm-drop gap) ≤ ceil
+        # 근거: perm importance가 매우 높고 drop과의 괴리가 적은 feature만 강제 통과 허용.
+        # L1: plant-dummy(perm>>drop) signature를 override에서 제외.
+        _pd_thr_sb = float(getattr(self.config, "perm_dominant_perm_threshold", 0.93))
+        _pd_gap_sb = float(getattr(self.config, "perm_dominant_gap_ceil", 0.25))
+        _gap_arr_sb = (
+            _safe_numeric(out["perm_selection_rate"])
+            - _safe_numeric(out["drop_selection_rate"])
+        )
+        perm_dominant_override = (
+            (out["perm_selection_rate"] >= _pd_thr_sb) & (_gap_arr_sb <= _pd_gap_sb)
+        )
         stability_pass = stability_pass | perm_dominant_override
         out["perm_dominant_override"] = perm_dominant_override
 

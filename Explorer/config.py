@@ -52,9 +52,9 @@ class ExplorerSystemConfig:
     # L4: 제약·저차원·저 feasibility 구조에서만 L2/L3 보수 분기를 강제
     constraint_aware_conservative_p_dim_max: int = 5
     constraint_aware_conservative_np_ratio_max: float = 25.0
-    constraint_aware_conservative_feasible_ratio_max: float = 0.4
-    # 보수 분기 시 shift_fraction (0.0=완전 비활성)
-    constraint_aware_conservative_shift_fraction: float = 0.0
+    constraint_aware_conservative_feasible_ratio_max: float = 0.3
+    # 보수 분기 시 shift_fraction (0.0=완전 비활성, 0.3=부분 유지)
+    constraint_aware_conservative_shift_fraction: float = 0.3
     # volume-cap shrink 단계에서 side-aware pin/절단 우선순위 적용
     constraint_aware_use_for_volume_cap: bool = True
     # volume-cap 내부 boundary pin 허용 오차(기존 하드코딩 0.02 대체)

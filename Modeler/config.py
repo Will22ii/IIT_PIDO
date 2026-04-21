@@ -78,12 +78,15 @@ class ModelerSystemConfig:
 
     # 6-1) 채널 불일치/중복 감쇠
     fi_disagreement_penalty_enabled: bool = True
-    fi_disagreement_threshold: float = 0.25
-    fi_disagreement_penalty_scale: float = 0.40
+    fi_disagreement_threshold: float = 0.20
+    fi_disagreement_penalty_scale: float = 0.80
     fi_redundancy_dampening_enabled: bool = True
     fi_redundancy_perm_floor: float = 0.85
-    fi_redundancy_drop_ceil: float = 0.50
+    fi_redundancy_drop_ceil: float = 0.40
     fi_redundancy_dampening_factor: float = 0.5
+    # 6-1a) perm-dominant override gating (L1)
+    fi_perm_dominant_perm_threshold: float = 0.93
+    fi_perm_dominant_gap_ceil: float = 0.25
 
     # 6-2) score gap / veto
     fi_gap_filter_enabled: bool = True
@@ -110,6 +113,7 @@ class ModelerSystemConfig:
     fi_bootstrap_rescue_global_floor: float = 0.78
     fi_bootstrap_rescue_very_low_data_only: bool = False
     fi_bootstrap_rescue_perm_floor: float = 0.85
+    fi_bootstrap_rescue_min_freq: float = 0.30
 
     # 8) Null gate
     fi_null_enabled: bool = True
@@ -141,6 +145,11 @@ class ModelerSystemConfig:
     secondary_min_repeats: int = 5
     secondary_min_delta_r2: float = 0.0
     secondary_min_freq: float = 0.7
+
+    # 13) Anti-collapse guard behaviour (L2)
+    # False: 품질 후보(=bootstrap/null 미실패, null_pass=True)가 부족하면
+    # min_features 미달을 허용. True: score 상위 feature로 강제 보충(legacy).
+    fi_guard_force_fill: bool = False
 
 
 def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSelectionConfig":
@@ -199,6 +208,9 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         disagreement_penalty_enabled=system.fi_disagreement_penalty_enabled,
         disagreement_threshold=system.fi_disagreement_threshold,
         disagreement_penalty_scale=system.fi_disagreement_penalty_scale,
+        # perm-dominant override gating (L1)
+        perm_dominant_perm_threshold=system.fi_perm_dominant_perm_threshold,
+        perm_dominant_gap_ceil=system.fi_perm_dominant_gap_ceil,
         # drop veto
         drop_veto_enabled=system.fi_drop_veto_enabled,
         drop_veto_threshold=system.fi_drop_veto_threshold,
@@ -236,6 +248,7 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         fi_bootstrap_rescue_global_floor=system.fi_bootstrap_rescue_global_floor,
         fi_bootstrap_rescue_very_low_data_only=system.fi_bootstrap_rescue_very_low_data_only,
         fi_bootstrap_rescue_perm_floor=system.fi_bootstrap_rescue_perm_floor,
+        fi_bootstrap_rescue_min_freq=system.fi_bootstrap_rescue_min_freq,
         quantile_top_ratio_default=system.fi_quantile_top_ratio_default,
         quantile_top_ratio_p_le_6=system.fi_quantile_top_ratio_p_le_6,
         quantile_top_ratio_p_le_12=system.fi_quantile_top_ratio_p_le_12,

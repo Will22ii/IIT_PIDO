@@ -50,7 +50,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="cantilever_beam",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         n_samples=90,
-        repeats=25,
+        repeats=30,
     ),
     "goldstein_price": ProblemCase(
         problem_name="goldstein_price",

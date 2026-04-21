@@ -271,6 +271,9 @@ def run_fi_selection_workflow(
             rescue_perm_floor=float(
                 getattr(fs_config, "fi_bootstrap_rescue_perm_floor", 0.0)
             ),
+            rescue_min_freq=float(
+                getattr(fs_config, "fi_bootstrap_rescue_min_freq", 0.0)
+            ),
             very_low_data_n_threshold=int(fs_config.stability_very_low_data_n_threshold),
         )
         selected_df["bootstrap_enabled_effective"] = True

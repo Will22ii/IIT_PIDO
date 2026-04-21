@@ -241,6 +241,9 @@ def run_modeler(
             public_dir=public_dir,
             keep_debug=keep_debug,
             use_score_drop=bool(config.system.fi_use_score_drop),
+            guard_force_fill=bool(
+                getattr(config.system, "fi_guard_force_fill", False)
+            ),
         )
         primary_selected_df = selection_result.selected_df.copy()
         selected_df = selection_result.selected_df

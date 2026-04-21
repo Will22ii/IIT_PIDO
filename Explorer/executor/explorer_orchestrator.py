@@ -265,6 +265,40 @@ def _recenter_bounds_keep_width(
     return out
 
 
+def _infer_boundary_touch_sides(
+    *,
+    selected_points: np.ndarray | None,
+    global_bounds: list[tuple[float, float]],
+    eps_ratio: float = 0.03,
+) -> tuple[list[bool], list[bool]]:
+    d = len(global_bounds)
+    touch_lb = [False] * d
+    touch_ub = [False] * d
+    if (
+        selected_points is None
+        or d == 0
+    ):
+        return touch_lb, touch_ub
+    X = np.asarray(selected_points, dtype=float)
+    if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] != d:
+        return touch_lb, touch_ub
+    eps_r = float(max(float(eps_ratio), 0.0))
+    for j, (g_lb, g_ub) in enumerate(global_bounds):
+        gl = float(min(g_lb, g_ub))
+        gu = float(max(g_lb, g_ub))
+        span = max(gu - gl, 1e-12)
+        eps = eps_r * span
+        col = np.asarray(X[:, j], dtype=float)
+        col = col[np.isfinite(col)]
+        if col.size == 0:
+            continue
+        cmin = float(np.min(col))
+        cmax = float(np.max(col))
+        touch_lb[j] = (cmin - gl) <= eps
+        touch_ub[j] = (gu - cmax) <= eps
+    return touch_lb, touch_ub
+
+
 def _shrink_bounds_to_target_volume(
     *,
     selected_bounds: list[tuple[float, float]] | None,
@@ -2975,6 +3009,11 @@ class ExplorerOrchestrator:
         dual_volume_cap_target = None
         dual_volume_ratio_before_cap = None
         dual_volume_cap_applied = False
+        dse_cap_boundary_touch_dims: list[dict[str, object]] = []
+        dse_cap_boundary_touch_eps_ratio: float | None = None
+        dse_cap_center_realign_applied = False
+        dse_cap_center_blend_used: float | None = None
+        dse_cap_force_pin_applied = False
         constraint_aware_enabled = bool(getattr(self.config.system, "constraint_aware_enabled", True))
         constraint_aware_policy_applied = False
         constraint_aware_shifted_dims: list[tuple[int, str]] = []
@@ -3276,6 +3315,161 @@ class ExplorerOrchestrator:
                             center_hint = np.asarray(dual_center_hint, dtype=float).reshape(-1)
                         elif center_hint is None and isinstance(selected_points, np.ndarray) and selected_points.ndim == 2 and selected_points.shape[0] > 0:
                             center_hint = np.mean(selected_points, axis=0)
+
+                        _force_pin_lo_local: list[bool] | None = None
+                        _force_pin_hi_local: list[bool] | None = None
+                        _pref_shrink_side_local: list[str | None] | None = None
+                        _use_constraint_cap_policy = bool(
+                            constraint_aware_enabled
+                            and bool(getattr(self.config.system, "constraint_aware_use_for_volume_cap", True))
+                            and isinstance(constraint_aware_policy, dict)
+                        )
+                        if _use_constraint_cap_policy:
+                            _raw_lb = list(constraint_aware_policy.get("protect_lb", []))
+                            _raw_ub = list(constraint_aware_policy.get("protect_ub", []))
+                            _raw_pref = list(constraint_aware_policy.get("prefer_shrink_side", []))
+                            _force_pin_lo_local = [
+                                bool(_raw_lb[j]) if j < len(_raw_lb) else False
+                                for j in range(len(bounds))
+                            ]
+                            _force_pin_hi_local = [
+                                bool(_raw_ub[j]) if j < len(_raw_ub) else False
+                                for j in range(len(bounds))
+                            ]
+                            _pref_shrink_side_local = []
+                            for j in range(len(bounds)):
+                                _pv = _raw_pref[j] if j < len(_raw_pref) else None
+                                _ps = str(_pv).strip().lower() if _pv is not None else ""
+                                _pref_shrink_side_local.append(_ps if _ps in {"lb", "ub"} else None)
+
+                        # DSE-A: boundary-touch aware cap center/pin 강화
+                        _dse_cap_params = dict(self.config.system.strategy_params or {})
+                        _dse_cap_enabled = bool(_dse_cap_params.get("dse_cap_boundary_touch_enabled", True))
+                        _dse_cap_eps_ratio = float(np.clip(
+                            float(_dse_cap_params.get(
+                                "dse_cap_boundary_touch_eps_ratio",
+                                _dse_cap_params.get("dse1_boundary_touch_eps_ratio", 0.03),
+                            )),
+                            0.0,
+                            0.2,
+                        ))
+                        _dse_cap_min_excess = float(max(float(
+                            _dse_cap_params.get("dse_cap_boundary_touch_min_excess", 0.008)
+                        ), 0.0))
+                        _dse_cap_center_blend = float(np.clip(
+                            float(_dse_cap_params.get("dse_cap_center_blend", 0.60)),
+                            0.0,
+                            1.0,
+                        ))
+                        dse_cap_boundary_touch_eps_ratio = _dse_cap_eps_ratio
+                        _cap_excess = float(dual_volume_ratio_before_cap - dual_volume_cap_target)
+                        _touch_lb, _touch_ub = _infer_boundary_touch_sides(
+                            selected_points=selected_points,
+                            global_bounds=bounds,
+                            eps_ratio=_dse_cap_eps_ratio,
+                        )
+                        _touch_dims: list[tuple[int, str]] = []
+
+                        if (
+                            _dse_cap_enabled
+                            and _cap_excess >= _dse_cap_min_excess
+                            and len(selected_bounds) == len(bounds)
+                        ):
+                            if _force_pin_lo_local is None:
+                                _force_pin_lo_local = [False] * len(bounds)
+                            if _force_pin_hi_local is None:
+                                _force_pin_hi_local = [False] * len(bounds)
+                            if _pref_shrink_side_local is None:
+                                _pref_shrink_side_local = [None] * len(bounds)
+
+                            _boundary_center: list[float] = []
+                            _single_side_touch = False
+                            for j, ((s_lb, s_ub), (g_lb, g_ub)) in enumerate(zip(selected_bounds, bounds)):
+                                gl = float(min(g_lb, g_ub))
+                                gu = float(max(g_lb, g_ub))
+                                lo = float(np.clip(min(s_lb, s_ub), gl, gu))
+                                hi = float(np.clip(max(s_lb, s_ub), gl, gu))
+                                width = min(max(hi - lo, 0.0), max(gu - gl, 0.0))
+                                _lb_only = bool(_touch_lb[j] and not _touch_ub[j])
+                                _ub_only = bool(_touch_ub[j] and not _touch_lb[j])
+                                if _lb_only:
+                                    _single_side_touch = True
+                                    _touch_dims.append((j, "lb"))
+                                    _force_pin_lo_local[j] = True
+                                    if _pref_shrink_side_local[j] is None:
+                                        _pref_shrink_side_local[j] = "ub"
+                                elif _ub_only:
+                                    _single_side_touch = True
+                                    _touch_dims.append((j, "ub"))
+                                    _force_pin_hi_local[j] = True
+                                    if _pref_shrink_side_local[j] is None:
+                                        _pref_shrink_side_local[j] = "lb"
+
+                                if _lb_only:
+                                    _cc = float(np.clip(gl + 0.5 * width, gl, gu))
+                                elif _ub_only:
+                                    _cc = float(np.clip(gu - 0.5 * width, gl, gu))
+                                elif (
+                                    isinstance(center_hint, np.ndarray)
+                                    and center_hint.size == len(bounds)
+                                    and np.isfinite(float(center_hint[j]))
+                                ):
+                                    _cc = float(np.clip(float(center_hint[j]), gl, gu))
+                                else:
+                                    _cc = float(np.clip(0.5 * (lo + hi), gl, gu))
+                                _boundary_center.append(_cc)
+
+                            if _touch_dims:
+                                dse_cap_boundary_touch_dims = [
+                                    {
+                                        "dim": int(j),
+                                        "feature": (
+                                            str(selected_features[j])
+                                            if j < len(selected_features)
+                                            else str(j)
+                                        ),
+                                        "side": side,
+                                    }
+                                    for j, side in _touch_dims
+                                ]
+
+                            if _single_side_touch and _boundary_center:
+                                _boundary_center_arr = np.asarray(_boundary_center, dtype=float).reshape(-1)
+                                if (
+                                    not isinstance(center_hint, np.ndarray)
+                                    or center_hint.size != len(bounds)
+                                ):
+                                    center_hint = _boundary_center_arr
+                                    dse_cap_center_realign_applied = True
+                                    dse_cap_center_blend_used = 1.0
+                                else:
+                                    center_hint = (
+                                        (1.0 - _dse_cap_center_blend) * np.asarray(center_hint, dtype=float).reshape(-1)
+                                        + _dse_cap_center_blend * _boundary_center_arr
+                                    )
+                                    dse_cap_center_realign_applied = bool(_dse_cap_center_blend > 0.0)
+                                    dse_cap_center_blend_used = _dse_cap_center_blend
+                                center_hint = np.asarray(center_hint, dtype=float).reshape(-1)
+                                for j, (g_lb, g_ub) in enumerate(bounds):
+                                    gl = float(min(g_lb, g_ub))
+                                    gu = float(max(g_lb, g_ub))
+                                    center_hint[j] = float(np.clip(center_hint[j], gl, gu))
+                                print(
+                                    "[Explorer] DSE-A cap center realign: "
+                                    f"touch_dims={len(_touch_dims)} blend={float(dse_cap_center_blend_used or 0.0):.2f}"
+                                )
+
+                        dse_cap_force_pin_applied = bool(
+                            isinstance(_force_pin_lo_local, list)
+                            and isinstance(_force_pin_hi_local, list)
+                            and (any(_force_pin_lo_local) or any(_force_pin_hi_local))
+                        )
+                        if dse_cap_boundary_touch_dims:
+                            print(
+                                "[Explorer] DSE-A boundary-touch cap pins: "
+                                f"{dse_cap_boundary_touch_dims}"
+                            )
+
                         selected_bounds_cap = _shrink_bounds_to_target_volume(
                             selected_bounds=selected_bounds,
                             global_bounds=bounds,
@@ -3284,33 +3478,9 @@ class ExplorerOrchestrator:
                             boundary_pin_tol_ratio=float(
                                 getattr(self.config.system, "volume_cap_boundary_pin_tol_ratio", 0.03)
                             ),
-                            force_pin_lo=(
-                                [bool(v) for v in constraint_aware_policy.get("protect_lb", [])]
-                                if (
-                                    constraint_aware_enabled
-                                    and bool(getattr(self.config.system, "constraint_aware_use_for_volume_cap", True))
-                                    and isinstance(constraint_aware_policy, dict)
-                                )
-                                else None
-                            ),
-                            force_pin_hi=(
-                                [bool(v) for v in constraint_aware_policy.get("protect_ub", [])]
-                                if (
-                                    constraint_aware_enabled
-                                    and bool(getattr(self.config.system, "constraint_aware_use_for_volume_cap", True))
-                                    and isinstance(constraint_aware_policy, dict)
-                                )
-                                else None
-                            ),
-                            preferred_shrink_side=(
-                                list(constraint_aware_policy.get("prefer_shrink_side", []))
-                                if (
-                                    constraint_aware_enabled
-                                    and bool(getattr(self.config.system, "constraint_aware_use_for_volume_cap", True))
-                                    and isinstance(constraint_aware_policy, dict)
-                                )
-                                else None
-                            ),
+                            force_pin_lo=_force_pin_lo_local,
+                            force_pin_hi=_force_pin_hi_local,
+                            preferred_shrink_side=_pref_shrink_side_local,
                         )
                         if selected_bounds_cap is not None:
                             vol_after_cap = _volume_ratio_for_bounds(selected_bounds_cap, bounds)
@@ -3570,6 +3740,9 @@ class ExplorerOrchestrator:
             "strategy_alias": strategy_alias,
             "strategy_mode": strategy_mode,
             "dual_volume_cap_applied": bool(dual_volume_cap_applied),
+            "dse_cap_boundary_touch_dim_count": int(len(dse_cap_boundary_touch_dims)),
+            "dse_cap_center_realign_applied": bool(dse_cap_center_realign_applied),
+            "dse_cap_force_pin_applied": bool(dse_cap_force_pin_applied),
             "constraint_aware_enabled": bool(constraint_aware_enabled),
             "constraint_aware_policy_applied": bool(constraint_aware_policy_applied),
             "constraint_aware_probe_count": constraint_aware_probe_count,
@@ -3598,6 +3771,12 @@ class ExplorerOrchestrator:
             "has_post_constraints": bool(has_post_constraints),
             "selected_bounds_volume_ratio": vol_ratio,
             "dual_volume_cap_applied": bool(dual_volume_cap_applied),
+            "dse_cap_boundary_touch_dims": dse_cap_boundary_touch_dims,
+            "dse_cap_boundary_touch_dim_count": int(len(dse_cap_boundary_touch_dims)),
+            "dse_cap_boundary_touch_eps_ratio": dse_cap_boundary_touch_eps_ratio,
+            "dse_cap_center_realign_applied": bool(dse_cap_center_realign_applied),
+            "dse_cap_center_blend_used": dse_cap_center_blend_used,
+            "dse_cap_force_pin_applied": bool(dse_cap_force_pin_applied),
             "constraint_aware_enabled": bool(constraint_aware_enabled),
             "constraint_aware_policy_applied": bool(constraint_aware_policy_applied),
             "constraint_aware_probe_count": constraint_aware_probe_count,
