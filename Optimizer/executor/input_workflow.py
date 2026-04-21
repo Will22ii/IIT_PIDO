@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 from dataclasses import dataclass
 
 import numpy as np
@@ -26,6 +27,9 @@ class ResolvedOptimizerInputs:
     selected_features: list[str]
     selected_bounds: dict[str, tuple[float, float]]
     bounds_path: str | None
+    post_feasibility_payload: dict | None
+    post_feasibility_model_path: str | None
+    post_feasibility_model_kind: str
     cae_metadata_path: str
 
 
@@ -299,6 +303,58 @@ def _resolve_modeler_selected_features_optional(modeler_metadata_path: str | Non
     return [str(v) for v in selected if str(v).strip()]
 
 
+def _artifact_ref(metadata: dict | None, key: str) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    artifacts = metadata.get("artifacts", {})
+    if not isinstance(artifacts, dict):
+        return None
+    if key in artifacts and isinstance(artifacts.get(key), str):
+        return artifacts.get(key)
+    for layer in ("public", "meta", "debug"):
+        layer_map = artifacts.get(layer, {})
+        if isinstance(layer_map, dict) and isinstance(layer_map.get(key), str):
+            return layer_map.get(key)
+    return None
+
+
+def _resolve_modeler_feasibility_payload_optional(
+    modeler_metadata_path: str | None,
+) -> tuple[dict | None, str | None, str]:
+    if not modeler_metadata_path:
+        return None, None, "none"
+    try:
+        meta = _read_json(modeler_metadata_path)
+    except Exception as exc:
+        print(f"[Optimizer] Modeler metadata load failed for feasibility model: {exc}")
+        return None, None, "none"
+
+    feas_ref = _artifact_ref(meta, "feas_model_path")
+    if not isinstance(feas_ref, str) or not feas_ref.strip():
+        return None, None, "none"
+
+    feas_path = feas_ref
+    if not os.path.isabs(feas_path):
+        feas_path = os.path.normpath(os.path.join(os.path.dirname(modeler_metadata_path), feas_path))
+    if not os.path.exists(feas_path):
+        print(f"[Optimizer] feasibility model path not found: {feas_path}")
+        return None, feas_path, "missing"
+
+    try:
+        with open(feas_path, "rb") as f:
+            payload = pickle.load(f)
+    except Exception as exc:
+        print(f"[Optimizer] feasibility model load failed: {exc}")
+        return None, feas_path, "invalid"
+
+    if not isinstance(payload, dict):
+        print("[Optimizer] feasibility model payload is not dict; post penalty disabled.")
+        return None, feas_path, "invalid"
+
+    kind = str(payload.get("kind", "unknown")).strip().lower() or "unknown"
+    return payload, feas_path, kind
+
+
 def resolve_optimizer_inputs(
     *,
     config: OptimizerConfig,
@@ -329,6 +385,9 @@ def resolve_optimizer_inputs(
     )
     modeler_meta_path = _resolve_modeler_metadata_path_optional(config=config, run_context=run_context)
     modeler_selected_features = _resolve_modeler_selected_features_optional(modeler_meta_path)
+    feasibility_payload, feasibility_model_path, feasibility_model_kind = (
+        _resolve_modeler_feasibility_payload_optional(modeler_meta_path)
+    )
 
     cae_bounds: dict[str, tuple[float, float]] = {}
     cae_order: list[str] = []
@@ -415,5 +474,8 @@ def resolve_optimizer_inputs(
         selected_features=selected_features,
         selected_bounds=selected_bounds,
         bounds_path=bounds_path,
+        post_feasibility_payload=feasibility_payload,
+        post_feasibility_model_path=feasibility_model_path,
+        post_feasibility_model_kind=str(feasibility_model_kind),
         cae_metadata_path=cae_meta_path,
     )

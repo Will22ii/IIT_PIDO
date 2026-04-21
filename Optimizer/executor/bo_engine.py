@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 import pandas as pd
 
+from CAE_tool_interface.executor.configurator import select_cae_by_name
 from DOE.executor.anchor_refiner import AcquisitionOptimizer, fit_gp_with_fallback
 from DOE.executor.constraint_filter import evaluate_constraints_point
+from DOE.executor.eval_sanitizer import sanitize_evaluate_output
 from Optimizer.config import OptimizerSystemConfig
 
 
@@ -17,6 +20,13 @@ class BOEngineResult:
     archive_df: pd.DataFrame
     best_point: dict[str, float]
     best_objective: float
+    best_point_raw: dict[str, float]
+    best_objective_raw: float
+    post_penalty_active: bool
+    post_penalty_lambda: float
+    post_score_mode: str
+    feasibility_model_kind: str
+    feasibility_status: str
     n_iterations: int
 
 
@@ -116,30 +126,6 @@ def _sample_feasible_candidate(
     return x_cur
 
 
-def _proxy_objective(
-    *,
-    x: np.ndarray,
-    lb: np.ndarray,
-    ub: np.ndarray,
-    objective_sense: str,
-    mode: str,
-    rng: np.random.Generator,
-) -> float:
-    mode_norm = str(mode or "center_distance").strip().lower()
-    if mode_norm == "random":
-        val = float(rng.uniform(0.0, 1.0))
-        return val if objective_sense == "min" else -val
-
-    # center_distance (default)
-    center = 0.5 * (lb + ub)
-    span = np.maximum(ub - lb, 1e-12)
-    z = (np.asarray(x, dtype=float) - center) / span
-    dist2 = float(np.sum(z * z))
-    if objective_sense == "max":
-        return -dist2
-    return dist2
-
-
 def _sample_local(
     *,
     rng: np.random.Generator,
@@ -189,8 +175,162 @@ def _resolve_no_doe_segment(
     return "stage2"
 
 
+def _normalize_post_score_mode(mode: str | None) -> str:
+    value = str(mode or "add_penalty").strip().lower()
+    if value not in {"add_penalty"}:
+        return "add_penalty"
+    return value
+
+
+def _build_post_feasible_prob_fn(
+    *,
+    feasibility_payload: dict | None,
+    selected_features: list[str],
+) -> tuple[Callable[[np.ndarray], float] | None, str, str]:
+    if not isinstance(feasibility_payload, dict):
+        return None, "none", "no_payload"
+
+    kind = str(feasibility_payload.get("kind", "unknown")).strip().lower() or "unknown"
+    model_feature_cols = feasibility_payload.get("feature_cols", [])
+    if isinstance(model_feature_cols, list) and model_feature_cols:
+        feature_cols = [str(f) for f in model_feature_cols]
+    else:
+        feature_cols = list(selected_features)
+
+    feature_to_idx = {name: idx for idx, name in enumerate(selected_features)}
+    missing = [f for f in feature_cols if f not in feature_to_idx]
+    if missing:
+        return None, kind, "missing_selected_features:" + ",".join(missing)
+    col_idx = np.asarray([feature_to_idx[f] for f in feature_cols], dtype=int)
+
+    if kind == "constant":
+        p0 = float(np.clip(float(feasibility_payload.get("constant_prob", 0.5)), 0.0, 1.0))
+
+        def _const_prob(_x: np.ndarray) -> float:
+            return float(p0)
+
+        return _const_prob, "constant", "ok"
+
+    model = feasibility_payload.get("model")
+    if model is None:
+        return None, kind, "missing_model_object"
+
+    def _model_prob(x_row: np.ndarray) -> float:
+        try:
+            x = np.asarray(x_row, dtype=float).reshape(-1)
+            if x.shape[0] < len(selected_features):
+                return 1.0
+            x_in = x[col_idx].reshape(1, -1)
+            if hasattr(model, "predict_proba"):
+                prob = np.asarray(model.predict_proba(x_in), dtype=float)
+                if prob.ndim == 2 and prob.shape[1] >= 2:
+                    p = float(prob[0, 1])
+                else:
+                    p = float(prob.reshape(-1)[0])
+            elif hasattr(model, "predict"):
+                pred = np.asarray(model.predict(x_in), dtype=float).reshape(-1)
+                p = float(pred[0])
+            else:
+                return 1.0
+            if not np.isfinite(p):
+                return 1.0
+            return float(np.clip(p, 0.0, 1.0))
+        except Exception:
+            return 1.0
+
+    return _model_prob, kind, "ok"
+
+
+def _apply_post_penalty_to_objective(
+    *,
+    y_raw: float,
+    p_feasible: float,
+    objective_sense: str,
+    penalty_lambda: float,
+    score_mode: str,
+) -> float:
+    y = float(y_raw)
+    if score_mode != "add_penalty" or penalty_lambda <= 0.0:
+        return y
+    penalty = float(penalty_lambda) * (1.0 - float(np.clip(p_feasible, 0.0, 1.0)))
+    if objective_sense == "max":
+        return y - penalty
+    return y + penalty
+
+
+def _best_index(y: np.ndarray, objective_sense: str) -> int:
+    if objective_sense == "max":
+        return int(np.argmax(y))
+    return int(np.argmin(y))
+
+
+def _build_cae_objective_evaluator(
+    *,
+    problem_name: str,
+    variables: list[dict],
+    selected_features: list[str],
+) -> Callable[[np.ndarray], float]:
+    _, evaluate_func = select_cae_by_name(str(problem_name).strip())
+
+    var_names: list[str] = []
+    var_baseline: list[float] = []
+    for v in variables:
+        if not isinstance(v, dict):
+            continue
+        name = str(v.get("name", "")).strip()
+        if not name:
+            continue
+        if "baseline" in v:
+            base = float(v["baseline"])
+        elif "lb" in v and "ub" in v:
+            base = 0.5 * (float(v["lb"]) + float(v["ub"]))
+        else:
+            base = 0.0
+        if not np.isfinite(base):
+            base = 0.0
+        var_names.append(name)
+        var_baseline.append(float(base))
+
+    if len(var_names) == 0:
+        raise RuntimeError("CAE variable list is empty for objective evaluation.")
+
+    name_to_idx = {name: idx for idx, name in enumerate(var_names)}
+    missing_selected = [f for f in selected_features if f not in name_to_idx]
+    if missing_selected:
+        raise RuntimeError(
+            "Selected features are not present in CAE variable list: "
+            + ", ".join(missing_selected)
+        )
+    selected_idx = np.asarray([name_to_idx[f] for f in selected_features], dtype=int)
+    x_base = np.asarray(var_baseline, dtype=float)
+
+    def _evaluate_selected(x_selected: np.ndarray) -> float:
+        x_sel = np.asarray(x_selected, dtype=float).reshape(-1)
+        if x_sel.shape[0] != len(selected_features):
+            raise RuntimeError(
+                f"CAE objective evaluation dimension mismatch: got {x_sel.shape[0]}, "
+                f"expected {len(selected_features)}."
+            )
+
+        x_full = x_base.copy()
+        x_full[selected_idx] = x_sel
+        out = evaluate_func(x_full)
+        success, objective, _outputs, invalid_reason, raw_repr = sanitize_evaluate_output(out)
+        if not success:
+            reason = invalid_reason or "success_false"
+            raise RuntimeError(
+                "CAE evaluation failed during optimizer iteration: "
+                f"reason={reason}, raw={raw_repr}"
+            )
+        return float(objective)
+
+    return _evaluate_selected
+
+
 def run_bo_engine(
     *,
+    problem_name: str,
+    variables: list[dict],
     doe_df: pd.DataFrame | None,
     selected_features: list[str],
     selected_bounds: dict[str, tuple[float, float]],
@@ -200,6 +340,7 @@ def run_bo_engine(
     system: OptimizerSystemConfig,
     seed: int,
     constraint_defs: list[dict],
+    post_feasibility_payload: dict | None = None,
 ) -> BOEngineResult:
     if int(n_samples) < 0:
         raise ValueError("Optimizer user.n_samples must be >= 0.")
@@ -211,6 +352,34 @@ def run_bo_engine(
     ub = np.asarray([selected_bounds[f][1] for f in selected_features], dtype=float)
     if np.any(~np.isfinite(lb)) or np.any(~np.isfinite(ub)) or np.any(ub <= lb):
         raise RuntimeError("Invalid optimization bounds.")
+    evaluate_objective = _build_cae_objective_evaluator(
+        problem_name=problem_name,
+        variables=variables,
+        selected_features=selected_features,
+    )
+
+    post_score_mode = _normalize_post_score_mode(getattr(system, "post_score_mode", "add_penalty"))
+    post_penalty_lambda = max(float(getattr(system, "post_penalty_lambda", 0.0)), 0.0)
+    post_constraint_enabled = bool(getattr(system, "post_constraint_enabled", False))
+    post_prob_fn: Callable[[np.ndarray], float] | None = None
+    feasibility_model_kind = "none"
+    feasibility_status = "disabled"
+    if post_constraint_enabled and post_penalty_lambda > 0.0:
+        post_prob_fn, feasibility_model_kind, feasibility_status = _build_post_feasible_prob_fn(
+            feasibility_payload=post_feasibility_payload,
+            selected_features=selected_features,
+        )
+        if post_prob_fn is None:
+            feasibility_status = (
+                feasibility_status
+                if feasibility_status != "ok"
+                else "disabled_no_probability_model"
+            )
+    else:
+        feasibility_status = "disabled_by_config"
+    post_penalty_active = bool(post_prob_fn is not None and post_penalty_lambda > 0.0)
+    if post_constraint_enabled and not post_penalty_active:
+        print(f"[Optimizer] post penalty disabled: {feasibility_status}")
 
     X_archive = np.empty((0, len(selected_features)), dtype=float)
     y_archive = np.empty((0,), dtype=float)
@@ -280,20 +449,7 @@ def run_bo_engine(
         if X_boot.shape[0] < 2:
             X_boot = np.vstack([X_boot, rng.uniform(lb, ub, size=(2 - X_boot.shape[0], len(selected_features)))])
 
-        y_boot = np.array(
-            [
-                _proxy_objective(
-                    x=x,
-                    lb=lb,
-                    ub=ub,
-                    objective_sense=objective_sense,
-                    mode=str(system.no_doe_objective_proxy),
-                    rng=rng,
-                )
-                for x in X_boot
-            ],
-            dtype=float,
-        )
+        y_boot = np.array([evaluate_objective(x) for x in X_boot], dtype=float)
         X_train = X_boot.copy()
         y_train = y_boot.copy()
         X_archive = X_boot.copy()
@@ -305,9 +461,31 @@ def run_bo_engine(
         )
         init_source = "no_doe_bootstrap"
 
-    best_i = int(np.argmax(y_train) if objective_sense == "max" else np.argmin(y_train))
-    best_x = X_train[best_i].copy()
-    best_y = float(y_train[best_i])
+    best_i_raw = _best_index(y_train, objective_sense)
+    best_x_raw = X_train[best_i_raw].copy()
+    best_y_raw = float(y_train[best_i_raw])
+
+    if post_penalty_active:
+        p_train = np.array([float(np.clip(post_prob_fn(x), 0.0, 1.0)) for x in X_train], dtype=float)
+        y_train_eff = np.array(
+            [
+                _apply_post_penalty_to_objective(
+                    y_raw=float(y),
+                    p_feasible=float(p),
+                    objective_sense=objective_sense,
+                    penalty_lambda=post_penalty_lambda,
+                    score_mode=post_score_mode,
+                )
+                for y, p in zip(y_train, p_train)
+            ],
+            dtype=float,
+        )
+    else:
+        y_train_eff = y_train.copy()
+
+    best_i_eff = _best_index(y_train_eff, objective_sense)
+    best_x_eff = X_train[best_i_eff].copy()
+    best_y_eff = float(y_train_eff[best_i_eff])
 
     seen = {_round_key(x, decimals=int(system.dedup_decimals)) for x in X_archive}
     acq = AcquisitionOptimizer()
@@ -358,7 +536,7 @@ def run_bo_engine(
                 if gp_model is not None and rng.uniform(0.0, 1.0) < 0.45:
                     x_next = acq.optimize(
                         model=gp_model,
-                        y_best=best_y,
+                        y_best=best_y_raw,
                         lb=lb,
                         ub=ub,
                         starts=starts,
@@ -366,11 +544,13 @@ def run_bo_engine(
                         acq_type=acq_type,
                         kappa=float(kappa),
                         xi=float(system.ei_xi),
+                        post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
+                        post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
                     )
                 if x_next is None:
                     x_next = _sample_local(
                         rng=rng,
-                        best_x=best_x,
+                        best_x=best_x_eff,
                         lb=lb,
                         ub=ub,
                         radius_ratio=0.10,
@@ -380,7 +560,7 @@ def run_bo_engine(
                 if gp_model is not None and rng.uniform(0.0, 1.0) < 0.80:
                     x_next = acq.optimize(
                         model=gp_model,
-                        y_best=best_y,
+                        y_best=best_y_raw,
                         lb=lb,
                         ub=ub,
                         starts=starts,
@@ -388,11 +568,13 @@ def run_bo_engine(
                         acq_type=acq_type,
                         kappa=float(min(kappa, 0.7)),
                         xi=float(system.ei_xi),
+                        post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
+                        post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
                     )
                 if x_next is None:
                     x_next = _sample_local(
                         rng=rng,
-                        best_x=best_x,
+                        best_x=best_x_eff,
                         lb=lb,
                         ub=ub,
                         radius_ratio=0.04,
@@ -401,7 +583,7 @@ def run_bo_engine(
             if gp_model is not None:
                 x_next = acq.optimize(
                     model=gp_model,
-                    y_best=best_y,
+                    y_best=best_y_raw,
                     lb=lb,
                     ub=ub,
                     starts=starts,
@@ -409,6 +591,8 @@ def run_bo_engine(
                     acq_type=acq_type,
                     kappa=float(kappa),
                     xi=float(system.ei_xi),
+                    post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
+                    post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
                 )
             if x_next is None:
                 x_next = rng.uniform(lb, ub, size=(lb.shape[0],))
@@ -443,47 +627,82 @@ def run_bo_engine(
             pred_mean = float(np.mean(y_train))
             pred_std = float(np.std(y_train)) if y_train.size > 1 else 0.0
 
-        if mode_no_doe:
-            y_next = _proxy_objective(
-                x=x_next,
-                lb=lb,
-                ub=ub,
-                objective_sense=objective_sense,
-                mode=str(system.no_doe_objective_proxy),
-                rng=rng,
-            )
-            objective_source = f"proxy_{str(system.no_doe_objective_proxy)}"
-        else:
-            # benchmark 미연결 단계: surrogate 예측값을 pseudo objective로 사용
-            y_next = pred_mean if bool(system.surrogate_only_mode) else pred_mean
-            objective_source = "surrogate_pred"
+        y_next = float(evaluate_objective(x_next))
+        objective_source = "cae_eval"
 
-        y_next = float(y_next)
-        if not np.isfinite(y_next):
-            y_next = float(np.mean(y_train))
+        p_feasible = 1.0
+        if post_penalty_active and post_prob_fn is not None:
+            p_feasible = float(np.clip(post_prob_fn(x_next), 0.0, 1.0))
+        y_next_effective = _apply_post_penalty_to_objective(
+            y_raw=y_next,
+            p_feasible=p_feasible,
+            objective_sense=objective_sense,
+            penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+            score_mode=post_score_mode,
+        )
+
+        acq_base = float("nan")
+        acq_effective = float("nan")
+        if gp_model is not None:
+            try:
+                if str(acq_type).upper() == "EI":
+                    acq_base = float(
+                        acq.acquisition_ei(
+                            x_next,
+                            gp_model,
+                            y_best=best_y_raw,
+                            objective_sense=objective_sense,
+                            xi=float(system.ei_xi),
+                        )
+                    )
+                else:
+                    acq_base = float(
+                        acq.acquisition_lcb(
+                            x_next,
+                            gp_model,
+                            kappa=float(kappa),
+                            objective_sense=objective_sense,
+                        )
+                    )
+                acq_effective = float(acq_base)
+                if post_penalty_active:
+                    acq_effective = float(acq_effective + post_penalty_lambda * (1.0 - p_feasible))
+            except Exception:
+                pass
 
         X_train = np.vstack([X_train, x_next.reshape(1, -1)])
         y_train = np.append(y_train, y_next)
         X_archive = np.vstack([X_archive, x_next.reshape(1, -1)])
         y_archive = np.append(y_archive, y_next)
 
-        if _is_better(y_new=y_next, y_best=best_y, objective_sense=objective_sense):
-            best_y = float(y_next)
-            best_x = x_next.copy()
+        if _is_better(y_new=y_next, y_best=best_y_raw, objective_sense=objective_sense):
+            best_y_raw = float(y_next)
+            best_x_raw = x_next.copy()
+        if _is_better(y_new=y_next_effective, y_best=best_y_eff, objective_sense=objective_sense):
+            best_y_eff = float(y_next_effective)
+            best_x_eff = x_next.copy()
 
         row = {
             "iter": int(i + 1),
             "acq_type": str(acq_type),
             "kappa": float(kappa),
+            "acq_base": float(acq_base),
+            "acq_effective": float(acq_effective),
             "pred_mean": float(pred_mean),
             "pred_std": float(pred_std),
-            "objective": float(y_next),
+            "objective": float(y_next_effective),
+            "objective_raw": float(y_next),
+            "objective_effective": float(y_next_effective),
             "objective_source": str(objective_source),
             "init_source": str(init_source),
             "no_doe_mode": str(no_doe_mode_name),
             "segment": str(segment),
             "gp_fallback_used": bool(gp_fallback_used),
             "surrogate_only_mode": bool(system.surrogate_only_mode),
+            "post_penalty_active": bool(post_penalty_active),
+            "post_penalty_lambda": float(post_penalty_lambda if post_penalty_active else 0.0),
+            "post_score_mode": str(post_score_mode),
+            "p_feasible": float(p_feasible),
         }
         for fname, value in zip(selected_features, x_next):
             row[fname] = float(value)
@@ -492,20 +711,43 @@ def run_bo_engine(
     history_df = pd.DataFrame(history_rows)
     archive_rows = []
     for x, y in zip(X_archive, y_archive):
-        item = {"objective": float(y)}
+        p = 1.0
+        if post_penalty_active and post_prob_fn is not None:
+            p = float(np.clip(post_prob_fn(x), 0.0, 1.0))
+        y_eff = _apply_post_penalty_to_objective(
+            y_raw=float(y),
+            p_feasible=p,
+            objective_sense=objective_sense,
+            penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+            score_mode=post_score_mode,
+        )
+        item = {
+            "objective": float(y_eff),
+            "objective_raw": float(y),
+            "objective_effective": float(y_eff),
+            "p_feasible": float(p),
+        }
         for fname, value in zip(selected_features, x):
             item[fname] = float(value)
         archive_rows.append(item)
     archive_df = pd.DataFrame(archive_rows)
 
-    best_point = {f: float(v) for f, v in zip(selected_features, best_x)}
-    if not math.isfinite(float(best_y)):
+    best_point = {f: float(v) for f, v in zip(selected_features, best_x_eff)}
+    best_point_raw = {f: float(v) for f, v in zip(selected_features, best_x_raw)}
+    if not math.isfinite(float(best_y_eff)) or not math.isfinite(float(best_y_raw)):
         raise RuntimeError("Optimizer finished with non-finite best objective.")
 
     return BOEngineResult(
         history_df=history_df,
         archive_df=archive_df,
         best_point=best_point,
-        best_objective=float(best_y),
+        best_objective=float(best_y_eff),
+        best_point_raw=best_point_raw,
+        best_objective_raw=float(best_y_raw),
+        post_penalty_active=bool(post_penalty_active),
+        post_penalty_lambda=float(post_penalty_lambda if post_penalty_active else 0.0),
+        post_score_mode=str(post_score_mode),
+        feasibility_model_kind=str(feasibility_model_kind),
+        feasibility_status=str(feasibility_status),
         n_iterations=int(n_samples),
     )

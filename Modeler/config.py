@@ -107,8 +107,9 @@ class ModelerSystemConfig:
     fi_bootstrap_min_freq: float = 0.60
     fi_bootstrap_min_freq_low_data: float = 0.78
     fi_bootstrap_min_freq_very_low_data: float = 0.55
-    fi_bootstrap_rescue_global_floor: float = 0.83
-    fi_bootstrap_rescue_very_low_data_only: bool = True
+    fi_bootstrap_rescue_global_floor: float = 0.78
+    fi_bootstrap_rescue_very_low_data_only: bool = False
+    fi_bootstrap_rescue_perm_floor: float = 0.85
 
     # 8) Null gate
     fi_null_enabled: bool = True
@@ -234,6 +235,7 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         bootstrap_min_freq_very_low_data=system.fi_bootstrap_min_freq_very_low_data,
         fi_bootstrap_rescue_global_floor=system.fi_bootstrap_rescue_global_floor,
         fi_bootstrap_rescue_very_low_data_only=system.fi_bootstrap_rescue_very_low_data_only,
+        fi_bootstrap_rescue_perm_floor=system.fi_bootstrap_rescue_perm_floor,
         quantile_top_ratio_default=system.fi_quantile_top_ratio_default,
         quantile_top_ratio_p_le_6=system.fi_quantile_top_ratio_p_le_6,
         quantile_top_ratio_p_le_12=system.fi_quantile_top_ratio_p_le_12,

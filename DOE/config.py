@@ -23,7 +23,7 @@ class DOESystemConfig:
     initial_corner_adaptive_ratio_low_dim: float = 0.05
 
     # 2) Additional DOE: 단계/배분
-    additional_init_ratio: float = 0.3
+    additional_init_ratio: float = 0.4
     additional_exec_ratio: float = 0.1
     additional_initial_probe_multiplier: float = 2.0
     # n_exec_local_floor: 최소 서로 다른 anchor에서 각 1개 sampling (다양성 보장)

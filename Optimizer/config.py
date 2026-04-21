@@ -38,7 +38,13 @@ class OptimizerSystemConfig:
     objective_sense_override: str | None = None
     # 현재는 기본 OFF (추후 pre/post 제약 로직 확장용)
     enforce_pre_constraints: bool = False
-    # benchmark 함수 미연결 상태에서 surrogate 예측값으로 loop 진행
+    # post feasibility penalty 사용 여부
+    post_constraint_enabled: bool = True
+    # score/acquisition 패널티 강도
+    post_penalty_lambda: float = 2.0
+    # post score 적용 방식: add_penalty(기본)
+    post_score_mode: str = "add_penalty"
+    # Deprecated: 실제 CAE objective 평가로 전환되어 현재 미사용
     surrogate_only_mode: bool = True
     # DOE가 없을 때 bootstrap 랜덤 샘플 수
     no_doe_bootstrap_size: int = 12
@@ -49,8 +55,7 @@ class OptimizerSystemConfig:
     # DOE 없음 + three-phase 비율
     no_doe_phase1_ratio: float = 0.25
     no_doe_phase2_ratio: float = 0.45
-    # DOE 없음 + objective proxy (surrogate_only_mode=True일 때)
-    # center_distance | random
+    # Deprecated: 실제 CAE objective 평가로 전환되어 현재 미사용
     no_doe_objective_proxy: str = "center_distance"
     # 중복 판정 반올림 자릿수
     dedup_decimals: int = 12

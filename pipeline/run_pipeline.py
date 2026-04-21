@@ -55,12 +55,24 @@ def run_pipeline(*, config: PipelineConfig) -> dict:
         config.explorer.cae = config.cae
         ExplorerOrchestrator(config.explorer, run_context=run_context).run()
 
+    if config.tasks.run_optimizer and config.optimizer is not None:
+        # Lazy import: optimizer 의존성(scipy 등)이 없는 파이프라인 실행 경로를 보호
+        from Optimizer.run_Optimizer import run_optimizer
+
+        config.optimizer.cae = config.cae
+        run_optimizer(
+            config=config.optimizer,
+            run_context=run_context,
+            doe_dataframe=doe_df,
+        )
+
     return {
         "run_context": run_context,
         "cae_metadata": get_task_metadata_path(run_context, "CAE"),
         "doe_metadata": get_task_metadata_path(run_context, "DOE"),
         "modeler_metadata": get_task_metadata_path(run_context, "Modeler"),
         "explorer_metadata": get_task_metadata_path(run_context, "Explorer"),
+        "optimizer_metadata": get_task_metadata_path(run_context, "OPT"),
     }
 
 
@@ -111,7 +123,8 @@ if __name__ == "__main__":
             doe_metadata_path=None,
             modeler_metadata_path=None,
         ),
-        tasks=PipelineTasks(run_doe=True, run_modeler=True, run_explorer=True),
+        optimizer=None,
+        tasks=PipelineTasks(run_doe=True, run_modeler=True, run_explorer=True, run_optimizer=False),
     )
 
     run_pipeline(config=cfg)

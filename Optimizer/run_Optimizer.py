@@ -73,6 +73,8 @@ def run_optimizer(
         update_run_index(run_context, "Modeler", os.path.abspath(resolved.modeler_metadata_path))
 
     bo_result = run_bo_engine(
+        problem_name=resolved.problem_name,
+        variables=resolved.variables,
         doe_df=resolved.doe_df,
         selected_features=resolved.selected_features,
         selected_bounds=resolved.selected_bounds,
@@ -82,6 +84,7 @@ def run_optimizer(
         system=config.system,
         seed=int(resolved.seed),
         constraint_defs=resolved.constraint_defs,
+        post_feasibility_payload=resolved.post_feasibility_payload,
     )
 
     task_out = save_optimizer_outputs(
@@ -93,7 +96,13 @@ def run_optimizer(
 
     print(f"- Iterations completed: {bo_result.n_iterations}")
     print(f"- Best objective: {bo_result.best_objective:.6f}")
+    print(f"- Best objective (raw): {bo_result.best_objective_raw:.6f}")
     print(f"- Best point: {bo_result.best_point}")
+    if bo_result.post_penalty_active:
+        print(
+            f"- Post-constraint penalty active: mode={bo_result.post_score_mode}, "
+            f"lambda={bo_result.post_penalty_lambda:.4f}, model={bo_result.feasibility_model_kind}"
+        )
     print(f"- OPT metadata: {task_out['metadata']}")
     print("===================================")
     print(" OPTIMIZER 실행 완료")
@@ -103,7 +112,9 @@ def run_optimizer(
         "csv": task_out["csv"],
         "metadata": task_out["metadata"],
         "best_objective": float(bo_result.best_objective),
+        "best_objective_raw": float(bo_result.best_objective_raw),
         "best_point": dict(bo_result.best_point),
+        "best_point_raw": dict(bo_result.best_point_raw),
         "n_iterations": int(bo_result.n_iterations),
     }
 

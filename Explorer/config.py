@@ -43,6 +43,18 @@ class ExplorerSystemConfig:
     constraint_aware_side_rate_gap: float = 0.12
     # 보호 side가 추론되면 cap 이전에 boundary 쪽으로 width-preserving shift
     constraint_aware_pre_shift_enabled: bool = True
+    # L2: shift 이동 비율(1.0=전체 width 이동, 0.0=shift 비활성). 기본 0.5로
+    # 부분 이동하여 비보호측 optimum coverage 리스크를 줄인다.
+    constraint_aware_shift_fraction: float = 0.5
+    # L3: near_{opposite}_hits 이 anti_threshold 이상이면 protect 플래그 자체를
+    # 해제해 shift 전면 무효화(기존 D-B1 prefer-shrink-side 무효화만이었음)
+    constraint_aware_anti_anti_threshold: int = 1
+    # L4: 제약·저차원·저 feasibility 구조에서만 L2/L3 보수 분기를 강제
+    constraint_aware_conservative_p_dim_max: int = 5
+    constraint_aware_conservative_np_ratio_max: float = 25.0
+    constraint_aware_conservative_feasible_ratio_max: float = 0.4
+    # 보수 분기 시 shift_fraction (0.0=완전 비활성)
+    constraint_aware_conservative_shift_fraction: float = 0.0
     # volume-cap shrink 단계에서 side-aware pin/절단 우선순위 적용
     constraint_aware_use_for_volume_cap: bool = True
     # volume-cap 내부 boundary pin 허용 오차(기존 하드코딩 0.02 대체)

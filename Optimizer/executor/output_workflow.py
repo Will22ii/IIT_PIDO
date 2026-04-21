@@ -33,7 +33,12 @@ def save_optimizer_outputs(
             {
                 "best_point": bo_result.best_point,
                 "best_objective": float(bo_result.best_objective),
+                "best_point_raw": bo_result.best_point_raw,
+                "best_objective_raw": float(bo_result.best_objective_raw),
                 "objective_sense": str(resolved.objective_sense),
+                "post_penalty_active": bool(bo_result.post_penalty_active),
+                "post_score_mode": str(bo_result.post_score_mode),
+                "post_penalty_lambda": float(bo_result.post_penalty_lambda),
             },
             f,
             ensure_ascii=False,
@@ -76,12 +81,17 @@ def save_optimizer_outputs(
             "objective_col": str(config.system.objective_col),
             "objective_sense_override": config.system.objective_sense_override,
             "enforce_pre_constraints": bool(config.system.enforce_pre_constraints),
+            "post_constraint_enabled": bool(config.system.post_constraint_enabled),
+            "post_penalty_lambda": float(config.system.post_penalty_lambda),
+            "post_score_mode": str(config.system.post_score_mode),
             "surrogate_only_mode": bool(config.system.surrogate_only_mode),
             "debug_level": str(config.system.debug_level),
         },
         "previous": previous,
         "selected_features": list(resolved.selected_features),
         "selected_bounds_path": resolved.bounds_path,
+        "post_feasibility_model_path": resolved.post_feasibility_model_path,
+        "post_feasibility_model_kind": str(resolved.post_feasibility_model_kind),
     }
 
     resolved_params = {
@@ -95,7 +105,14 @@ def save_optimizer_outputs(
     results = {
         "n_iterations": int(bo_result.n_iterations),
         "best_objective": float(bo_result.best_objective),
+        "best_objective_raw": float(bo_result.best_objective_raw),
         "best_point": dict(bo_result.best_point),
+        "best_point_raw": dict(bo_result.best_point_raw),
+        "post_penalty_active": bool(bo_result.post_penalty_active),
+        "post_penalty_lambda": float(bo_result.post_penalty_lambda),
+        "post_score_mode": str(bo_result.post_score_mode),
+        "feasibility_model_kind": str(bo_result.feasibility_model_kind),
+        "feasibility_status": str(bo_result.feasibility_status),
         "n_history_rows": int(len(bo_result.history_df)),
         "n_archive_rows": int(len(bo_result.archive_df)),
     }

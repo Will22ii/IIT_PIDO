@@ -134,11 +134,8 @@ THRESH = {
     # expansion mode (state-based; 기존 EXP-3 로직과 정합)
     "exp_high_crate_threshold": 0.85,
 
-    # cap target (DSE-7 조건부)
-    "cap_relax_iou_max": 0.18,
-    "cap_relax_pred_conf_max": 0.50,
-    "cap_default": 0.249,
-    "cap_relaxed": 0.30,
+    # fixed cap target (hard policy)
+    "cap_fixed": 0.2499,
 
     # DSE-2 trigger
     "dse2_high_conf_threshold": 0.55,
@@ -284,22 +281,11 @@ def route_v2(
         R.append("expansion=fi_aware (default; no FI score 시 uniform fallback)")
 
     # ─────────────────────────────────────────────────────────────
-    # (E) cap_target (DSE-7 조건부 완화)
-    # 근거: cantilever fail의 100%가 over_shrink_fail. 3-조건 AND 트리거.
+    # (E) cap_target (hard fixed policy)
+    # 30% 완화 경로를 제거하고 고정 cap(24.99%)만 사용한다.
     # ─────────────────────────────────────────────────────────────
-    cap_target = T["cap_default"]
-    if (
-        iou is not None and iou < T["cap_relax_iou_max"]
-        and has_c
-        and (pc is None or pc < T["cap_relax_pred_conf_max"])
-    ):
-        cap_target = T["cap_relaxed"]
-        R.append(
-            f"cap={cap_target:.3f} (over_shrink risk: iou={iou:.4f} & "
-            f"constraint & pred_conf={pc})"
-        )
-    else:
-        R.append(f"cap={cap_target:.3f} (default)")
+    cap_target = T["cap_fixed"]
+    R.append("cap=0.2499 (fixed hard cap; relaxed path removed)")
 
     # ─────────────────────────────────────────────────────────────
     # (F) DSE-2 trigger threshold

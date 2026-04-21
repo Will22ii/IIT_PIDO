@@ -44,19 +44,19 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="rosenbrock",
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
         n_samples=450,
-        repeats=100,
+        repeats=10,
     ),
     "cantilever_beam": ProblemCase(
         problem_name="cantilever_beam",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         n_samples=90,
-        repeats=100,
+        repeats=25,
     ),
     "goldstein_price": ProblemCase(
         problem_name="goldstein_price",
         known_optimum={"x1": 0.0, "x2": -1.0},
         n_samples=150,
-        repeats=100,
+        repeats=25,
     ),
     "six_hump_camel": ProblemCase(
         problem_name="six_hump_camel",
@@ -65,7 +65,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": -0.0898, "x2": 0.7126},
         ],
         n_samples=50,
-        repeats=100,
+        repeats=25,
     ),
     "rosenbrock_nodummy": ProblemCase(
         problem_name="rosenbrock_nodummy",
@@ -376,6 +376,8 @@ def _build_pipeline_config(
     run_doe: bool,
     run_modeler: bool,
     run_explorer: bool,
+    run_optimizer: bool,
+    optimizer_n_samples: int,
     use_additional: bool,
     use_hpo: bool,
     use_primary_selection: bool,
@@ -424,15 +426,31 @@ def _build_pipeline_config(
         modeler_metadata_path=None,
     )
 
+    optimizer_cfg = None
+    if run_optimizer:
+        from Optimizer.config import OptimizerConfig, OptimizerSystemConfig, OptimizerUserConfig
+
+        optimizer_cfg = OptimizerConfig(
+            user=OptimizerUserConfig(n_samples=int(max(int(optimizer_n_samples), 0))),
+            system=OptimizerSystemConfig(),
+            cae=cae_cfg,
+            cae_metadata_path=None,
+            doe_metadata_path=None,
+            explorer_metadata_path=None,
+            modeler_metadata_path=None,
+        )
+
     return PipelineConfig(
         cae=cae_cfg,
         doe=doe_cfg if run_doe else None,
         modeler=modeler_cfg if run_modeler else None,
         explorer=explorer_cfg,
+        optimizer=optimizer_cfg,
         tasks=PipelineTasks(
             run_doe=bool(run_doe),
             run_modeler=bool(run_modeler),
             run_explorer=bool(run_explorer),
+            run_optimizer=bool(run_optimizer),
         ),
     )
 
@@ -1091,6 +1109,13 @@ def main() -> None:
     parser.add_argument("--skip-doe", action="store_true", help="Skip DOE stage.")
     parser.add_argument("--skip-modeler", action="store_true", help="Skip Modeler stage.")
     parser.add_argument("--skip-explorer", action="store_true", help="Skip Explorer stage.")
+    parser.add_argument("--run-optimizer", action="store_true", help="Enable Optimizer stage.")
+    parser.add_argument(
+        "--optimizer-samples",
+        type=int,
+        default=30,
+        help="Optimizer user n_samples.",
+    )
     parser.add_argument(
         "--explorer-strategies",
         type=str,
@@ -1107,6 +1132,8 @@ def main() -> None:
     run_doe = not bool(args.skip_doe)
     run_modeler = not bool(args.skip_modeler)
     run_explorer = not bool(args.skip_explorer)
+    run_optimizer = bool(args.run_optimizer)
+    optimizer_n_samples = int(max(int(args.optimizer_samples), 0))
     use_additional = not bool(args.no_additional)
     use_hpo = not bool(args.no_hpo)
     use_primary_selection = not bool(args.no_primary_selection)
@@ -1120,6 +1147,7 @@ def main() -> None:
     run_counter = 0
     failures: list[dict[str, Any]] = []
     explorer_failures: list[dict[str, Any]] = []
+    optimizer_failures: list[dict[str, Any]] = []
     explorer_detail_rows: list[dict[str, Any]] = []
     fi_detail_rows: list[dict[str, Any]] = []
 
@@ -1128,9 +1156,12 @@ def main() -> None:
     print("===================================")
     print(
         f"- repeats={repeats} total_runs={total_runs} "
-        f"tasks(doe/modeler/explorer)={run_doe}/{run_modeler}/{run_explorer} "
+        f"tasks(doe/modeler/explorer/optimizer)="
+        f"{run_doe}/{run_modeler}/{run_explorer}/{run_optimizer} "
         f"modeler(primary_selection)={use_primary_selection}"
     )
+    if run_optimizer:
+        print(f"- optimizer_n_samples={optimizer_n_samples}")
     print(
         "- problem_repeats="
         + ",".join(
@@ -1160,6 +1191,8 @@ def main() -> None:
                 run_doe=run_doe,
                 run_modeler=run_modeler,
                 run_explorer=False,
+                run_optimizer=bool(run_optimizer and (not run_explorer)),
+                optimizer_n_samples=optimizer_n_samples,
                 use_additional=use_additional,
                 use_hpo=use_hpo,
                 use_primary_selection=use_primary_selection,
@@ -1255,6 +1288,50 @@ def main() -> None:
                                 f"[Explorer][{requested_id}] optimum_included={included} "
                                 f"(hits={hit_count}/{total_count})"
                             )
+
+                            if run_optimizer:
+                                try:
+                                    from Optimizer.run_Optimizer import run_optimizer as _run_optimizer
+                                    from Optimizer.config import (
+                                        OptimizerConfig,
+                                        OptimizerSystemConfig,
+                                        OptimizerUserConfig,
+                                    )
+
+                                    opt_cfg = OptimizerConfig(
+                                        user=OptimizerUserConfig(n_samples=optimizer_n_samples),
+                                        system=OptimizerSystemConfig(),
+                                        cae=cfg.cae,
+                                        cae_metadata_path=None,
+                                        doe_metadata_path=None,
+                                        explorer_metadata_path=None,
+                                        modeler_metadata_path=None,
+                                    )
+                                    opt_out = _run_optimizer(
+                                        config=opt_cfg,
+                                        run_context=run_context,
+                                    )
+                                    print(
+                                        f"[Optimizer][{requested_id}] "
+                                        f"best={float(opt_out.get('best_objective', float('nan'))):.6f}"
+                                    )
+                                except Exception as opt_exc:
+                                    payload = {
+                                        "run": run_counter,
+                                        "repeat": rep + 1,
+                                        "problem": case.problem_name,
+                                        "seed": seed,
+                                        "strategy": requested_id,
+                                        "error": str(opt_exc),
+                                    }
+                                    optimizer_failures.append(payload)
+                                    print(
+                                        "[Batch][Optimizer] FAILED "
+                                        f"problem={case.problem_name} repeat={rep + 1} "
+                                        f"seed={seed} strategy={requested_id} error={opt_exc}"
+                                    )
+                                    if not continue_on_error:
+                                        raise
 
                             explorer_detail_rows.append(
                                 {
@@ -1441,6 +1518,7 @@ def main() -> None:
     print(f"- success_runs={total_runs - len(failures)}")
     print(f"- failed_runs={len(failures)}")
     print(f"- explorer_strategy_failed_runs={len(explorer_failures)}")
+    print(f"- optimizer_failed_runs={len(optimizer_failures)}")
     print(f"- fi_primary_try_stats_csv={fi_detail_csv}")
     print(f"- fi_primary_problem_summary_csv={fi_summary_csv}")
     print(f"- explorer_try_stats_csv={detail_csv}")
@@ -1467,6 +1545,14 @@ def main() -> None:
     if explorer_failures:
         print("- explorer_failure_details:")
         for item in explorer_failures:
+            print(
+                f"  run={item.get('run')} repeat={item.get('repeat')} "
+                f"problem={item.get('problem')} seed={item.get('seed')} "
+                f"strategy={item.get('strategy')} error={item.get('error')}"
+            )
+    if optimizer_failures:
+        print("- optimizer_failure_details:")
+        for item in optimizer_failures:
             print(
                 f"  run={item.get('run')} repeat={item.get('repeat')} "
                 f"problem={item.get('problem')} seed={item.get('seed')} "

@@ -497,6 +497,9 @@ def _infer_constraint_side_policy(
     min_side_samples: int = 24,
     side_rate_min: float = 0.55,
     side_rate_gap: float = 0.12,
+    anchor_obj_values: np.ndarray | None = None,
+    objective_sense: str = "min",
+    anti_anti_threshold: int = 1,
 ) -> dict | None:
     X = np.asarray(selected_points, dtype=float)
     d = len(global_bounds)
@@ -517,13 +520,33 @@ def _infer_constraint_side_policy(
         constraint_defs=pre_constraint_defs,
         scope="pre",
     )
-    anchors = X[feas_mask]
-    if anchors.shape[0] == 0:
+    anchors_all = X[feas_mask]
+    feasible_ratio = (
+        float(anchors_all.shape[0]) / float(max(X.shape[0], 1))
+        if X.shape[0] > 0 else 0.0
+    )
+    if anchors_all.shape[0] == 0:
         return None
 
-    if anchors.shape[0] > int(max(probe_anchor_max, 1)):
-        step = max(anchors.shape[0] // int(max(probe_anchor_max, 1)), 1)
-        anchors = anchors[::step][: int(max(probe_anchor_max, 1))]
+    # obj 값이 주어지면 top-K를 인덱스로 선정(L1).
+    top_idx_global: np.ndarray | None = None
+    if anchor_obj_values is not None:
+        obj_arr = np.asarray(anchor_obj_values, dtype=float).ravel()
+        if obj_arr.shape[0] == X.shape[0]:
+            obj_feas = obj_arr[feas_mask]
+            if obj_feas.size > 0 and np.all(np.isfinite(obj_feas)):
+                top_k = int(max(3, int(np.ceil(obj_feas.size * 0.2))))
+                top_k = int(min(top_k, obj_feas.size))
+                order = np.argsort(obj_feas)
+                if str(objective_sense).lower() == "max":
+                    order = order[::-1]
+                top_idx_global = order[:top_k]
+
+    if anchors_all.shape[0] > int(max(probe_anchor_max, 1)):
+        step = max(anchors_all.shape[0] // int(max(probe_anchor_max, 1)), 1)
+        anchors = anchors_all[::step][: int(max(probe_anchor_max, 1))]
+    else:
+        anchors = anchors_all
 
     steps = int(max(probe_steps, 2))
     t_grid = np.linspace(0.5, 1.0, num=steps, dtype=float)
@@ -538,6 +561,25 @@ def _infer_constraint_side_policy(
 
     near_lb_hits = np.zeros((d,), dtype=int)
     near_ub_hits = np.zeros((d,), dtype=int)
+    # L1: top-obj anchor 기반 near-hits (objective 랭킹이 주어진 경우).
+    top_near_lb_hits = np.zeros((d,), dtype=int)
+    top_near_ub_hits = np.zeros((d,), dtype=int)
+    if top_idx_global is not None:
+        top_set = set(int(i) for i in top_idx_global.tolist())
+        for ia, a in enumerate(anchors_all):
+            if ia not in top_set:
+                continue
+            for j, (g_lb, g_ub) in enumerate(global_bounds):
+                gl = float(min(g_lb, g_ub))
+                gu = float(max(g_lb, g_ub))
+                span = max(gu - gl, 0.0)
+                if span <= 0.0:
+                    continue
+                xj = float(np.clip(a[j], gl, gu))
+                if (xj - gl) <= edge_r * span:
+                    top_near_lb_hits[j] += 1
+                if (gu - xj) <= edge_r * span:
+                    top_near_ub_hits[j] += 1
     for a in anchors:
         for j, (g_lb, g_ub) in enumerate(global_bounds):
             gl = float(min(g_lb, g_ub))
@@ -637,6 +679,21 @@ def _infer_constraint_side_policy(
                 protect_ub[j] = False
                 prefer_shrink_side[j] = None
 
+        # L1: top-obj 신호 우선 적용.
+        # 같은 dim에서 top-K obj anchors가 한쪽 경계에 몰려있다면 그 side를
+        # 보호측으로 강제하고 반대측 shift를 비활성화한다.
+        if top_idx_global is not None:
+            tlb = int(top_near_lb_hits[j])
+            tub = int(top_near_ub_hits[j])
+            if tlb >= 1 and tub == 0:
+                protect_lb[j] = True
+                protect_ub[j] = False
+                prefer_shrink_side[j] = None
+            elif tub >= 1 and tlb == 0:
+                protect_ub[j] = True
+                protect_lb[j] = False
+                prefer_shrink_side[j] = None
+
         score_rows.append(
             {
                 "dim": int(j),
@@ -646,29 +703,35 @@ def _infer_constraint_side_policy(
                 "rate_ub": r_ub,
                 "near_lb_hits": int(near_lb_hits[j]),
                 "near_ub_hits": int(near_ub_hits[j]),
+                "top_near_lb_hits": int(top_near_lb_hits[j]),
+                "top_near_ub_hits": int(top_near_ub_hits[j]),
                 "protect_lb": bool(protect_lb[j]),
                 "protect_ub": bool(protect_ub[j]),
                 "prefer_shrink_side": prefer_shrink_side[j],
             }
         )
 
-    # D-B1: anti-anti-optimum guard. boundary 근처에 feasible anchor 가 1건이라도
-    # 있으면 그 방향으로의 directional shrink/shift 를 비활성화한다 (optimum 이
-    # boundary 에 있을 가능성을 보호). protect 플래그는 건드리지 않음.
+    # D-B1 + L3: anti-anti-optimum guard 강화.
+    # boundary 근처에 feasible anchor가 anti_thr 이상이면:
+    #  - prefer_shrink_side 를 None 으로 비활성화(기존 동작)
+    #  - protect_{반대측} 플래그 자체를 해제해 shift 적용도 억제(L3 강화)
+    anti_thr = int(max(int(anti_anti_threshold), 1))
     for j in range(d):
-        if (
-            prefer_shrink_side[j] == "lb"
-            and int(near_lb_hits[j]) >= 1
-        ):
-            prefer_shrink_side[j] = None
-        if (
-            prefer_shrink_side[j] == "ub"
-            and int(near_ub_hits[j]) >= 1
-        ):
-            prefer_shrink_side[j] = None
+        if int(near_lb_hits[j]) >= anti_thr:
+            if prefer_shrink_side[j] == "lb":
+                prefer_shrink_side[j] = None
+            if bool(protect_ub[j]):
+                protect_ub[j] = False
+        if int(near_ub_hits[j]) >= anti_thr:
+            if prefer_shrink_side[j] == "ub":
+                prefer_shrink_side[j] = None
+            if bool(protect_lb[j]):
+                protect_lb[j] = False
         # score_rows 도 동기화
         if j < len(score_rows):
             score_rows[j]["prefer_shrink_side"] = prefer_shrink_side[j]
+            score_rows[j]["protect_lb"] = bool(protect_lb[j])
+            score_rows[j]["protect_ub"] = bool(protect_ub[j])
 
     if not any(protect_lb) and not any(protect_ub):
         return {
@@ -678,7 +741,8 @@ def _infer_constraint_side_policy(
             "score_rows": score_rows,
             "anchor_count": int(anchors.shape[0]),
             "probe_count": int(X_probe.shape[0]),
-            "feasible_selected_count": int(anchors.shape[0]),
+            "feasible_selected_count": int(anchors_all.shape[0]),
+            "feasible_ratio": float(feasible_ratio),
         }
 
     return {
@@ -688,7 +752,8 @@ def _infer_constraint_side_policy(
         "score_rows": score_rows,
         "anchor_count": int(anchors.shape[0]),
         "probe_count": int(X_probe.shape[0]),
-        "feasible_selected_count": int(anchors.shape[0]),
+        "feasible_selected_count": int(anchors_all.shape[0]),
+        "feasible_ratio": float(feasible_ratio),
     }
 
 
@@ -698,6 +763,7 @@ def _apply_constraint_side_shift(
     global_bounds: list[tuple[float, float]],
     protect_lb: list[bool] | None,
     protect_ub: list[bool] | None,
+    shift_fraction: float = 1.0,
 ) -> tuple[list[tuple[float, float]] | None, list[tuple[int, str]]]:
     if (
         selected_bounds is None
@@ -709,6 +775,7 @@ def _apply_constraint_side_shift(
     ):
         return selected_bounds, []
 
+    frac = float(np.clip(float(shift_fraction), 0.0, 1.0))
     out: list[tuple[float, float]] = []
     shifted: list[tuple[int, str]] = []
     for j, ((s_lb, s_ub), (g_lb, g_ub)) in enumerate(zip(selected_bounds, global_bounds)):
@@ -721,16 +788,26 @@ def _apply_constraint_side_shift(
             out.append((lo, hi))
             continue
 
+        if frac <= 0.0:
+            # L2: shift 전면 비활성 — 원본 bounds 유지
+            out.append((lo, hi))
+            continue
+
         if bool(protect_lb[j]) and not bool(protect_ub[j]):
-            lo_new = gl
-            hi_new = float(min(gl + width, gu))
+            # target: lo_target=gl, hi_target=gl+width
+            lo_target = gl
+            hi_target = float(min(gl + width, gu))
+            lo_new = float(lo + frac * (lo_target - lo))
+            hi_new = float(hi + frac * (hi_target - hi))
             out.append((lo_new, hi_new))
             if abs(lo_new - lo) > 1e-12 or abs(hi_new - hi) > 1e-12:
                 shifted.append((j, "lb"))
             continue
         if bool(protect_ub[j]) and not bool(protect_lb[j]):
-            hi_new = gu
-            lo_new = float(max(gu - width, gl))
+            hi_target = gu
+            lo_target = float(max(gu - width, gl))
+            lo_new = float(lo + frac * (lo_target - lo))
+            hi_new = float(hi + frac * (hi_target - hi))
             out.append((lo_new, hi_new))
             if abs(lo_new - lo) > 1e-12 or abs(hi_new - hi) > 1e-12:
                 shifted.append((j, "ub"))
@@ -2914,6 +2991,15 @@ class ExplorerOrchestrator:
                 and selected_points.ndim == 2
                 and selected_points.shape[0] > 0
             ):
+                # L1: anchor objective 값(surrogate 예측)을 제공해 top-obj 기반 override 활성화
+                _anchor_obj_vals: np.ndarray | None = None
+                try:
+                    if models is not None and len(models) > 0:
+                        _mu_sel, _ = _predict_ensemble(models, selected_points)
+                        _anchor_obj_vals = np.asarray(_mu_sel, dtype=float).reshape(-1)
+                except Exception:
+                    _anchor_obj_vals = None
+
                 constraint_aware_policy = _infer_constraint_side_policy(
                     selected_points=selected_points,
                     selected_features=selected_features,
@@ -2925,6 +3011,11 @@ class ExplorerOrchestrator:
                     min_side_samples=int(getattr(self.config.system, "constraint_aware_min_side_samples", 24)),
                     side_rate_min=float(getattr(self.config.system, "constraint_aware_side_rate_min", 0.55)),
                     side_rate_gap=float(getattr(self.config.system, "constraint_aware_side_rate_gap", 0.12)),
+                    anchor_obj_values=_anchor_obj_vals,
+                    objective_sense=str(objective_sense),
+                    anti_anti_threshold=int(
+                        getattr(self.config.system, "constraint_aware_anti_anti_threshold", 1)
+                    ),
                 )
                 if isinstance(constraint_aware_policy, dict):
                     constraint_aware_probe_count = int(constraint_aware_policy.get("probe_count", 0))
@@ -2937,11 +3028,55 @@ class ExplorerOrchestrator:
                         constraint_aware_policy_applied
                         and bool(getattr(self.config.system, "constraint_aware_pre_shift_enabled", True))
                     ):
+                        # L4: 상태 기반 보수 분기 — 제약·저차원·저 feasibility에서 shift 약화
+                        _p_dim_now = int(len(selected_features))
+                        try:
+                            _usable_n_now = float(_meta_get("usable_n", 0) or 0)
+                        except Exception:
+                            _usable_n_now = 0.0
+                        _np_ratio_now = (
+                            float(_usable_n_now) / float(max(_p_dim_now, 1))
+                            if _usable_n_now and _p_dim_now else 0.0
+                        )
+                        _feas_ratio = float(constraint_aware_policy.get("feasible_ratio", 1.0))
+                        _p_dim_max = int(
+                            getattr(self.config.system, "constraint_aware_conservative_p_dim_max", 5)
+                        )
+                        _np_ratio_max = float(
+                            getattr(self.config.system, "constraint_aware_conservative_np_ratio_max", 25.0)
+                        )
+                        _feas_max = float(
+                            getattr(self.config.system, "constraint_aware_conservative_feasible_ratio_max", 0.4)
+                        )
+                        _is_conservative = bool(
+                            has_pre_constraints
+                            and _p_dim_now <= _p_dim_max
+                            and (_np_ratio_now == 0.0 or _np_ratio_now <= _np_ratio_max)
+                            and _feas_ratio <= _feas_max
+                        )
+                        if _is_conservative:
+                            _shift_frac = float(
+                                getattr(
+                                    self.config.system,
+                                    "constraint_aware_conservative_shift_fraction",
+                                    0.0,
+                                )
+                            )
+                        else:
+                            _shift_frac = float(
+                                getattr(self.config.system, "constraint_aware_shift_fraction", 0.5)
+                            )
+                        print(
+                            f"[Explorer] constraint-aware shift: frac={_shift_frac:.2f} "
+                            f"(p_dim={_p_dim_now}, np_ratio={_np_ratio_now:.1f}, "
+                            f"feas_ratio={_feas_ratio:.2f}, conservative={_is_conservative})"
+                        )
                         selected_bounds_shifted, _shifted = _apply_constraint_side_shift(
                             selected_bounds=selected_bounds,
                             global_bounds=bounds,
                             protect_lb=_pin_lb,
                             protect_ub=_pin_ub,
+                            shift_fraction=_shift_frac,
                         )
                         if selected_bounds_shifted is not None:
                             selected_bounds = selected_bounds_shifted
@@ -3100,15 +3235,12 @@ class ExplorerOrchestrator:
                 center_hint=_center_hint_arr,
             )
 
-            strategy_params = dict(self.config.system.strategy_params or {})
-            dual_cap_raw = strategy_params.get("max_volume_ratio_target", None)
-            # routed_v2 override: 라우터가 cap을 0.30 등으로 완화한 경우 우선 적용
-            if routed_v2_decision is not None:
-                dual_cap_raw = float(routed_v2_decision.cap_target)
-                print(
-                    f"[Explorer] routed_v2 override max_volume_ratio_target={dual_cap_raw:.3f}"
-                )
-            if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred", "s4_obj", "s8_obj"} and dual_cap_raw is not None:  # K: pred/obj 전략에도 volume cap 적용
+            # Hard cap policy:
+            # - remove all relaxed paths (e.g., 0.30)
+            # - ignore strategy/routed overrides
+            # - keep fixed target at 24.99%
+            dual_cap_raw = 0.2499
+            if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred", "s4_obj", "s8_obj"}:  # K: pred/obj 전략에도 volume cap 적용
                 try:
                     dual_volume_cap_target = float(dual_cap_raw)
                 except Exception:
