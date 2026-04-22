@@ -157,7 +157,6 @@ def run_modeler(
     hpo_mode = hpo_result.hpo_mode
     hpo_n_trials_effective = hpo_result.hpo_n_trials_effective
     hpo_lambda_std_effective = hpo_result.hpo_lambda_std_effective
-    hpo_lambda_gap_effective = hpo_result.hpo_lambda_gap_effective
 
     saver = ResultSaver(use_timestamp=use_timestamp)
     task_dir = os.path.join(run_context.run_root, "Modeler")
@@ -241,9 +240,6 @@ def run_modeler(
             public_dir=public_dir,
             keep_debug=keep_debug,
             use_score_drop=bool(config.system.fi_use_score_drop),
-            guard_force_fill=bool(
-                getattr(config.system, "fi_guard_force_fill", False)
-            ),
         )
         primary_selected_df = selection_result.selected_df.copy()
         selected_df = selection_result.selected_df
@@ -391,7 +387,6 @@ def run_modeler(
         hpo_mode=hpo_mode,
         hpo_n_trials_effective=hpo_n_trials_effective,
         hpo_lambda_std_effective=hpo_lambda_std_effective,
-        hpo_lambda_gap_effective=hpo_lambda_gap_effective,
         best_params=best_params,
         model_path=model_path,
         selected_path=selected_path,

@@ -108,7 +108,6 @@ def finalize_selected_features(
     keep_debug: bool,
     use_score_drop: bool,
     min_features: int = 2,
-    guard_force_fill: bool = False,
 ) -> SelectionFinalizeResult:
     selected_features = selected_df[selected_df["selected"]]["feature"].tolist()
     if not selected_features:
@@ -162,43 +161,19 @@ def finalize_selected_features(
                 )
 
     # Anti-collapse guard: 최소 feature 수 보장
-    # 품질 필터(2-pass): bootstrap/null 기각된 feature는 1차에서 제외하고, 후보가
-    # 부족할 때만 2차로 포함한다. score 상위였지만 이미 통계 검증을 통과하지 못한
-    # feature가 guard만으로 재진입해 최종 결과를 오염시키는 경우를 줄인다.
     if len(selected_features) < int(min_features) and "feature" in selected_df.columns:
         score_col = "final_score_adj" if "final_score_adj" in selected_df.columns else "final_score"
         if score_col in selected_df.columns:
             ranked = selected_df.sort_values(by=score_col, ascending=False)
-            excluded_reasons = {
-                "bootstrap_stability_fail",
-                "bootstrap_null_compound_fail",
-            }
-
-            def _is_quality(row: pd.Series) -> bool:
-                reason_ok = str(row.get("reason", "")) not in excluded_reasons
-                null_ok = bool(row.get("null_pass", True))
-                return reason_ok and null_ok
-
             current_set = set(str(f) for f in selected_features)
             n_before = len(selected_features)
             for _, row in ranked.iterrows():
                 if len(selected_features) >= int(min_features):
                     break
                 feat = str(row.get("feature", ""))
-                if feat and feat not in current_set and _is_quality(row):
+                if feat and feat not in current_set:
                     selected_features.append(feat)
                     current_set.add(feat)
-            # 2차 fallback: 품질 후보가 부족하면 score 상위 보충.
-            # guard_force_fill=False면 품질 미달 feature 강제 보충을 건너뛰고
-            # min_features 미달을 허용한다(L2).
-            if len(selected_features) < int(min_features) and bool(guard_force_fill):
-                for _, row in ranked.iterrows():
-                    if len(selected_features) >= int(min_features):
-                        break
-                    feat = str(row.get("feature", ""))
-                    if feat and feat not in current_set:
-                        selected_features.append(feat)
-                        current_set.add(feat)
             appended_by_guard = selected_features[n_before:]
             if appended_by_guard:
                 selected_df = selected_df.copy()

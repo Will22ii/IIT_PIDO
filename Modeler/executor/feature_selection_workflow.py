@@ -236,11 +236,6 @@ def run_fi_selection_workflow(
         bootstrap_min_freq_eff = float(
             getattr(fs_config, "bootstrap_min_freq_very_low_data", bootstrap_min_freq_eff)
         )
-    elif bool(low_data):
-        # FS-1: low_data & n>=very_low 구간 — dummy leak 억제용 상향
-        bootstrap_min_freq_eff = float(
-            getattr(fs_config, "bootstrap_min_freq_low_data", bootstrap_min_freq_eff)
-        )
 
     if _bs_active:
         selected_df = run_bootstrap_stability(
@@ -268,12 +263,6 @@ def run_fi_selection_workflow(
             n_samples=int(n_samples),
             rescue_global_floor=float(fs_config.fi_bootstrap_rescue_global_floor),
             rescue_very_low_data_only=bool(fs_config.fi_bootstrap_rescue_very_low_data_only),
-            rescue_perm_floor=float(
-                getattr(fs_config, "fi_bootstrap_rescue_perm_floor", 0.0)
-            ),
-            rescue_min_freq=float(
-                getattr(fs_config, "fi_bootstrap_rescue_min_freq", 0.0)
-            ),
             very_low_data_n_threshold=int(fs_config.stability_very_low_data_n_threshold),
         )
         selected_df["bootstrap_enabled_effective"] = True
