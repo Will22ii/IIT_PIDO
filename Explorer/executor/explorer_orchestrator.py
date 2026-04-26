@@ -534,6 +534,8 @@ def _infer_constraint_side_policy(
     anchor_obj_values: np.ndarray | None = None,
     objective_sense: str = "min",
     anti_anti_threshold: int = 1,
+    require_top_obj_support: bool = False,
+    top_obj_min_ratio: float = 0.10,
 ) -> dict | None:
     X = np.asarray(selected_points, dtype=float)
     d = len(global_bounds)
@@ -745,6 +747,54 @@ def _infer_constraint_side_policy(
             }
         )
 
+    # L5: top-obj 지지 게이트 — feasibility-based protect 방향이 top-K objective
+    # anchor 신호와 모순하거나 해당 dim에 top 신호가 전혀 없으면 shift 무효화.
+    # anchor_obj_values 미제공(top_idx_global is None) 시 기존 동작 유지.
+    veto_count = 0
+    confirmed_count = 0
+    if bool(require_top_obj_support) and top_idx_global is not None:
+        top_total = int(top_idx_global.shape[0])
+        _ratio = float(np.clip(float(top_obj_min_ratio), 0.0, 1.0))
+        min_top_hits = int(max(1, int(np.ceil(top_total * _ratio))))
+        for j in range(d):
+            if not (protect_lb[j] or protect_ub[j]):
+                continue
+            tlb = int(top_near_lb_hits[j])
+            tub = int(top_near_ub_hits[j])
+            veto = False
+            confirmed = False
+            # (a) top 신호가 양측 모두 threshold 미만 → 근거 부족
+            if tlb < min_top_hits and tub < min_top_hits:
+                veto = True
+            # (b) shift 방향이 top 다수결과 모순
+            elif protect_lb[j] and not protect_ub[j] and tub > tlb:
+                veto = True
+            elif protect_ub[j] and not protect_lb[j] and tlb > tub:
+                veto = True
+            else:
+                # 신호가 protect 방향과 정렬 + threshold 만족
+                if protect_lb[j] and not protect_ub[j] and tlb >= min_top_hits and tlb >= tub:
+                    confirmed = True
+                elif protect_ub[j] and not protect_lb[j] and tub >= min_top_hits and tub >= tlb:
+                    confirmed = True
+            if veto:
+                veto_count += 1
+                protect_lb[j] = False
+                protect_ub[j] = False
+                prefer_shrink_side[j] = None
+                if j < len(score_rows):
+                    score_rows[j]["protect_lb"] = False
+                    score_rows[j]["protect_ub"] = False
+                    score_rows[j]["prefer_shrink_side"] = None
+                    score_rows[j]["top_obj_veto"] = True
+                    score_rows[j]["top_obj_confirmed"] = False
+            else:
+                if confirmed:
+                    confirmed_count += 1
+                if j < len(score_rows):
+                    score_rows[j]["top_obj_veto"] = False
+                    score_rows[j]["top_obj_confirmed"] = bool(confirmed)
+
     # D-B1 + L3: anti-anti-optimum guard 강화.
     # boundary 근처에 feasible anchor가 anti_thr 이상이면:
     #  - prefer_shrink_side 를 None 으로 비활성화(기존 동작)
@@ -767,19 +817,17 @@ def _infer_constraint_side_policy(
             score_rows[j]["protect_lb"] = bool(protect_lb[j])
             score_rows[j]["protect_ub"] = bool(protect_ub[j])
 
-    if not any(protect_lb) and not any(protect_ub):
-        return {
-            "protect_lb": protect_lb,
-            "protect_ub": protect_ub,
-            "prefer_shrink_side": prefer_shrink_side,
-            "score_rows": score_rows,
-            "anchor_count": int(anchors.shape[0]),
-            "probe_count": int(X_probe.shape[0]),
-            "feasible_selected_count": int(anchors_all.shape[0]),
-            "feasible_ratio": float(feasible_ratio),
-        }
+    # top-K obj feasible anchor centroid (#A blend 용)
+    top_obj_centroid: list | None = None
+    if top_idx_global is not None and anchors_all.shape[0] > 0:
+        try:
+            _top_pts = anchors_all[top_idx_global]
+            if _top_pts.ndim == 2 and _top_pts.shape[0] > 0:
+                top_obj_centroid = [float(v) for v in np.mean(_top_pts, axis=0).tolist()]
+        except Exception:
+            top_obj_centroid = None
 
-    return {
+    base_ret = {
         "protect_lb": protect_lb,
         "protect_ub": protect_ub,
         "prefer_shrink_side": prefer_shrink_side,
@@ -788,7 +836,12 @@ def _infer_constraint_side_policy(
         "probe_count": int(X_probe.shape[0]),
         "feasible_selected_count": int(anchors_all.shape[0]),
         "feasible_ratio": float(feasible_ratio),
+        "top_obj_centroid": top_obj_centroid,
+        "top_obj_count": (int(top_idx_global.shape[0]) if top_idx_global is not None else 0),
+        "top_obj_veto_count": int(veto_count),
+        "top_obj_confirmed_count": int(confirmed_count),
     }
+    return base_ret
 
 
 def _apply_constraint_side_shift(
@@ -2202,15 +2255,40 @@ class ExplorerOrchestrator:
                     )
 
                 obj_ratio = float(np.clip(obj_ratio, ratio_min, ratio_max))
+
+                # DSE-L6: pred/obj 완전 disjoint 시 dual → obj-only 전환.
+                # 상태: dual_disagreement_iou <= disjoint_iou. state-based gate,
+                # benchmark 명 분기 아님. disagreement_triggered 조건과 무관하게
+                # IoU 0 근방은 blend가 의미 없으므로 obj-only가 안전.
+                _l6_disjoint_iou = float(max(
+                    float(strategy_params_local.get("dual_obj_only_disjoint_iou", 0.05)),
+                    0.0,
+                ))
+                _l6_applied = False
+                if (
+                    dual_disagreement_iou is not None
+                    and float(dual_disagreement_iou) <= _l6_disjoint_iou
+                ):
+                    obj_ratio = 1.0
+                    _l6_applied = True
+                    print(
+                        f"[Explorer] DSE-L6 dual→obj-only: iou="
+                        f"{float(dual_disagreement_iou):.4f} <= {_l6_disjoint_iou:.2f}"
+                    )
+
                 pred_ratio = float(np.clip(1.0 - obj_ratio, 0.0, 1.0))
                 dual_obj_ratio_used = float(obj_ratio)
                 dual_pred_ratio_used = float(pred_ratio)
                 dual_center_bias_used = float(obj_ratio)
 
                 total = int(max(int(dual_total_starts_target), 2))
-                n_obj_starts = int(round(total * obj_ratio))
-                n_obj_starts = int(np.clip(n_obj_starts, 1, total - 1))
-                n_pred_starts = int(total - n_obj_starts)
+                if _l6_applied:
+                    n_obj_starts = int(total)
+                    n_pred_starts = 0
+                else:
+                    n_obj_starts = int(round(total * obj_ratio))
+                    n_obj_starts = int(np.clip(n_obj_starts, 1, total - 1))
+                    n_pred_starts = int(total - n_obj_starts)
             elif source_mode == "pred":
                 n_pred_starts = 40
                 n_obj_starts = 0
@@ -3021,6 +3099,11 @@ class ExplorerOrchestrator:
         constraint_aware_anchor_count: int | None = None
         constraint_aware_side_scores: list[dict] | None = None
         constraint_aware_policy: dict | None = None
+        constraint_aware_top_obj_veto_count: int = 0
+        constraint_aware_top_obj_confirmed_count: int = 0
+        constraint_aware_obj_centroid_blend_applied: bool = False
+        constraint_aware_shift_boost_applied: bool = False
+        constraint_aware_shift_fraction_used: float | None = None
 
         if selected_bounds is not None:
             if (
@@ -3054,6 +3137,20 @@ class ExplorerOrchestrator:
                     objective_sense=str(objective_sense),
                     anti_anti_threshold=int(
                         getattr(self.config.system, "constraint_aware_anti_anti_threshold", 1)
+                    ),
+                    require_top_obj_support=bool(
+                        getattr(
+                            self.config.system,
+                            "constraint_aware_require_top_obj_support",
+                            False,
+                        )
+                    ),
+                    top_obj_min_ratio=float(
+                        getattr(
+                            self.config.system,
+                            "constraint_aware_top_obj_min_ratio",
+                            0.10,
+                        )
                     ),
                 )
                 if isinstance(constraint_aware_policy, dict):
@@ -3105,10 +3202,38 @@ class ExplorerOrchestrator:
                             _shift_frac = float(
                                 getattr(self.config.system, "constraint_aware_shift_fraction", 0.5)
                             )
+                        # L7-B: top-obj가 모든 protect 방향을 confirm하고 veto가 0개면
+                        # 보수 fraction을 boost. policy의 top_obj_confirmed_count/veto_count
+                        # 은 protect 신호가 살아있는 dim 기준으로 산정됨.
+                        _ca_veto_count = int(constraint_aware_policy.get("top_obj_veto_count", 0) or 0)
+                        _ca_confirmed_count = int(
+                            constraint_aware_policy.get("top_obj_confirmed_count", 0) or 0
+                        )
+                        constraint_aware_top_obj_veto_count = _ca_veto_count
+                        constraint_aware_top_obj_confirmed_count = _ca_confirmed_count
+                        _shift_boost_applied = False
+                        if (
+                            _ca_veto_count == 0
+                            and _ca_confirmed_count >= 1
+                        ):
+                            _boost_frac = float(
+                                getattr(
+                                    self.config.system,
+                                    "constraint_aware_obj_confirmed_shift_fraction",
+                                    0.70,
+                                )
+                            )
+                            if _boost_frac > _shift_frac:
+                                _shift_frac = float(np.clip(_boost_frac, 0.0, 1.0))
+                                _shift_boost_applied = True
+                        constraint_aware_shift_boost_applied = bool(_shift_boost_applied)
+                        constraint_aware_shift_fraction_used = float(_shift_frac)
                         print(
                             f"[Explorer] constraint-aware shift: frac={_shift_frac:.2f} "
                             f"(p_dim={_p_dim_now}, np_ratio={_np_ratio_now:.1f}, "
-                            f"feas_ratio={_feas_ratio:.2f}, conservative={_is_conservative})"
+                            f"feas_ratio={_feas_ratio:.2f}, conservative={_is_conservative}, "
+                            f"obj_confirmed={_ca_confirmed_count}, obj_veto={_ca_veto_count}, "
+                            f"boost={_shift_boost_applied})"
                         )
                         selected_bounds_shifted, _shifted = _apply_constraint_side_shift(
                             selected_bounds=selected_bounds,
@@ -3120,6 +3245,50 @@ class ExplorerOrchestrator:
                         if selected_bounds_shifted is not None:
                             selected_bounds = selected_bounds_shifted
                             constraint_aware_shifted_dims = list(_shifted)
+
+                        # L7-A: top-obj 신호가 interior(어떤 edge에도 모이지 않음)이고 veto가
+                        # 발동해 protect 신호가 모두 무효화된 경우, selected_bounds 중심을
+                        # top-K obj centroid 쪽으로 부분 blend (width 보존). 실패 패턴
+                        # 분석에서 (veto>0, shifted=0) 케이스의 over_shrink_fail 회복용.
+                        _ca_top_centroid = constraint_aware_policy.get("top_obj_centroid", None)
+                        if (
+                            _ca_veto_count >= 1
+                            and not any(_pin_lb)
+                            and not any(_pin_ub)
+                            and isinstance(_ca_top_centroid, list)
+                            and len(_ca_top_centroid) == len(bounds)
+                            and selected_bounds is not None
+                        ):
+                            _blend = float(
+                                getattr(
+                                    self.config.system,
+                                    "constraint_aware_obj_centroid_blend",
+                                    0.40,
+                                )
+                            )
+                            _blend = float(np.clip(_blend, 0.0, 1.0))
+                            if _blend > 0.0:
+                                # 현재 selected_bounds 중심
+                                _cur_center = np.array(
+                                    [0.5 * (float(lb) + float(ub)) for lb, ub in selected_bounds],
+                                    dtype=float,
+                                )
+                                _tgt_center = np.array(_ca_top_centroid, dtype=float)
+                                _blend_target = (
+                                    (1.0 - _blend) * _cur_center + _blend * _tgt_center
+                                )
+                                _recentred = _recenter_bounds_keep_width(
+                                    base_bounds=selected_bounds,
+                                    global_bounds=bounds,
+                                    target_center=_blend_target,
+                                )
+                                if _recentred is not None:
+                                    selected_bounds = list(_recentred)
+                                    constraint_aware_obj_centroid_blend_applied = True
+                                    print(
+                                        f"[Explorer] L7-A obj-centroid blend: blend={_blend:.2f}, "
+                                        f"veto_count={_ca_veto_count}"
+                                    )
                     if constraint_aware_policy_applied:
                         _dim_msgs = []
                         for _j, _name in enumerate(selected_features):
@@ -3782,6 +3951,14 @@ class ExplorerOrchestrator:
             "constraint_aware_probe_count": constraint_aware_probe_count,
             "constraint_aware_anchor_count": constraint_aware_anchor_count,
             "constraint_aware_shifted_dims": constraint_aware_shifted_dims,
+            "constraint_aware_top_obj_veto_count": int(constraint_aware_top_obj_veto_count),
+            "constraint_aware_top_obj_confirmed_count": int(constraint_aware_top_obj_confirmed_count),
+            "constraint_aware_obj_centroid_blend_applied": bool(constraint_aware_obj_centroid_blend_applied),
+            "constraint_aware_shift_boost_applied": bool(constraint_aware_shift_boost_applied),
+            "constraint_aware_shift_fraction_used": (
+                float(constraint_aware_shift_fraction_used)
+                if constraint_aware_shift_fraction_used is not None else None
+            ),
             "constraint_aware_side_scores": (
                 constraint_aware_side_scores if isinstance(constraint_aware_side_scores, list) else []
             ),

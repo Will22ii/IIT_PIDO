@@ -49,6 +49,19 @@ class ExplorerSystemConfig:
     # L3: near_{opposite}_hits 이 anti_threshold 이상이면 protect 플래그 자체를
     # 해제해 shift 전면 무효화(기존 D-B1 prefer-shrink-side 무효화만이었음)
     constraint_aware_anti_anti_threshold: int = 1
+    # L5: top-obj anchor 기반 shift veto — feasibility 기반 shift 방향이 top-K
+    # objective anchor 신호와 모순하거나 해당 dim에 top 신호가 전혀 없으면
+    # protect 플래그 자체를 해제해 shift 무효화. False 로 두면 기존 동작.
+    constraint_aware_require_top_obj_support: bool = True
+    # top anchor 집합 대비 최소 near-hit 비율 (그 미만이면 신호 부재로 간주)
+    constraint_aware_top_obj_min_ratio: float = 0.10
+    # L7-A: veto가 발동하고 top-obj anchor가 interior(어떤 edge에도 모이지 않음)인
+    # 경우, 기본 selected_bounds 중심을 top-obj centroid 쪽으로 부분 blend.
+    # 0.0=비활성, 1.0=완전 recenter. width는 보존된다.
+    constraint_aware_obj_centroid_blend: float = 0.40
+    # L7-B: 모든 protect dim이 top-obj 다수결로 confirmed이고 veto가 0개일 때
+    # 사용할 boost된 shift_fraction. 0.0~1.0. 0.5 미만이면 보수 분기 값 유지.
+    constraint_aware_obj_confirmed_shift_fraction: float = 0.70
     # L4: 제약·저차원·저 feasibility 구조에서만 L2/L3 보수 분기를 강제
     constraint_aware_conservative_p_dim_max: int = 5
     constraint_aware_conservative_np_ratio_max: float = 25.0
