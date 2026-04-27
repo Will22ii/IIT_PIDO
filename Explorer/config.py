@@ -55,10 +55,10 @@ class ExplorerSystemConfig:
     constraint_aware_require_top_obj_support: bool = True
     # top anchor 집합 대비 최소 near-hit 비율 (그 미만이면 신호 부재로 간주)
     constraint_aware_top_obj_min_ratio: float = 0.10
-    # L7-A: veto가 발동하고 top-obj anchor가 interior(어떤 edge에도 모이지 않음)인
-    # 경우, 기본 selected_bounds 중심을 top-obj centroid 쪽으로 부분 blend.
-    # 0.0=비활성, 1.0=완전 recenter. width는 보존된다.
-    constraint_aware_obj_centroid_blend: float = 0.40
+    # L7-A: veto가 발동했고 실제 shift가 일어나지 않은 경우, selected_bounds
+    # 중심을 top-obj centroid 쪽으로 부분 blend. 0.0=비활성, 1.0=완전 recenter.
+    # width는 보존됨. confirmed protect dim과의 상충을 줄이기 위해 0.30 기본.
+    constraint_aware_obj_centroid_blend: float = 0.30
     # L7-B: 모든 protect dim이 top-obj 다수결로 confirmed이고 veto가 0개일 때
     # 사용할 boost된 shift_fraction. 0.0~1.0. 0.5 미만이면 보수 분기 값 유지.
     constraint_aware_obj_confirmed_shift_fraction: float = 0.70

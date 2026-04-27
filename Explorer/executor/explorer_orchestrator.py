@@ -2921,7 +2921,7 @@ class ExplorerOrchestrator:
                         dual_center_hint = blended_center
                         dual_center_tilt_applied = True
 
-            if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}:
+            if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred", "s4_obj", "s8_obj"}:
                 pred_obj_iou = _bounds_iou_ratio(pred_bounds, obj_bounds)
                 pred_center = _bounds_center(pred_bounds)
                 obj_center = _bounds_center(obj_bounds)
@@ -2949,7 +2949,10 @@ class ExplorerOrchestrator:
                     pred_obj_miss_case = "pred_obj_aligned_or_unknown"
 
                 # D-A1: pred-obj disjoint fallback — iou≈0 이면 pred 와 obj 가 완전 다른 영역.
-                # obj 는 평가 데이터 기반(ground truth), pred 는 모델 예측. dual 계열도 포함.
+                # obj 는 평가 데이터 기반(ground truth), pred 는 모델 예측. dual/pred 계열은
+                # obj_bounds 로 전환(기존 동작). DSE-L8: obj 단독 전략은 pred_bounds 로
+                # 단순 전환 시 obj 정보가 사라지므로 axis-aligned union 사용. cap이 후속으로
+                # 0.25로 조여 주므로 width 폭주 위험은 낮음.
                 disjoint_fallback_fired = False
                 if (
                     strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}
@@ -2967,6 +2970,39 @@ class ExplorerOrchestrator:
                         f"iou={pred_obj_iou:.4f} → obj_bounds 사용"
                     )
                     selected_bounds = list(obj_bounds)
+                    if X_obj_sel is not None and X_obj_sel.shape[0] > 0:
+                        selected_points = _safe_stack([X_obj_sel], n_dim=len(selected_features))
+                    disjoint_fallback_fired = True
+                elif (
+                    strategy_alias in {"s4_obj", "s8_obj"}
+                    and pred_obj_miss_case == "pred_obj_disjoint"
+                    and pred_bounds is not None
+                    and obj_bounds is not None
+                    and selected_bounds is not None
+                ):
+                    # DSE-L8: obj 전략 disjoint fallback — pred/obj 양쪽 basin 모두
+                    # 포함하도록 axis-aligned union. cap이 0.25 로 조여 줄 때 더 넓은
+                    # 영역의 centroid로 재배치되어 한쪽 basin만 잡혀 있던 fail 회복.
+                    union_bounds: list[tuple[float, float]] = []
+                    for (p_lb, p_ub), (o_lb, o_ub), (g_lb, g_ub) in zip(
+                        pred_bounds, obj_bounds, bounds
+                    ):
+                        gl = float(min(g_lb, g_ub))
+                        gu = float(max(g_lb, g_ub))
+                        u_lb = float(np.clip(min(p_lb, p_ub, o_lb, o_ub), gl, gu))
+                        u_ub = float(np.clip(max(p_lb, p_ub, o_lb, o_ub), gl, gu))
+                        union_bounds.append((u_lb, u_ub))
+                    pc_str = (
+                        f"{pred_cluster_confidence:.3f}"
+                        if pred_cluster_confidence is not None
+                        else "None"
+                    )
+                    print(
+                        f"[Explorer] DSE-L8 obj disjoint union: pred_conf={pc_str}, "
+                        f"iou={pred_obj_iou:.4f} → pred∪obj union bounds 사용"
+                    )
+                    selected_bounds = union_bounds
+                    # selected_points 는 obj seeds 우선 (obj 전략 일관성 유지)
                     if X_obj_sel is not None and X_obj_sel.shape[0] > 0:
                         selected_points = _safe_stack([X_obj_sel], n_dim=len(selected_features))
                     disjoint_fallback_fired = True
@@ -3246,15 +3282,14 @@ class ExplorerOrchestrator:
                             selected_bounds = selected_bounds_shifted
                             constraint_aware_shifted_dims = list(_shifted)
 
-                        # L7-A: top-obj 신호가 interior(어떤 edge에도 모이지 않음)이고 veto가
-                        # 발동해 protect 신호가 모두 무효화된 경우, selected_bounds 중심을
-                        # top-K obj centroid 쪽으로 부분 blend (width 보존). 실패 패턴
-                        # 분석에서 (veto>0, shifted=0) 케이스의 over_shrink_fail 회복용.
+                        # L7-A: veto가 발동했고 실제 shift가 일어나지 않은(=무이동) 케이스에서
+                        # selected_bounds 중심을 top-K obj centroid 쪽으로 부분 blend (width 보존).
+                        # 게이트 완화 v2: shifted_count==0 으로만 판단해 confirmed protect dim과
+                        # 충돌하지 않도록 함. (veto>0, shifted=0) 군의 over_shrink_fail 회복용.
                         _ca_top_centroid = constraint_aware_policy.get("top_obj_centroid", None)
                         if (
                             _ca_veto_count >= 1
-                            and not any(_pin_lb)
-                            and not any(_pin_ub)
+                            and len(constraint_aware_shifted_dims) == 0
                             and isinstance(_ca_top_centroid, list)
                             and len(_ca_top_centroid) == len(bounds)
                             and selected_bounds is not None
@@ -3263,7 +3298,7 @@ class ExplorerOrchestrator:
                                 getattr(
                                     self.config.system,
                                     "constraint_aware_obj_centroid_blend",
-                                    0.40,
+                                    0.30,
                                 )
                             )
                             _blend = float(np.clip(_blend, 0.0, 1.0))
