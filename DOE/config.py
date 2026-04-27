@@ -23,7 +23,7 @@ class DOESystemConfig:
     initial_corner_adaptive_ratio_low_dim: float = 0.05
 
     # 2) Additional DOE: 단계/배분
-    additional_init_ratio: float = 0.4
+    additional_init_ratio: float = 0.3
     additional_exec_ratio: float = 0.1
     additional_initial_probe_multiplier: float = 2.0
     # n_exec_local_floor: 최소 서로 다른 anchor에서 각 1개 sampling (다양성 보장)
@@ -35,8 +35,8 @@ class DOESystemConfig:
     global_margin_subset_random_k_count: int = 2
     global_top_ratio: float = 0.25
     global_boundary_corner_ratio: float = 0.5
-    global_boundary_constraint_boost: float = 3.0
-    global_boundary_margin_cross_ratio: float = 0.4
+    global_boundary_constraint_boost: float = 12.0
+    global_boundary_margin_cross_ratio: float = 0.6
     global_boundary_margin_near_tol: float = 0.03
     global_margin_obj_alpha: float = 0.5
 
