@@ -65,6 +65,19 @@ class ExplorerSystemConfig:
     # #D L7-B 단계화: confirmed_count 가 ceil(d/2) 이상이면 강한 boost.
     # 약한 신호(>=1)는 0.70, 강한 신호(>=ceil(d/2))는 0.85.
     constraint_aware_obj_strong_confirmed_shift_fraction: float = 0.85
+    # #L3: 전 protect dim이 confirmed인 경우 full shift (all-confirmed → 1.0)
+    constraint_aware_obj_all_confirmed_shift_fraction: float = 1.0
+    # #K: dim-aware obj floor — has_pre==False AND p_dim <= max_dim 인 경우
+    # dual의 obj_ratio 하한값. multimodal low-dim에서 obj 측 우월성 확보.
+    dual_obj_floor_low_dim_max: int = 3
+    dual_obj_floor_low_dim_value: float = 0.90
+    # #L2: pre-cap micro-expansion — has_pre==True AND p_dim>=min_dim 일 때
+    # cap 직전 selected_bounds 부피비가 threshold 미만이면 target_pre_cap_ratio 까지
+    # axis-aligned 균일 확장. 이후 cap이 0.25로 축소.
+    bounds_pre_cap_expand_enabled: bool = True
+    bounds_pre_cap_expand_p_dim_min: int = 4
+    bounds_pre_cap_expand_threshold: float = 0.10
+    bounds_pre_cap_expand_target_ratio: float = 0.30
     # L4: 제약·저차원·저 feasibility 구조에서만 L2/L3 보수 분기를 강제
     constraint_aware_conservative_p_dim_max: int = 5
     constraint_aware_conservative_np_ratio_max: float = 25.0

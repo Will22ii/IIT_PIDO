@@ -1156,10 +1156,22 @@ class FeatureSelector:
 
                 if candidate_gaps:
                     best_gap_pos, _best_gap_val = max(candidate_gaps, key=lambda x: x[1])
+                    # Multicollinearity cluster discriminator: run-level redundancy_suspect 카운트
+                    # 단일 spurious feature는 cluster를 만들지 못하므로,
+                    # ≥2개일 때만 multicollinearity로 판정하고 gap filter 면제.
+                    n_redund_in_run = (
+                        int(out["redundancy_suspect"].astype(bool).sum())
+                        if "redundancy_suspect" in out.columns else 0
+                    )
+                    redund_cluster = n_redund_in_run >= 2
                     # 갭 아래 feature 중 global_score < gap_g_floor인 것만 제거
                     below_indices = indices[best_gap_pos + 1:]
                     for idx in below_indices:
                         if out.loc[idx, "global_score"] < gap_g_floor:
+                            # Multicollinearity cluster에 속한 feature는 면제
+                            # (drop 채널이 구조적으로 저평가된 real을 보호)
+                            if redund_cluster and bool(out.loc[idx, "redundancy_suspect"]):
+                                continue
                             out.loc[idx, "selected"] = False
                             out.loc[idx, "reason"] = "gap_filter"
                             out.loc[idx, "gap_filtered"] = True

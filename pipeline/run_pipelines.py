@@ -1119,11 +1119,12 @@ def main() -> None:
     parser.add_argument(
         "--explorer-strategies",
         type=str,
-        default="S8_obj",
+        default="S4_dual,S8_dual",
         help=(
             "Comma-separated Explorer strategy IDs. "
-            "운영 단일전략 = S8_obj (deterministic 검증 macro 94.5; RB 1 hard seed 제외 시 ~97). "
-            "8전략 비교가 필요할 때만 'S4_dual,S8_dual,S4_pred,S8_pred,S4_obj,S8_obj,SR_dual,SA_dual' 명시."
+            "운영 후보 = S4_dual,S8_dual (Phase 3 — dim-aware obj floor + #L2/#L3 적용). "
+            "p_dim<=3 multimodal 케이스는 obj-floor로 obj 거동, p_dim>=4는 dual blend. "
+            "8전략 비교 시 'S4_dual,S8_dual,S4_pred,S8_pred,S4_obj,S8_obj,SR_dual,SA_dual' 명시."
         ),
     )
     args = parser.parse_args()

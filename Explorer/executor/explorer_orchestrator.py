@@ -2256,6 +2256,26 @@ class ExplorerOrchestrator:
 
                 obj_ratio = float(np.clip(obj_ratio, ratio_min, ratio_max))
 
+                # #K dim-aware obj floor — multimodal low-dim 비제약 케이스에서
+                # dual의 obj 측 비중을 강제로 끌어올림. state-based gate, benchmark
+                # 명 분기 아님. has_pre_constraints + p_dim 두 가지만 사용.
+                _k_low_dim_max = int(
+                    getattr(self.config.system, "dual_obj_floor_low_dim_max", 3)
+                )
+                _k_low_dim_value = float(
+                    getattr(self.config.system, "dual_obj_floor_low_dim_value", 0.90)
+                )
+                if (
+                    not has_pre_constraints
+                    and len(selected_features) <= _k_low_dim_max
+                    and obj_ratio < _k_low_dim_value
+                ):
+                    print(
+                        f"[Explorer] #K obj-floor: p_dim={len(selected_features)}, "
+                        f"obj_ratio {obj_ratio:.2f} → {_k_low_dim_value:.2f}"
+                    )
+                    obj_ratio = float(np.clip(_k_low_dim_value, 0.0, 1.0))
+
                 # DSE-L6: pred/obj 완전 disjoint 시 dual → obj-only 전환.
                 # 상태: dual_disagreement_iou <= disjoint_iou. state-based gate,
                 # benchmark 명 분기 아님. disagreement_triggered 조건과 무관하게
@@ -3222,12 +3242,22 @@ class ExplorerOrchestrator:
                             _ca_veto_count == 0
                             and _ca_confirmed_count >= 1
                         ):
-                            # #D 단계화: confirmed 다수결(>=ceil(d/2))이면 강한 boost,
-                            # 그 외 (>=1) 약한 boost.
+                            # #D 단계화 + #L3 all-confirmed: 3-tier boost.
+                            # confirmed == d (전 dim 정합) → 1.0 (#L3, full shift)
+                            # confirmed >= ceil(d/2) → 0.85 (강한 다수결, #D)
+                            # confirmed >= 1 → 0.70 (약한 신호, 현행)
                             _d_dim = max(int(_p_dim_now), 1)
                             _strong_threshold = int(np.ceil(_d_dim / 2))
                             _strong_threshold = max(1, _strong_threshold)
-                            if _ca_confirmed_count >= _strong_threshold:
+                            if _ca_confirmed_count >= _d_dim and _d_dim > 0:
+                                _boost_frac = float(
+                                    getattr(
+                                        self.config.system,
+                                        "constraint_aware_obj_all_confirmed_shift_fraction",
+                                        1.0,
+                                    )
+                                )
+                            elif _ca_confirmed_count >= _strong_threshold:
                                 _boost_frac = float(
                                     getattr(
                                         self.config.system,
@@ -3470,6 +3500,62 @@ class ExplorerOrchestrator:
                 )
             except Exception:
                 selected_bounds_volume_ratio_before_cap = None
+
+            # #L2 Pre-cap micro-expansion — has_pre==True AND p_dim>=4 AND
+            # pre_cap_ratio < threshold 시, axis-aligned 균일 확장으로 target 부피비
+            # 도달. cap이 후속으로 0.25로 줄여주므로 over-wide 위험 0. center 보존.
+            # state-based gate, benchmark 명 분기 아님.
+            _l2_enabled = bool(
+                getattr(self.config.system, "bounds_pre_cap_expand_enabled", True)
+            )
+            _l2_p_dim_min = int(
+                getattr(self.config.system, "bounds_pre_cap_expand_p_dim_min", 4)
+            )
+            _l2_threshold = float(
+                getattr(self.config.system, "bounds_pre_cap_expand_threshold", 0.10)
+            )
+            _l2_target = float(
+                getattr(self.config.system, "bounds_pre_cap_expand_target_ratio", 0.30)
+            )
+            if (
+                _l2_enabled
+                and has_pre_constraints
+                and len(selected_features) >= _l2_p_dim_min
+                and selected_bounds is not None
+                and selected_bounds_volume_ratio_before_cap is not None
+                and 0.0 < float(selected_bounds_volume_ratio_before_cap) < _l2_threshold
+                and 0.0 < _l2_target <= 1.0
+            ):
+                _cur_ratio = float(selected_bounds_volume_ratio_before_cap)
+                _d_dim_l2 = max(int(len(selected_features)), 1)
+                # per-dim factor = (target/current)^(1/d)
+                _factor = float((_l2_target / max(_cur_ratio, 1e-12)) ** (1.0 / _d_dim_l2))
+                _expanded: list[tuple[float, float]] = []
+                for (s_lb, s_ub), (g_lb, g_ub) in zip(selected_bounds, bounds):
+                    gl = float(min(g_lb, g_ub))
+                    gu = float(max(g_lb, g_ub))
+                    lo = float(np.clip(min(s_lb, s_ub), gl, gu))
+                    hi = float(np.clip(max(s_lb, s_ub), gl, gu))
+                    width = max(hi - lo, 0.0)
+                    cc = 0.5 * (lo + hi)
+                    new_half = 0.5 * width * _factor
+                    new_lo = float(np.clip(cc - new_half, gl, gu))
+                    new_hi = float(np.clip(cc + new_half, gl, gu))
+                    if new_hi < new_lo:
+                        new_lo, new_hi = new_hi, new_lo
+                    _expanded.append((new_lo, new_hi))
+                print(
+                    f"[Explorer] #L2 pre-cap expand: pre_cap_ratio "
+                    f"{_cur_ratio:.4f} → ~{_l2_target:.2f} (factor {_factor:.3f})"
+                )
+                selected_bounds = _expanded
+                # update before_cap diagnostic to reflect post-expansion value
+                try:
+                    selected_bounds_volume_ratio_before_cap = _volume_ratio_for_bounds(
+                        selected_bounds, bounds
+                    )
+                except Exception:
+                    pass
 
             # Hard cap policy:
             # - remove all relaxed paths (e.g., 0.30)
