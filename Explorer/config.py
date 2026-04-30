@@ -62,6 +62,9 @@ class ExplorerSystemConfig:
     # L7-B: 모든 protect dim이 top-obj 다수결로 confirmed이고 veto가 0개일 때
     # 사용할 boost된 shift_fraction. 0.0~1.0. 0.5 미만이면 보수 분기 값 유지.
     constraint_aware_obj_confirmed_shift_fraction: float = 0.70
+    # #D L7-B 단계화: confirmed_count 가 ceil(d/2) 이상이면 강한 boost.
+    # 약한 신호(>=1)는 0.70, 강한 신호(>=ceil(d/2))는 0.85.
+    constraint_aware_obj_strong_confirmed_shift_fraction: float = 0.85
     # L4: 제약·저차원·저 feasibility 구조에서만 L2/L3 보수 분기를 강제
     constraint_aware_conservative_p_dim_max: int = 5
     constraint_aware_conservative_np_ratio_max: float = 25.0

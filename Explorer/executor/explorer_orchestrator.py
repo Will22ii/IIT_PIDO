@@ -3222,13 +3222,27 @@ class ExplorerOrchestrator:
                             _ca_veto_count == 0
                             and _ca_confirmed_count >= 1
                         ):
-                            _boost_frac = float(
-                                getattr(
-                                    self.config.system,
-                                    "constraint_aware_obj_confirmed_shift_fraction",
-                                    0.70,
+                            # #D 단계화: confirmed 다수결(>=ceil(d/2))이면 강한 boost,
+                            # 그 외 (>=1) 약한 boost.
+                            _d_dim = max(int(_p_dim_now), 1)
+                            _strong_threshold = int(np.ceil(_d_dim / 2))
+                            _strong_threshold = max(1, _strong_threshold)
+                            if _ca_confirmed_count >= _strong_threshold:
+                                _boost_frac = float(
+                                    getattr(
+                                        self.config.system,
+                                        "constraint_aware_obj_strong_confirmed_shift_fraction",
+                                        0.85,
+                                    )
                                 )
-                            )
+                            else:
+                                _boost_frac = float(
+                                    getattr(
+                                        self.config.system,
+                                        "constraint_aware_obj_confirmed_shift_fraction",
+                                        0.70,
+                                    )
+                                )
                             if _boost_frac > _shift_frac:
                                 _shift_frac = float(np.clip(_boost_frac, 0.0, 1.0))
                                 _shift_boost_applied = True

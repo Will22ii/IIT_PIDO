@@ -125,7 +125,7 @@ class ModelerSystemConfig:
     fi_stability_perm_min_rate_low_data: float = 0.60
     fi_stability_drop_min_rate_low_data: float = 0.44
     fi_stability_rule_normal: str = "or"
-    fi_stability_perm_min_rate_normal: float = 0.80
+    fi_stability_perm_min_rate_normal: float = 0.78
     fi_stability_drop_min_rate_normal: float = 0.60
     # -----------------------------
     # 채널 불일치 패널티 (disagreement penalty)
@@ -136,7 +136,7 @@ class ModelerSystemConfig:
     # Redundancy-aware disagreement dampening (L1)
     # perm이 높지만 drop이 매우 낮은 경우 (변수 간 정보 중복 의심) disagreement penalty 감면
     fi_redundancy_dampening_enabled: bool = True
-    fi_redundancy_perm_floor: float = 0.85   # perm_rate >= 이 값
+    fi_redundancy_perm_floor: float = 0.78   # perm_rate >= 이 값 (rosenbrock x1 같은 borderline multicollinearity 포착)
     fi_redundancy_drop_ceil: float = 0.50    # drop_rate < 이 값 (A: 0.40→0.50, 다중공선성 감지 범위 확대)
     fi_redundancy_dampening_factor: float = 0.5  # penalty에 곱할 감면 계수
     # Adaptive score gap filter (L2)
