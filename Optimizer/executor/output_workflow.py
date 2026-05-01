@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 
+import pandas as pd
+
 from Optimizer.config import OptimizerConfig
 from Optimizer.executor.bo_engine import BOEngineResult
 from Optimizer.executor.input_workflow import ResolvedOptimizerInputs
@@ -45,8 +47,32 @@ def save_optimizer_outputs(
             indent=2,
         )
 
-    archive_path = os.path.join(public_dir, "archive_points.csv")
-    bo_result.archive_df.to_csv(archive_path, index=False)
+    # Main CSV는 "OPT 추가 평가점"만 저장한다 (DOE seed 제외).
+    opt_point_cols = list(resolved.selected_features) + [
+        "objective",
+        "objective_raw",
+        "objective_effective",
+        "p_feasible",
+        "pre_feasible",
+        "pre_margin",
+        "pre_violation",
+        "pre_retry_used",
+        "pre_generated_count",
+        "pre_fallback_used",
+        "iter",
+        "phase",
+        "acq_type",
+        "source_mode",
+        "segment",
+    ]
+    history_df = bo_result.history_df.copy()
+    for col in opt_point_cols:
+        if col not in history_df.columns:
+            history_df[col] = pd.NA
+    opt_points_df = history_df[opt_point_cols].copy()
+
+    history_full_path = os.path.join(debug_dir, "optimizer_history_full.csv")
+    history_df.to_csv(history_full_path, index=False)
 
     previous = {}
     if resolved.doe_metadata_path:
@@ -83,7 +109,12 @@ def save_optimizer_outputs(
             "enforce_pre_constraints": bool(config.system.enforce_pre_constraints),
             "post_constraint_enabled": bool(config.system.post_constraint_enabled),
             "post_penalty_lambda": float(config.system.post_penalty_lambda),
+            "post_p_feasible_min": float(config.system.post_p_feasible_min),
+            "post_p_feasible_hard_penalty": float(config.system.post_p_feasible_hard_penalty),
             "post_score_mode": str(config.system.post_score_mode),
+            "source_feasible_multiplier": int(config.system.source_feasible_multiplier),
+            "source_feasible_retry": int(config.system.source_feasible_retry),
+            "source_feasible_min_starts": int(config.system.source_feasible_min_starts),
             "surrogate_only_mode": bool(config.system.surrogate_only_mode),
             "debug_level": str(config.system.debug_level),
         },
@@ -100,7 +131,16 @@ def save_optimizer_outputs(
         "n_features": int(len(resolved.selected_features)),
         "n_constraints": int(len(resolved.constraint_defs)),
         "n_samples_requested": int(config.user.n_samples),
+        "phase_naming_scheme": "phase1_phase2_phase3",
     }
+
+    phase_labels: list[str] = []
+    if "phase" in history_df.columns:
+        seen = set()
+        for v in history_df["phase"].astype(str).tolist():
+            if v not in seen:
+                phase_labels.append(v)
+                seen.add(v)
 
     results = {
         "n_iterations": int(bo_result.n_iterations),
@@ -115,6 +155,7 @@ def save_optimizer_outputs(
         "feasibility_status": str(bo_result.feasibility_status),
         "n_history_rows": int(len(bo_result.history_df)),
         "n_archive_rows": int(len(bo_result.archive_df)),
+        "phase_labels": phase_labels,
     }
 
     saver = ResultSaver(use_timestamp=bool(config.cae.system.use_timestamp))
@@ -122,13 +163,16 @@ def save_optimizer_outputs(
         run_root=run_context.run_root,
         task=task_name,
         problem_name=resolved.problem_name,
-        df=bo_result.history_df,
+        df=opt_points_df,
         inputs=inputs,
         resolved_params=resolved_params,
         results=results,
         public_artifacts={
             "best_point": best_point_path,
-            "archive_points": archive_path,
+            "optimizer_points": os.path.join(public_dir, "opt_results.csv"),
+        },
+        debug_artifacts={
+            "history_full": history_full_path,
         },
     )
     update_run_index(run_context, task_name, task_out["metadata"])

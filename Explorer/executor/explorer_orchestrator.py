@@ -1729,6 +1729,18 @@ class ExplorerOrchestrator:
         strategy_params = dict(self.config.system.strategy_params or {})
         strategy_mode_hint = str(strategy_params.get("mode", "")).strip().lower()
         strategy_alias_hint = _resolve_strategy_alias(strategy_id=strategy_id, mode=strategy_mode_hint)
+        dual_obj_equivalent_forced = bool(
+            strategy_alias_hint in {"s4", "s8"}
+            and (not has_pre_constraints)
+            and len(selected_features) <= 3
+        )
+        if dual_obj_equivalent_forced:
+            strategy_alias_hint = "s4_obj" if strategy_alias_hint == "s4" else "s8_obj"
+            print(
+                "[Explorer] low-dim dual override: "
+                f"p_dim={len(selected_features)}, has_pre_constraints={has_pre_constraints} "
+                f"-> force obj-equivalent path ({strategy_alias_hint})"
+            )
         pred_uq_target_enabled = strategy_alias_hint in {"s4", "s8", "s4_pred", "s8_pred"}
         pred_cluster_beta = float(np.clip(float(strategy_params.get("pred_cluster_beta", 0.2)), 0.0, 2.0))
         pred_cluster_beta_used = float(pred_cluster_beta) if pred_uq_target_enabled else 0.0
@@ -1928,7 +1940,10 @@ class ExplorerOrchestrator:
         )
         selected_bounds = base_selected_bounds
         strategy_mode = str((self.config.system.strategy_params or {}).get("mode", "")).strip().lower()
-        strategy_alias = _resolve_strategy_alias(strategy_id=strategy_id, mode=strategy_mode)
+        strategy_alias_requested = _resolve_strategy_alias(strategy_id=strategy_id, mode=strategy_mode)
+        strategy_alias = strategy_alias_requested
+        if dual_obj_equivalent_forced and strategy_alias in {"s4", "s8"}:
+            strategy_alias = "s4_obj" if strategy_alias == "s4" else "s8_obj"
         refine_pre_filter_applied = bool(has_pre_constraints)
         refine_pre_removed_pred = 0
         refine_pre_removed_obj = 0
@@ -2256,25 +2271,30 @@ class ExplorerOrchestrator:
 
                 obj_ratio = float(np.clip(obj_ratio, ratio_min, ratio_max))
 
-                # #K dim-aware obj floor — multimodal low-dim 비제약 케이스에서
-                # dual의 obj 측 비중을 강제로 끌어올림. state-based gate, benchmark
-                # 명 분기 아님. has_pre_constraints + p_dim 두 가지만 사용.
+                # #K dim-aware obj-only — multimodal low-dim 비제약(p_dim<=K_max,
+                # not has_pre_constraints) 케이스에서 dual을 pure obj path로 전환.
+                # state-based gate, benchmark 명 분기 아님. n_pred_starts 강제 0
+                # (Case B 패턴, DSE-L6와 동일).
                 _k_low_dim_max = int(
                     getattr(self.config.system, "dual_obj_floor_low_dim_max", 3)
                 )
                 _k_low_dim_value = float(
                     getattr(self.config.system, "dual_obj_floor_low_dim_value", 0.90)
                 )
+                _k_applied = False
                 if (
                     not has_pre_constraints
                     and len(selected_features) <= _k_low_dim_max
-                    and obj_ratio < _k_low_dim_value
                 ):
+                    # pure obj path: floor 값(>=0.90)이면 의도는 obj 단독. 1.0으로 승격
+                    # 하여 n_pred_starts=0 강제 (Case B). 0.90 등 부분 floor를 원하면
+                    # _k_low_dim_value 를 별도 knob 으로 재조정.
                     print(
-                        f"[Explorer] #K obj-floor: p_dim={len(selected_features)}, "
-                        f"obj_ratio {obj_ratio:.2f} → {_k_low_dim_value:.2f}"
+                        f"[Explorer] #K dual→obj-only: p_dim={len(selected_features)}, "
+                        f"obj_ratio {obj_ratio:.2f} → 1.00 (pure obj path)"
                     )
-                    obj_ratio = float(np.clip(_k_low_dim_value, 0.0, 1.0))
+                    obj_ratio = 1.0
+                    _k_applied = True
 
                 # DSE-L6: pred/obj 완전 disjoint 시 dual → obj-only 전환.
                 # 상태: dual_disagreement_iou <= disjoint_iou. state-based gate,
@@ -2302,7 +2322,8 @@ class ExplorerOrchestrator:
                 dual_center_bias_used = float(obj_ratio)
 
                 total = int(max(int(dual_total_starts_target), 2))
-                if _l6_applied:
+                if _l6_applied or _k_applied:
+                    # Case B: pure obj path (clip 우회)
                     n_obj_starts = int(total)
                     n_pred_starts = 0
                 else:
@@ -3112,6 +3133,14 @@ class ExplorerOrchestrator:
         pred_bounds_volume_ratio: float | None = None
         obj_bounds_volume_ratio: float | None = None
         selected_bounds_center_l1_to_design_center: float | None = None
+        # G2: 추가 진단 — per-dim normalized width, pre-L2 volume, L2 적용 여부.
+        # 목적: CB mid-seed pass/fail 분석에서 wide pre-cap vs tight cluster를
+        # 분리할 수 있는 신호 확보. 코드 동작 영향 없음 (read-only).
+        selected_bounds_widths_normalized: list[float] | None = None
+        pred_bounds_widths_normalized: list[float] | None = None
+        obj_bounds_widths_normalized: list[float] | None = None
+        selected_bounds_volume_ratio_pre_l2_expand: float | None = None
+        pre_cap_l2_expand_applied: bool = False
         dual_volume_cap_applied = False
         dse_cap_boundary_touch_dims: list[dict[str, object]] = []
         dse_cap_boundary_touch_eps_ratio: float | None = None
@@ -3500,6 +3529,12 @@ class ExplorerOrchestrator:
                 )
             except Exception:
                 selected_bounds_volume_ratio_before_cap = None
+            # G2: pre-L2 expansion 시점의 부피비를 별도 보존 (L2 발동 시 위 값이
+            # 갱신되므로 원본 추적용).
+            selected_bounds_volume_ratio_pre_l2_expand = (
+                float(selected_bounds_volume_ratio_before_cap)
+                if selected_bounds_volume_ratio_before_cap is not None else None
+            )
 
             # #L2 Pre-cap micro-expansion — has_pre==True AND p_dim>=4 AND
             # pre_cap_ratio < threshold 시, axis-aligned 균일 확장으로 target 부피비
@@ -3549,6 +3584,7 @@ class ExplorerOrchestrator:
                     f"{_cur_ratio:.4f} → ~{_l2_target:.2f} (factor {_factor:.3f})"
                 )
                 selected_bounds = _expanded
+                pre_cap_l2_expand_applied = True
                 # update before_cap diagnostic to reflect post-expansion value
                 try:
                     selected_bounds_volume_ratio_before_cap = _volume_ratio_for_bounds(
@@ -3868,6 +3904,33 @@ class ExplorerOrchestrator:
                     )
             except Exception:
                 selected_bounds_center_l1_to_design_center = None
+
+            # G2 진단: per-dim normalized widths (selected/pred/obj). 각 dim의
+            # 부피비를 list로 보존하여 어느 dim이 좁은/넓은지 추적.
+            def _widths_normalized(b: list[tuple[float, float]] | None) -> list[float] | None:
+                if b is None or len(b) != len(bounds):
+                    return None
+                out: list[float] = []
+                for (s_lb, s_ub), (g_lb, g_ub) in zip(b, bounds):
+                    g_lo = float(min(g_lb, g_ub))
+                    g_hi = float(max(g_lb, g_ub))
+                    span = max(g_hi - g_lo, 1e-12)
+                    s_lo = float(min(s_lb, s_ub))
+                    s_hi = float(max(s_lb, s_ub))
+                    out.append(float(max(s_hi - s_lo, 0.0) / span))
+                return out
+            try:
+                selected_bounds_widths_normalized = _widths_normalized(selected_bounds)
+            except Exception:
+                selected_bounds_widths_normalized = None
+            try:
+                pred_bounds_widths_normalized = _widths_normalized(pred_bounds)
+            except Exception:
+                pred_bounds_widths_normalized = None
+            try:
+                obj_bounds_widths_normalized = _widths_normalized(obj_bounds)
+            except Exception:
+                obj_bounds_widths_normalized = None
             # persist selected bounds as artifact (json)
             if selected_features and len(selected_features) == len(selected_bounds):
                 bounds_payload = {
@@ -4048,7 +4111,9 @@ class ExplorerOrchestrator:
             "selected_bounds_volume_ratio": vol_ratio,
             "strategy_id": strategy_id,
             "strategy_alias": strategy_alias,
+            "strategy_alias_requested": strategy_alias_requested,
             "strategy_mode": strategy_mode,
+            "dual_obj_equivalent_forced": bool(dual_obj_equivalent_forced),
             "dual_volume_cap_applied": bool(dual_volume_cap_applied),
             "dse_cap_boundary_touch_dim_count": int(len(dse_cap_boundary_touch_dims)),
             "dse_cap_center_realign_applied": bool(dse_cap_center_realign_applied),
@@ -4069,7 +4134,9 @@ class ExplorerOrchestrator:
             "objective_sense": objective_sense,
             "strategy_id": strategy_id,
             "strategy_alias": strategy_alias,
+            "strategy_alias_requested": strategy_alias_requested,
             "strategy_mode": strategy_mode,
+            "dual_obj_equivalent_forced": bool(dual_obj_equivalent_forced),
             # Operational mirror
             "p_dim": int(len(selected_features)),
             "usable_n": int(base_n),
@@ -4096,6 +4163,23 @@ class ExplorerOrchestrator:
                 float(selected_bounds_center_l1_to_design_center)
                 if selected_bounds_center_l1_to_design_center is not None else None
             ),
+            "selected_bounds_widths_normalized": (
+                list(selected_bounds_widths_normalized)
+                if selected_bounds_widths_normalized is not None else None
+            ),
+            "pred_bounds_widths_normalized": (
+                list(pred_bounds_widths_normalized)
+                if pred_bounds_widths_normalized is not None else None
+            ),
+            "obj_bounds_widths_normalized": (
+                list(obj_bounds_widths_normalized)
+                if obj_bounds_widths_normalized is not None else None
+            ),
+            "selected_bounds_volume_ratio_pre_l2_expand": (
+                float(selected_bounds_volume_ratio_pre_l2_expand)
+                if selected_bounds_volume_ratio_pre_l2_expand is not None else None
+            ),
+            "pre_cap_l2_expand_applied": bool(pre_cap_l2_expand_applied),
             "dual_volume_cap_applied": bool(dual_volume_cap_applied),
             "dse_cap_boundary_touch_dims": dse_cap_boundary_touch_dims,
             "dse_cap_boundary_touch_dim_count": int(len(dse_cap_boundary_touch_dims)),

@@ -26,8 +26,30 @@ class OptimizerSystemConfig:
     n_restarts: int = 8
     starts_per_iter: int = 32
     random_starts_ratio: float = 0.7
+    # DOE objective + bounds 케이스에서 source mixture 사용 여부
+    source_mixture_enabled: bool = True
+    # source mixture 기본 확률 (topk / boundary / random)
+    source_topk_prob: float = 0.60
+    source_boundary_prob: float = 0.25
+    source_random_prob: float = 0.15
+    # 정체(stagnation) 감지 시 탐색 강화
+    source_stagnation_window: int = 8
+    source_stagnation_tol: float = 1e-8
+    source_stagnation_boundary_bonus: float = 0.10
+    source_stagnation_random_bonus: float = 0.05
+    # source pool 생성 파라미터
+    source_pool_size: int = 24
+    source_topk_fraction: float = 0.20
+    source_topk_perturb_sigma: float = 0.08
+    source_boundary_near_ratio: float = 0.03
+    # pre-constraint 후보 생성 정책 (phase3)
+    source_feasible_multiplier: int = 3
+    source_feasible_retry: int = 3
+    source_feasible_min_starts: int = 1
     # DOE 데이터에서 초기 학습점으로 사용할 상위 개수
     init_from_doe_topk: int = 20
+    # DOE objective warm-start 상한 (이보다 많으면 top+diversity로 선별)
+    init_max_points: int = 300
     # DOE seed 사용 범위: in_bounds | all
     doe_seed_scope: str = "in_bounds"
     # GP 재학습 주기 (iteration 단위)
@@ -42,6 +64,9 @@ class OptimizerSystemConfig:
     post_constraint_enabled: bool = True
     # score/acquisition 패널티 강도
     post_penalty_lambda: float = 2.0
+    # p_feasible이 임계치보다 낮으면 추가 강한 패널티 부여
+    post_p_feasible_min: float = 0.0
+    post_p_feasible_hard_penalty: float = 0.0
     # post score 적용 방식: add_penalty(기본)
     post_score_mode: str = "add_penalty"
     # Deprecated: 실제 CAE objective 평가로 전환되어 현재 미사용

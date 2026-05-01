@@ -31,6 +31,9 @@ def latin_hypercube_sampling(
         LHC로 생성된 설계변수 샘플
     """
 
+    if n_samples <= 0:
+        raise ValueError("n_samples must be > 0.")
+
     if rng is None:
         rng = np.random.default_rng()
 
@@ -38,6 +41,13 @@ def latin_hypercube_sampling(
 
     if n_divisions is None:
         n_divisions = n_samples
+    if n_divisions <= 0:
+        raise ValueError("n_divisions must be > 0.")
+    if n_divisions < n_samples:
+        raise ValueError(
+            "latin_hypercube_sampling requires n_divisions >= n_samples. "
+            f"Got n_divisions={n_divisions}, n_samples={n_samples}."
+        )
 
     X = np.zeros((n_samples, n_dim), dtype=float)
 

@@ -44,19 +44,19 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="rosenbrock",
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
         n_samples=450,
-        repeats=100,
+        repeats=10,
     ),
     "cantilever_beam": ProblemCase(
         problem_name="cantilever_beam",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         n_samples=90,
-        repeats=250,
+        repeats=25,
     ),
     "goldstein_price": ProblemCase(
         problem_name="goldstein_price",
         known_optimum={"x1": 0.0, "x2": -1.0},
         n_samples=150,
-        repeats=500,
+        repeats=50,
     ),
     "six_hump_camel": ProblemCase(
         problem_name="six_hump_camel",
@@ -65,7 +65,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": -0.0898, "x2": 0.7126},
         ],
         n_samples=50,
-        repeats=250,
+        repeats=25,
     ),
     "rosenbrock_nodummy": ProblemCase(
         problem_name="rosenbrock_nodummy",
@@ -243,15 +243,6 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
         ),
     ),
     ExplorerStrategy(
-        "S8_dual",
-        _strategy_overrides(
-            strategy_params={**_DUAL_SHARED_PARAMS, "mode": "dual_gradient_refine"},
-            quantile_threshold=0.89,
-            bounds_margin_ratio=0.02,
-            dbscan_eps_quantile=0.88,
-        ),
-    ),
-    ExplorerStrategy(
         "S4_pred",
         _strategy_overrides(
             strategy_params={**_PRED_SHARED_PARAMS, "mode": "pred_refine_ei"},
@@ -261,27 +252,9 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
         ),
     ),
     ExplorerStrategy(
-        "S8_pred",
-        _strategy_overrides(
-            strategy_params={**_PRED_SHARED_PARAMS, "mode": "pred_refine_lcb"},
-            quantile_threshold=0.86,
-            bounds_margin_ratio=0.05,
-            dbscan_eps_quantile=0.92,
-        ),
-    ),
-    ExplorerStrategy(
         "S4_obj",
         _strategy_overrides(
             strategy_params={**_OBJ_SHARED_PARAMS, "mode": "obj_refine_ei"},
-            quantile_threshold=0.88,
-            bounds_margin_ratio=0.03,
-            dbscan_eps_quantile=0.90,
-        ),
-    ),
-    ExplorerStrategy(
-        "S8_obj",
-        _strategy_overrides(
-            strategy_params={**_OBJ_SHARED_PARAMS, "mode": "obj_refine_lcb"},
             quantile_threshold=0.88,
             bounds_margin_ratio=0.03,
             dbscan_eps_quantile=0.90,
@@ -352,14 +325,11 @@ def _choose_strategies_by_dim(
     requested: list[ExplorerStrategy],
 ) -> tuple[str, list[ExplorerStrategy]]:
     requested_map = {s.strategy_id: s for s in requested}
-    policy = "low_dim_all4" if selected_feature_count <= 3 else "high_dim_all4"
+    policy = "low_dim_active" if selected_feature_count <= 3 else "high_dim_active"
     ordered = [
         "S4_dual",
-        "S8_dual",
         "S4_pred",
-        "S8_pred",
         "S4_obj",
-        "S8_obj",
         "SR_dual",
         "SA_dual",
     ]
@@ -459,9 +429,13 @@ def _resolve_requested_strategies(raw: str) -> list[ExplorerStrategy]:
     catalog = _strategy_map()
     legacy_alias = {
         "S4_ei_focus": "S4_dual",
-        "S8_dual_gradient_refine": "S8_dual",
+        # S8 family removed from this runner. Keep backward-compatible aliases.
+        "S8_dual_gradient_refine": "S4_dual",
         "S4_pred_focus": "S4_pred",
-        "S8_pred_refine": "S8_pred",
+        "S8_pred_refine": "S4_pred",
+        "S8_dual": "S4_dual",
+        "S8_pred": "S4_pred",
+        "S8_obj": "S4_obj",
     }
     wanted = [tok.strip() for tok in str(raw).split(",") if tok.strip()]
     if not wanted:
@@ -1119,12 +1093,11 @@ def main() -> None:
     parser.add_argument(
         "--explorer-strategies",
         type=str,
-        default="S4_dual,S8_dual",
+        default="S4_dual",
         help=(
             "Comma-separated Explorer strategy IDs. "
-            "운영 후보 = S4_dual,S8_dual (Phase 3 — dim-aware obj floor + #L2/#L3 적용). "
-            "p_dim<=3 multimodal 케이스는 obj-floor로 obj 거동, p_dim>=4는 dual blend. "
-            "8전략 비교 시 'S4_dual,S8_dual,S4_pred,S8_pred,S4_obj,S8_obj,SR_dual,SA_dual' 명시."
+            "운영 단일전략 = S4_dual (p_dim<=3 && has_pre_constraints==False는 obj-equivalent 경로). "
+            "비교/검증용으로 S4_pred,S4_obj,SR_dual,SA_dual 사용 가능."
         ),
     )
     args = parser.parse_args()

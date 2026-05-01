@@ -9,7 +9,7 @@ import pandas as pd
 
 from CAE_tool_interface.executor.configurator import select_cae_by_name
 from DOE.executor.anchor_refiner import AcquisitionOptimizer, fit_gp_with_fallback
-from DOE.executor.constraint_filter import evaluate_constraints_point
+from DOE.executor.constraint_filter import evaluate_constraints_batch, evaluate_constraints_point
 from DOE.executor.eval_sanitizer import sanitize_evaluate_output
 from Optimizer.config import OptimizerSystemConfig
 
@@ -98,6 +98,111 @@ def _build_starts(
     return np.asarray(starts, dtype=float)
 
 
+def _normalize_source_probs(*, topk: float, boundary: float, random_p: float) -> tuple[float, float, float]:
+    vals = np.asarray([topk, boundary, random_p], dtype=float)
+    vals = np.where(np.isfinite(vals), vals, 0.0)
+    vals = np.clip(vals, 0.0, None)
+    total = float(np.sum(vals))
+    if total <= 0.0:
+        return 1.0, 0.0, 0.0
+    out = vals / total
+    return float(out[0]), float(out[1]), float(out[2])
+
+
+def _select_warmstart_top_diversity(
+    *,
+    X: np.ndarray,
+    y: np.ndarray,
+    objective_sense: str,
+    max_points: int,
+    topk_fraction: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if X.ndim != 2 or y.ndim != 1 or X.shape[0] == 0 or y.shape[0] != X.shape[0]:
+        return X, y
+    n = int(X.shape[0])
+    k = int(max(1, min(max_points, n)))
+    if n <= k:
+        return X, y
+
+    if objective_sense == "max":
+        order = np.argsort(-y)
+    else:
+        order = np.argsort(y)
+    n_top = int(max(1, round(float(k) * float(np.clip(topk_fraction, 0.0, 1.0)))))
+    n_top = min(n_top, k, n)
+    top_idx = order[:n_top].tolist()
+
+    if n_top >= k:
+        keep = np.asarray(top_idx[:k], dtype=int)
+        return X[keep], y[keep]
+
+    span = np.maximum(np.max(X, axis=0) - np.min(X, axis=0), 1e-12)
+    selected: list[int] = list(top_idx)
+    remaining: list[int] = [int(i) for i in order.tolist() if int(i) not in set(selected)]
+    while len(selected) < k and remaining:
+        best_i = remaining[0]
+        best_score = -1.0
+        for cand in remaining[: min(len(remaining), 200)]:
+            d = np.linalg.norm((X[cand].reshape(1, -1) - X[selected]) / span.reshape(1, -1), axis=1)
+            score = float(np.min(d))
+            if score > best_score:
+                best_score = score
+                best_i = int(cand)
+        selected.append(best_i)
+        remaining = [idx for idx in remaining if idx != best_i]
+
+    keep = np.asarray(selected[:k], dtype=int)
+    return X[keep], y[keep]
+
+
+def _build_source_pool_starts(
+    *,
+    rng: np.random.Generator,
+    source: str,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    objective_sense: str,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    pool_size: int,
+    topk_fraction: float,
+    topk_sigma: float,
+    boundary_near_ratio: float,
+) -> np.ndarray:
+    n_dim = int(lb.shape[0])
+    n = int(max(pool_size, 1))
+    span = np.maximum(ub - lb, 1e-12)
+    starts: list[np.ndarray] = []
+
+    if source == "topk" and X_train.shape[0] > 0:
+        if objective_sense == "max":
+            order = np.argsort(-y_train)
+        else:
+            order = np.argsort(y_train)
+        n_top = int(max(1, round(float(X_train.shape[0]) * float(np.clip(topk_fraction, 0.01, 1.0)))))
+        top_idx = order[:n_top]
+        sigma = float(max(topk_sigma, 1e-4))
+        for _ in range(n):
+            base = X_train[int(rng.choice(top_idx))].reshape(-1)
+            noise = rng.normal(0.0, sigma, size=n_dim) * span
+            starts.append(np.clip(base + noise, lb, ub))
+    elif source == "boundary":
+        near = float(np.clip(boundary_near_ratio, 0.0, 0.5))
+        for _ in range(n):
+            x = rng.uniform(lb, ub, size=(n_dim,))
+            j = int(rng.integers(0, n_dim))
+            if rng.uniform(0.0, 1.0) < 0.5:
+                x[j] = lb[j] + near * span[j] * rng.uniform(0.0, 1.0)
+            else:
+                x[j] = ub[j] - near * span[j] * rng.uniform(0.0, 1.0)
+            starts.append(np.clip(x, lb, ub))
+    else:
+        for _ in range(n):
+            starts.append(rng.uniform(lb, ub, size=(n_dim,)))
+
+    return np.asarray(starts, dtype=float)
+
+
 def _sample_feasible_candidate(
     *,
     x: np.ndarray,
@@ -124,6 +229,132 @@ def _sample_feasible_candidate(
             return x_cur
         x_cur = rng.uniform(lb, ub, size=(lb.shape[0],))
     return x_cur
+
+
+def _evaluate_pre_constraint(
+    *,
+    x: np.ndarray,
+    var_names: list[str],
+    constraint_defs: list[dict],
+    enforce_pre_constraints: bool,
+) -> tuple[bool, float]:
+    if not enforce_pre_constraints or not constraint_defs:
+        return True, float("inf")
+    _payload, feasible, margin = evaluate_constraints_point(
+        x=np.asarray(x, dtype=float).reshape(-1),
+        var_names=var_names,
+        constraint_defs=constraint_defs,
+        scope="pre",
+        fail_fast_output_missing=False,
+    )
+    return bool(feasible), float(margin)
+
+
+def _build_preconstrained_source_starts(
+    *,
+    rng: np.random.Generator,
+    source: str,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    objective_sense: str,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    base_pool_size: int,
+    topk_fraction: float,
+    topk_sigma: float,
+    boundary_near_ratio: float,
+    var_names: list[str],
+    constraint_defs: list[dict],
+    enforce_pre_constraints: bool,
+    feasible_multiplier: int,
+    feasible_retry: int,
+    min_starts: int,
+) -> tuple[np.ndarray, np.ndarray | None, float, int, int]:
+    raw_pool_size = int(max(base_pool_size, 1))
+    n_target = int(max(raw_pool_size, max(min_starts, 1)))
+    if not enforce_pre_constraints or not constraint_defs:
+        starts = _build_source_pool_starts(
+            rng=rng,
+            source=source,
+            X_train=X_train,
+            y_train=y_train,
+            objective_sense=objective_sense,
+            lb=lb,
+            ub=ub,
+            pool_size=n_target,
+            topk_fraction=topk_fraction,
+            topk_sigma=topk_sigma,
+            boundary_near_ratio=boundary_near_ratio,
+        )
+        return starts, None, float("inf"), 0, int(starts.shape[0])
+
+    multiplier = int(max(feasible_multiplier, 1))
+    max_retry = int(max(feasible_retry, 0))
+    n_generate = int(max(n_target * multiplier, n_target))
+
+    feasible_accum: list[np.ndarray] = []
+    feasible_keys: set[tuple[float, ...]] = set()
+    fallback_x: np.ndarray | None = None
+    fallback_margin = float("-inf")
+    generated_total = 0
+    retry_used = 0
+
+    for retry_idx in range(max_retry + 1):
+        retry_used = int(retry_idx)
+        starts = _build_source_pool_starts(
+            rng=rng,
+            source=source,
+            X_train=X_train,
+            y_train=y_train,
+            objective_sense=objective_sense,
+            lb=lb,
+            ub=ub,
+            pool_size=n_generate,
+            topk_fraction=topk_fraction,
+            topk_sigma=topk_sigma,
+            boundary_near_ratio=boundary_near_ratio,
+        )
+        generated_total += int(starts.shape[0])
+        mask, _payloads, margins = evaluate_constraints_batch(
+            X=starts,
+            var_names=var_names,
+            constraint_defs=constraint_defs,
+            scope="pre",
+        )
+        if starts.shape[0] > 0:
+            best_i = int(np.argmax(margins))
+            if float(margins[best_i]) > float(fallback_margin):
+                fallback_margin = float(margins[best_i])
+                fallback_x = starts[best_i].reshape(-1).copy()
+
+        feasible_rows = starts[mask] if starts.shape[0] > 0 else np.empty((0, lb.shape[0]), dtype=float)
+        for row in feasible_rows:
+            key = _round_key(row, decimals=12)
+            if key in feasible_keys:
+                continue
+            feasible_keys.add(key)
+            feasible_accum.append(np.asarray(row, dtype=float).reshape(-1))
+            if len(feasible_accum) >= n_target:
+                break
+        if len(feasible_accum) >= n_target:
+            break
+        if retry_idx >= max_retry:
+            break
+
+    if feasible_accum:
+        starts_out = np.asarray(feasible_accum, dtype=float)
+        if starts_out.shape[0] > n_target:
+            idx = rng.choice(starts_out.shape[0], size=n_target, replace=False)
+            starts_out = starts_out[np.asarray(idx, dtype=int)]
+        return starts_out, fallback_x, float(fallback_margin), int(retry_used), int(generated_total)
+
+    return (
+        np.empty((0, lb.shape[0]), dtype=float),
+        fallback_x,
+        float(fallback_margin),
+        int(retry_used),
+        int(generated_total),
+    )
 
 
 def _sample_local(
@@ -173,6 +404,17 @@ def _resolve_no_doe_segment(
     if i < n1:
         return "stage1"
     return "stage2"
+
+
+def _segment_to_phase_label(*, segment: str, mode_no_doe: bool) -> str:
+    seg = str(segment or "").strip().lower()
+    if not mode_no_doe:
+        return "phase3"
+    if seg in {"stage1", "phase1"}:
+        return "phase1"
+    if seg in {"stage2", "phase2"}:
+        return "phase2"
+    return "phase3"
 
 
 def _normalize_post_score_mode(mode: str | None) -> str:
@@ -248,11 +490,18 @@ def _apply_post_penalty_to_objective(
     objective_sense: str,
     penalty_lambda: float,
     score_mode: str,
+    p_feasible_min: float,
+    hard_penalty: float,
 ) -> float:
     y = float(y_raw)
     if score_mode != "add_penalty" or penalty_lambda <= 0.0:
         return y
-    penalty = float(penalty_lambda) * (1.0 - float(np.clip(p_feasible, 0.0, 1.0)))
+    p = float(np.clip(p_feasible, 0.0, 1.0))
+    penalty = float(penalty_lambda) * (1.0 - p)
+    p_min = float(np.clip(p_feasible_min, 0.0, 1.0))
+    hard = float(max(hard_penalty, 0.0))
+    if hard > 0.0 and p < p_min:
+        penalty += hard
     if objective_sense == "max":
         return y - penalty
     return y + penalty
@@ -360,6 +609,8 @@ def run_bo_engine(
 
     post_score_mode = _normalize_post_score_mode(getattr(system, "post_score_mode", "add_penalty"))
     post_penalty_lambda = max(float(getattr(system, "post_penalty_lambda", 0.0)), 0.0)
+    post_p_feasible_min = float(np.clip(float(getattr(system, "post_p_feasible_min", 0.0)), 0.0, 1.0))
+    post_p_feasible_hard_penalty = float(max(float(getattr(system, "post_p_feasible_hard_penalty", 0.0)), 0.0))
     post_constraint_enabled = bool(getattr(system, "post_constraint_enabled", False))
     post_prob_fn: Callable[[np.ndarray], float] | None = None
     feasibility_model_kind = "none"
@@ -433,6 +684,14 @@ def run_bo_engine(
         top_idx = order[:n_topk]
         X_train = X_archive[top_idx].copy()
         y_train = y_archive[top_idx].copy()
+        init_cap = int(max(int(getattr(system, "init_max_points", X_train.shape[0])), 1))
+        X_train, y_train = _select_warmstart_top_diversity(
+            X=X_train,
+            y=y_train,
+            objective_sense=objective_sense,
+            max_points=init_cap,
+            topk_fraction=float(getattr(system, "source_topk_fraction", 0.2)),
+        )
         mode_no_doe = False
         no_doe_mode_name = "none"
         init_source = "doe_objective"
@@ -475,6 +734,8 @@ def run_bo_engine(
                     objective_sense=objective_sense,
                     penalty_lambda=post_penalty_lambda,
                     score_mode=post_score_mode,
+                    p_feasible_min=post_p_feasible_min,
+                    hard_penalty=post_p_feasible_hard_penalty,
                 )
                 for y, p in zip(y_train, p_train)
             ],
@@ -493,6 +754,7 @@ def run_bo_engine(
     gp_model = None
     gp_fallback_used = False
     var_names = list(selected_features)
+    best_raw_history: list[float] = [float(best_y_raw)]
 
     for i in range(int(n_samples)):
         if i == 0 or (int(system.gp_refit_every) > 0 and i % int(system.gp_refit_every) == 0):
@@ -520,7 +782,14 @@ def run_bo_engine(
         )
 
         segment = "default"
+        source_mode = "default"
         x_next = None
+        pre_feasible_next = True
+        pre_margin_next = float("inf")
+        pre_violation_next = 0.0
+        pre_retry_used = 0
+        pre_generated_count = 0
+        pre_fallback_used = False
         if mode_no_doe:
             segment = _resolve_no_doe_segment(
                 i=i,
@@ -580,7 +849,87 @@ def run_bo_engine(
                         radius_ratio=0.04,
                     )
         else:
-            if gp_model is not None:
+            if bool(getattr(system, "source_mixture_enabled", True)) and has_doe_objective:
+                p_topk, p_bnd, p_rand = _normalize_source_probs(
+                    topk=float(getattr(system, "source_topk_prob", 0.60)),
+                    boundary=float(getattr(system, "source_boundary_prob", 0.25)),
+                    random_p=float(getattr(system, "source_random_prob", 0.15)),
+                )
+                win = int(max(int(getattr(system, "source_stagnation_window", 8)), 2))
+                tol = float(max(float(getattr(system, "source_stagnation_tol", 1e-8)), 0.0))
+                if len(best_raw_history) >= win:
+                    ref_idx = max(len(best_raw_history) - win, 0)
+                    if objective_sense == "max":
+                        improved = float(best_raw_history[-1] - best_raw_history[ref_idx])
+                    else:
+                        improved = float(best_raw_history[ref_idx] - best_raw_history[-1])
+                    if improved <= tol:
+                        p_bnd += float(max(float(getattr(system, "source_stagnation_boundary_bonus", 0.10)), 0.0))
+                        p_rand += float(max(float(getattr(system, "source_stagnation_random_bonus", 0.05)), 0.0))
+                        p_topk, p_bnd, p_rand = _normalize_source_probs(
+                            topk=p_topk,
+                            boundary=p_bnd,
+                            random_p=p_rand,
+                        )
+
+                source = str(rng.choice(np.asarray(["topk", "boundary", "random"]), p=[p_topk, p_bnd, p_rand]))
+                source_mode = str(source)
+                pre_active = bool(system.enforce_pre_constraints) and bool(constraint_defs)
+                pool_starts, pre_fallback_x, pre_fallback_margin, pre_retry_used, pre_generated_count = _build_preconstrained_source_starts(
+                    rng=rng,
+                    source=source,
+                    X_train=X_train,
+                    y_train=y_train,
+                    objective_sense=objective_sense,
+                    lb=lb,
+                    ub=ub,
+                    base_pool_size=int(getattr(system, "source_pool_size", 24)),
+                    topk_fraction=float(getattr(system, "source_topk_fraction", 0.20)),
+                    topk_sigma=float(getattr(system, "source_topk_perturb_sigma", 0.08)),
+                    boundary_near_ratio=float(getattr(system, "source_boundary_near_ratio", 0.03)),
+                    var_names=var_names,
+                    constraint_defs=constraint_defs,
+                    enforce_pre_constraints=pre_active,
+                    feasible_multiplier=int(getattr(system, "source_feasible_multiplier", 3)),
+                    feasible_retry=int(getattr(system, "source_feasible_retry", 3)),
+                    min_starts=int(getattr(system, "source_feasible_min_starts", 1)),
+                )
+                acq_type_source = "EI" if source == "topk" else "LCB"
+                segment = "phase3"
+                if gp_model is not None and pool_starts.shape[0] > 0:
+                    def _pre_fn(x_arr: np.ndarray) -> bool:
+                        ok, _m = _evaluate_pre_constraint(
+                            x=x_arr,
+                            var_names=var_names,
+                            constraint_defs=constraint_defs,
+                            enforce_pre_constraints=pre_active,
+                        )
+                        return bool(ok)
+
+                    x_next = acq.optimize(
+                        model=gp_model,
+                        y_best=best_y_raw,
+                        lb=lb,
+                        ub=ub,
+                        starts=pool_starts,
+                        objective_sense=objective_sense,
+                        acq_type=acq_type_source,
+                        kappa=float(kappa),
+                        xi=float(system.ei_xi),
+                        pre_feasible_fn=_pre_fn if pre_active else None,
+                        post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
+                        post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+                    )
+                if x_next is None and pool_starts.shape[0] > 0:
+                    x_next = pool_starts[int(rng.integers(0, pool_starts.shape[0]))]
+                if x_next is None and pre_fallback_x is not None:
+                    x_next = pre_fallback_x.copy()
+                    pre_fallback_used = True
+                    pre_feasible_next = False
+                    pre_margin_next = float(pre_fallback_margin)
+                    pre_violation_next = float(max(0.0, -pre_margin_next))
+                acq_type = acq_type_source
+            elif gp_model is not None:
                 x_next = acq.optimize(
                     model=gp_model,
                     y_best=best_y_raw,
@@ -598,15 +947,24 @@ def run_bo_engine(
                 x_next = rng.uniform(lb, ub, size=(lb.shape[0],))
 
         x_next = np.clip(np.asarray(x_next, dtype=float).reshape(-1), lb, ub)
-        x_next = _sample_feasible_candidate(
+        if not pre_fallback_used:
+            x_next = _sample_feasible_candidate(
+                x=x_next,
+                rng=rng,
+                lb=lb,
+                ub=ub,
+                var_names=var_names,
+                constraint_defs=constraint_defs,
+                enforce_pre_constraints=bool(system.enforce_pre_constraints),
+            )
+
+        pre_feasible_next, pre_margin_next = _evaluate_pre_constraint(
             x=x_next,
-            rng=rng,
-            lb=lb,
-            ub=ub,
             var_names=var_names,
             constraint_defs=constraint_defs,
             enforce_pre_constraints=bool(system.enforce_pre_constraints),
         )
+        pre_violation_next = float(max(0.0, -float(pre_margin_next)))
 
         key = _round_key(x_next, decimals=int(system.dedup_decimals))
         if key in seen:
@@ -639,6 +997,8 @@ def run_bo_engine(
             objective_sense=objective_sense,
             penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
             score_mode=post_score_mode,
+            p_feasible_min=post_p_feasible_min,
+            hard_penalty=post_p_feasible_hard_penalty,
         )
 
         acq_base = float("nan")
@@ -666,7 +1026,17 @@ def run_bo_engine(
                     )
                 acq_effective = float(acq_base)
                 if post_penalty_active:
-                    acq_effective = float(acq_effective + post_penalty_lambda * (1.0 - p_feasible))
+                    acq_effective = float(
+                        _apply_post_penalty_to_objective(
+                            y_raw=acq_effective,
+                            p_feasible=p_feasible,
+                            objective_sense="min",
+                            penalty_lambda=post_penalty_lambda,
+                            score_mode=post_score_mode,
+                            p_feasible_min=post_p_feasible_min,
+                            hard_penalty=post_p_feasible_hard_penalty,
+                        )
+                    )
             except Exception:
                 pass
 
@@ -681,6 +1051,7 @@ def run_bo_engine(
         if _is_better(y_new=y_next_effective, y_best=best_y_eff, objective_sense=objective_sense):
             best_y_eff = float(y_next_effective)
             best_x_eff = x_next.copy()
+        best_raw_history.append(float(best_y_raw))
 
         row = {
             "iter": int(i + 1),
@@ -697,12 +1068,20 @@ def run_bo_engine(
             "init_source": str(init_source),
             "no_doe_mode": str(no_doe_mode_name),
             "segment": str(segment),
+            "phase": _segment_to_phase_label(segment=segment, mode_no_doe=mode_no_doe),
+            "source_mode": str(source_mode),
             "gp_fallback_used": bool(gp_fallback_used),
             "surrogate_only_mode": bool(system.surrogate_only_mode),
             "post_penalty_active": bool(post_penalty_active),
             "post_penalty_lambda": float(post_penalty_lambda if post_penalty_active else 0.0),
             "post_score_mode": str(post_score_mode),
             "p_feasible": float(p_feasible),
+            "pre_feasible": bool(pre_feasible_next),
+            "pre_margin": float(pre_margin_next),
+            "pre_violation": float(pre_violation_next),
+            "pre_retry_used": int(pre_retry_used),
+            "pre_generated_count": int(pre_generated_count),
+            "pre_fallback_used": bool(pre_fallback_used),
         }
         for fname, value in zip(selected_features, x_next):
             row[fname] = float(value)
@@ -720,6 +1099,8 @@ def run_bo_engine(
             objective_sense=objective_sense,
             penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
             score_mode=post_score_mode,
+            p_feasible_min=post_p_feasible_min,
+            hard_penalty=post_p_feasible_hard_penalty,
         )
         item = {
             "objective": float(y_eff),
