@@ -107,6 +107,141 @@ def _predict_ensemble(models: list, X: np.ndarray) -> tuple[np.ndarray, np.ndarr
     return stacked.mean(axis=0), stacked.std(axis=0)
 
 
+def _predict_post_feasible_prob_batch(*, adapter: dict, X: np.ndarray) -> np.ndarray:
+    if not isinstance(adapter, dict):
+        raise RuntimeError("Invalid post-feasibility adapter.")
+
+    X_arr = np.asarray(X, dtype=float)
+    if X_arr.ndim != 2:
+        raise RuntimeError(f"Post-feasibility input must be 2D, got shape={X_arr.shape}.")
+    if X_arr.shape[0] == 0:
+        return np.empty((0,), dtype=float)
+
+    selected_dim = int(adapter.get("selected_dim", 0))
+    if X_arr.shape[1] < selected_dim:
+        raise RuntimeError(
+            "Post-feasibility input dimension mismatch: "
+            f"expected at least {selected_dim}, got {X_arr.shape[1]}."
+        )
+
+    kind = str(adapter.get("kind", "unknown")).strip().lower()
+    if kind == "constant":
+        p0 = float(np.clip(float(adapter.get("constant_prob", 0.5)), 0.0, 1.0))
+        return np.full((X_arr.shape[0],), p0, dtype=float)
+
+    col_idx = np.asarray(adapter.get("col_idx"), dtype=int).reshape(-1)
+    if col_idx.size == 0:
+        raise RuntimeError("Post-feasibility adapter has empty feature index mapping.")
+    if np.any(col_idx < 0) or np.any(col_idx >= X_arr.shape[1]):
+        raise RuntimeError(
+            "Post-feasibility feature index out of range: "
+            f"indices={col_idx.tolist()}, input_dim={X_arr.shape[1]}."
+        )
+    X_in = X_arr[:, col_idx]
+
+    model = adapter.get("model")
+    if model is None:
+        raise RuntimeError("Post-feasibility adapter has no model object.")
+
+    if hasattr(model, "predict_proba"):
+        raw = np.asarray(model.predict_proba(X_in), dtype=float)
+        if raw.ndim == 2 and raw.shape[0] == X_in.shape[0] and raw.shape[1] >= 2:
+            p = raw[:, 1]
+        elif raw.ndim == 2 and raw.shape[0] == X_in.shape[0] and raw.shape[1] == 1:
+            p = raw[:, 0]
+        elif raw.ndim == 1 and raw.shape[0] == X_in.shape[0]:
+            p = raw
+        else:
+            raise RuntimeError(
+                "Unexpected predict_proba output shape for post-feasibility model: "
+                f"{raw.shape}."
+            )
+    elif hasattr(model, "predict"):
+        p = np.asarray(model.predict(X_in), dtype=float).reshape(-1)
+        if p.shape[0] != X_in.shape[0]:
+            raise RuntimeError(
+                "Unexpected predict output length for post-feasibility model: "
+                f"{p.shape[0]} (expected {X_in.shape[0]})."
+            )
+    else:
+        raise RuntimeError("Post-feasibility model has neither predict_proba nor predict.")
+
+    if not np.all(np.isfinite(p)):
+        raise RuntimeError("Post-feasibility prediction contains non-finite values.")
+    return np.clip(np.asarray(p, dtype=float), 0.0, 1.0)
+
+
+def _predict_post_feasible_prob_one(*, adapter: dict, x_row: np.ndarray) -> float:
+    x = np.asarray(x_row, dtype=float).reshape(1, -1)
+    p = _predict_post_feasible_prob_batch(adapter=adapter, X=x)
+    if p.size != 1:
+        raise RuntimeError(f"Unexpected post-feasibility scalar output size: {p.size}.")
+    return float(p[0])
+
+
+def _prepare_post_feasibility_adapter_strict(
+    *,
+    feasibility_payload: dict | None,
+    selected_features: list[str],
+) -> dict:
+    if not isinstance(feasibility_payload, dict):
+        raise RuntimeError("FAILED_POST_FEAS_MODEL_PREFLIGHT: payload is missing or invalid.")
+
+    selected = [str(f) for f in selected_features]
+    if not selected:
+        raise RuntimeError("FAILED_POST_FEAS_MODEL_PREFLIGHT: selected_features is empty.")
+
+    kind = str(feasibility_payload.get("kind", "unknown")).strip().lower() or "unknown"
+    model_feature_cols = feasibility_payload.get("feature_cols", [])
+    if isinstance(model_feature_cols, list) and model_feature_cols:
+        feature_cols = [str(f) for f in model_feature_cols]
+    else:
+        feature_cols = list(selected)
+
+    feature_to_idx = {name: idx for idx, name in enumerate(selected)}
+    missing = [f for f in feature_cols if f not in feature_to_idx]
+    if missing:
+        raise RuntimeError(
+            "FAILED_POST_FEAS_MODEL_PREFLIGHT: feature mismatch. "
+            f"missing_in_selected_features={missing}"
+        )
+
+    adapter = {
+        "kind": str(kind),
+        "selected_dim": int(len(selected)),
+        "feature_cols": list(feature_cols),
+        "col_idx": np.asarray([feature_to_idx[f] for f in feature_cols], dtype=int),
+    }
+
+    if kind == "constant":
+        adapter["constant_prob"] = float(
+            np.clip(float(feasibility_payload.get("constant_prob", 0.5)), 0.0, 1.0)
+        )
+    else:
+        model = feasibility_payload.get("model")
+        if model is None:
+            raise RuntimeError(
+                "FAILED_POST_FEAS_MODEL_PREFLIGHT: feasibility payload has no model object."
+            )
+        if not hasattr(model, "predict_proba") and not hasattr(model, "predict"):
+            raise RuntimeError(
+                "FAILED_POST_FEAS_MODEL_PREFLIGHT: model has neither predict_proba nor predict."
+            )
+        adapter["model"] = model
+
+    try:
+        _ = _predict_post_feasible_prob_batch(
+            adapter=adapter,
+            X=np.zeros((1, len(selected)), dtype=float),
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"FAILED_POST_FEAS_MODEL_PREFLIGHT: dry-run inference failed: {exc}"
+        ) from exc
+
+    return adapter
+
+
 def _normalize_debug_level(value: str | None) -> str:
     level = str(value or "off").strip().lower()
     if level not in {"off", "full"}:
@@ -1435,6 +1570,7 @@ class ExplorerOrchestrator:
                 pre_constraint_defs = []
 
         feasibility_payload = None
+        post_feas_adapter = None
         feasibility_model_kind_used = "none"
         feasibility_model_path_used = None
         if has_post_constraints:
@@ -1443,8 +1579,20 @@ class ExplorerOrchestrator:
                 feasibility_model_kind_used = str(feasibility_payload.get("kind", "unknown"))
                 feasibility_model_path_used = modeler_feas_pkl_path
                 print(f"[Explorer] feasibility model loaded: {modeler_feas_pkl_path}")
+                post_feas_adapter = _prepare_post_feasibility_adapter_strict(
+                    feasibility_payload=feasibility_payload,
+                    selected_features=selected_features,
+                )
+                print(
+                    "[Explorer] post-feasibility preflight passed: "
+                    f"kind={post_feas_adapter.get('kind', 'unknown')}, "
+                    f"feature_dim={len(selected_features)}"
+                )
             else:
-                print("[Explorer] post constraints exist but feasibility model not found; post penalty disabled.")
+                raise RuntimeError(
+                    "FAILED_POST_FEAS_MODEL_PREFLIGHT: post constraints exist but "
+                    "feasibility model not found."
+                )
 
         variables = None
         if doe_meta:
@@ -1472,7 +1620,7 @@ class ExplorerOrchestrator:
         rng_seed = int(cae_seed)
 
         rng = np.random.default_rng(rng_seed)
-        has_post_penalty = bool(has_post_constraints and feasibility_payload is not None)
+        has_post_penalty = bool(has_post_constraints and post_feas_adapter is not None)
 
         def _meta_get(key: str, default=None):
             if key in (doe_meta or {}):
@@ -1630,27 +1778,15 @@ class ExplorerOrchestrator:
                 post_lambda = float(self.config.system.post_lambda_default)
                 post_lambda_source = "default_invalid_metadata"
         if has_post_penalty:
-            kind = str(feasibility_payload.get("kind", "none")).strip().lower()
-            try:
-                if kind == "constant":
-                    p0 = float(feasibility_payload.get("constant_prob", 0.5))
-                    p_feasible_pred = np.full((X.shape[0],), np.clip(p0, 0.0, 1.0), dtype=float)
-                else:
-                    clf = feasibility_payload.get("model")
-                    if clf is None:
-                        raise RuntimeError("feasibility model payload has no model object")
-                    p_feasible_pred = np.asarray(clf.predict_proba(X)[:, 1], dtype=float)
-                    p_feasible_pred = np.clip(p_feasible_pred, 0.0, 1.0)
-                penalty = post_lambda * (1.0 - p_feasible_pred)
-                if str(cae_objective_sense).strip().lower() == "min":
-                    score = y_mean + penalty
-                else:
-                    score = y_mean - penalty
-            except Exception as exc:
-                print(f"[Explorer] post penalty prediction skipped: {exc}")
-                has_post_penalty = False
-                score = y_mean.copy()
-                p_feasible_pred = np.ones((X.shape[0],), dtype=float)
+            p_feasible_pred = _predict_post_feasible_prob_batch(
+                adapter=post_feas_adapter,
+                X=X,
+            )
+            penalty = post_lambda * (1.0 - p_feasible_pred)
+            if str(cae_objective_sense).strip().lower() == "min":
+                score = y_mean + penalty
+            else:
+                score = y_mean - penalty
 
         df = pd.DataFrame(X, columns=selected_features)
         df["pred_mean"] = y_mean
@@ -2342,19 +2478,12 @@ class ExplorerOrchestrator:
             spans_global = np.array([max(ub - lb, 1e-12) for lb, ub in bounds], dtype=float)
 
             def _post_prob_fn(x_row: np.ndarray) -> float:
-                if not has_post_penalty or feasibility_payload is None:
+                if not has_post_penalty or post_feas_adapter is None:
                     return 1.0
-                try:
-                    kind = str(feasibility_payload.get("kind", "none")).strip().lower()
-                    if kind == "constant":
-                        return float(np.clip(float(feasibility_payload.get("constant_prob", 0.5)), 0.0, 1.0))
-                    clf = feasibility_payload.get("model")
-                    if clf is None:
-                        return 1.0
-                    p = float(np.asarray(clf.predict_proba(np.asarray(x_row, dtype=float).reshape(1, -1))[:, 1], dtype=float)[0])
-                    return float(np.clip(p, 0.0, 1.0))
-                except Exception:
-                    return 1.0
+                return _predict_post_feasible_prob_one(
+                    adapter=post_feas_adapter,
+                    x_row=np.asarray(x_row, dtype=float).reshape(-1),
+                )
 
             def _is_pre_feasible_row(x_row: np.ndarray) -> bool:
                 if not has_pre_constraints:
