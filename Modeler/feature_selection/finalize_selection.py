@@ -161,6 +161,12 @@ def finalize_selected_features(
                 )
 
     # Anti-collapse guard: 최소 feature 수 보장
+    # L1: p_dim 기반 동적 하한. 고차원에서 정적 min_features=2가 under-selection을
+    # 방치하던 문제를 보완. dummy 비율 50% 가정 → 비율 0.4.
+    _MIN_FEATURES_DIM_RATIO = 0.4
+    _p_dim = len(feature_cols) if feature_cols else 0
+    if _p_dim > 0:
+        min_features = max(int(min_features), math.ceil(_p_dim * _MIN_FEATURES_DIM_RATIO))
     if len(selected_features) < int(min_features) and "feature" in selected_df.columns:
         score_col = "final_score_adj" if "final_score_adj" in selected_df.columns else "final_score"
         if score_col in selected_df.columns:

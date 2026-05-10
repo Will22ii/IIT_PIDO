@@ -67,6 +67,18 @@ class ExplorerSystemConfig:
     constraint_aware_obj_strong_confirmed_shift_fraction: float = 0.85
     # #L3: 전 protect dim이 confirmed인 경우 full shift (all-confirmed → 1.0)
     constraint_aware_obj_all_confirmed_shift_fraction: float = 1.0
+    # #L9: DSE-L6 dispersion-aware 확장 — 두 cluster가 모두 dispersed이고
+    # 거의 disjoint인 경우 dual blend가 가짜 중심 잡음. iou ≤ 0.05 (L6 strict)
+    # 대신 다음 조건 모두 만족 시에도 pure obj path 적용:
+    #   has_pre_constraints AND p_dim >= 4
+    #   AND dual_disagreement_iou < l9_iou_max
+    #   AND obj_bounds_widths_min > l9_obj_min_threshold
+    #   AND pred_cluster_selected_count >= l9_pred_n_sel_min
+    # state-only, benchmark 명/seed 분기 아님.
+    dual_l9_extended_iou_max: float = 0.10
+    dual_l9_extended_obj_min_threshold: float = 0.50
+    dual_l9_extended_pred_n_sel_min: int = 20
+    dual_l9_extended_p_dim_min: int = 4
     # #K: dim-aware obj floor — has_pre==False AND p_dim <= max_dim 인 경우
     # dual의 obj_ratio 하한값. multimodal low-dim에서 obj 측 우월성 확보.
     dual_obj_floor_low_dim_max: int = 3

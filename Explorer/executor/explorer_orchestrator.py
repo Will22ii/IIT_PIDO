@@ -2440,7 +2440,37 @@ class ExplorerOrchestrator:
                     float(strategy_params_local.get("dual_obj_only_disjoint_iou", 0.05)),
                     0.0,
                 ))
+                # DSE-L9: dispersion-aware L6 확장. 두 cluster가 모두 dispersed
+                # (obj_min > threshold, pred_n_sel >= threshold) 이고 거의 disjoint
+                # (iou < l9_iou_max) 인 constrained 고차원 케이스에서 pure obj path.
+                # state-only, 1100-run 4 case 격리 (CB 자동 격리). 110-run PASS 무해.
+                _l9_iou_max = float(
+                    getattr(self.config.system, "dual_l9_extended_iou_max", 0.10)
+                )
+                _l9_obj_min_thr = float(
+                    getattr(self.config.system, "dual_l9_extended_obj_min_threshold", 0.50)
+                )
+                _l9_pred_n_sel_min = int(
+                    getattr(self.config.system, "dual_l9_extended_pred_n_sel_min", 20)
+                )
+                _l9_p_dim_min = int(
+                    getattr(self.config.system, "dual_l9_extended_p_dim_min", 4)
+                )
+                # obj_bounds 의 per-dim 최소 정규화 width 계산
+                _obj_min_norm: float | None = None
+                if obj_bounds is not None and len(obj_bounds) == len(bounds):
+                    _norm_widths: list[float] = []
+                    for (o_lb, o_ub), (g_lb, g_ub) in zip(obj_bounds, bounds):
+                        _gl = float(min(g_lb, g_ub))
+                        _gu = float(max(g_lb, g_ub))
+                        _span = max(_gu - _gl, 1e-12)
+                        _o_lo = float(min(o_lb, o_ub))
+                        _o_hi = float(max(o_lb, o_ub))
+                        _norm_widths.append(float(max(_o_hi - _o_lo, 0.0) / _span))
+                    if _norm_widths:
+                        _obj_min_norm = float(min(_norm_widths))
                 _l6_applied = False
+                _l9_applied = False
                 if (
                     dual_disagreement_iou is not None
                     and float(dual_disagreement_iou) <= _l6_disjoint_iou
@@ -2451,6 +2481,23 @@ class ExplorerOrchestrator:
                         f"[Explorer] DSE-L6 dual→obj-only: iou="
                         f"{float(dual_disagreement_iou):.4f} <= {_l6_disjoint_iou:.2f}"
                     )
+                elif (
+                    has_pre_constraints
+                    and len(selected_features) >= _l9_p_dim_min
+                    and dual_disagreement_iou is not None
+                    and float(dual_disagreement_iou) < _l9_iou_max
+                    and _obj_min_norm is not None
+                    and _obj_min_norm > _l9_obj_min_thr
+                    and int(pred_cluster_selected_count) >= _l9_pred_n_sel_min
+                ):
+                    obj_ratio = 1.0
+                    _l9_applied = True
+                    print(
+                        f"[Explorer] DSE-L9 dual→obj-only (dispersion-aware): "
+                        f"iou={float(dual_disagreement_iou):.4f} < {_l9_iou_max:.2f}, "
+                        f"obj_min={_obj_min_norm:.3f} > {_l9_obj_min_thr:.2f}, "
+                        f"pred_n_sel={int(pred_cluster_selected_count)} >= {_l9_pred_n_sel_min}"
+                    )
 
                 pred_ratio = float(np.clip(1.0 - obj_ratio, 0.0, 1.0))
                 dual_obj_ratio_used = float(obj_ratio)
@@ -2458,7 +2505,7 @@ class ExplorerOrchestrator:
                 dual_center_bias_used = float(obj_ratio)
 
                 total = int(max(int(dual_total_starts_target), 2))
-                if _l6_applied or _k_applied:
+                if _l6_applied or _k_applied or _l9_applied:
                     # Case B: pure obj path (clip 우회)
                     n_obj_starts = int(total)
                     n_pred_starts = 0
