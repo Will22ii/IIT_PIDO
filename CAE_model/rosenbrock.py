@@ -44,8 +44,9 @@ def evaluate(x: np.ndarray, w_imp=1*1.0, w_dum=1*0.001) -> dict:
     """
     n_real = 5
     n_dummy = 6
+    expected_dim = n_real + n_dummy
 
-    if len(x) < 5:
+    if len(x) != expected_dim:
         return {
             "objective": None,
             "success": False,

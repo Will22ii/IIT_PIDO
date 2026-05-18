@@ -30,7 +30,7 @@ class ProblemCase:
     known_optimum: Any
     n_samples: int
     objective_sense: str = "min"
-    repeats: int | None = None
+    repeats: int = 1
 
 
 @dataclass(frozen=True)
@@ -165,32 +165,7 @@ _DUAL_SHARED_PARAMS: dict[str, Any] = {
     "obj_diversity_min_dim": 4,
 }
 
-# PRED base (S4/S8): includes pred-obj disjoint safety fallback.
-_PRED_SHARED_PARAMS: dict[str, Any] = {
-    "max_volume_ratio_target": 0.249,
-    "dual_policy_mode": "routed_v2",
-    "pred_cluster_beta": 0.20,
-    "pred_refine_bounds_scale": 1.38,
-    "pred_multistart_det_fraction": 0.22,
-    "pred_cluster_confidence_low": 0.42,
-    "pred_refine_shift_high": 0.30,
-    "pred_obj_disjoint_iou": 0.10,
-    "pred_obj_fallback_conf_high": 0.50,
-    "pred_obj_fallback_iou_low": 0.15,
-    "pred_obj_fallback_center_blend": 0.58,
-    "pred_conf_danger_low": 0.40,
-    "pred_conf_danger_high": 0.60,
-    "pred_conf_danger_iou_max": 0.15,
-    # pred-only overconfidence guard (no obj starts; no dual conversion)
-    "pred_overconf_guard_enabled": True,
-    "pred_overconf_conf_high": 0.58,
-    "pred_overconf_iou_high": 0.24,
-    "pred_overconf_scale_boost": 0.12,
-    "pred_overconf_det_fraction": 0.18,
-    "pred_overconf_scale_cap": 1.55,
-}
-
-# OBJ base (S4/S8)
+# OBJ base (S4_obj — stand-alone safe default)
 _OBJ_SHARED_PARAMS: dict[str, Any] = {
     "max_volume_ratio_target": 0.249,
     "dual_policy_mode": "routed_v2",
@@ -202,55 +177,8 @@ _OBJ_SHARED_PARAMS: dict[str, Any] = {
     "obj_diversity_min_dim": 4,
 }
 
-# Routed dual variants (SR/SA)
-_ROUTED_DUAL_SHARED_PARAMS: dict[str, Any] = {
-    "mode": "dual_refine_ei",
-    "max_volume_ratio_target": 0.249,
-    "dual_policy_mode": "routed_v2",
-    "dual_total_starts": 40,
-    "dual_obj_ratio_min": 0.25,
-    "dual_obj_ratio_max": 0.85,
-    "dual_center_tilt_strength": 0.45,
-    "dual_center_tilt_aniso_gamma": 0.6,
-    "dual_disagree_iou_ref": 0.30,
-    "pred_cluster_beta": 0.20,
-    "pred_refine_bounds_scale": 1.50,
-    "pred_multistart_det_fraction": 0.35,
-    "pred_cluster_max_count": 22,
-    "pred_obj_disjoint_iou": 0.10,
-    "pred_obj_fallback_conf_high": 0.45,
-    "pred_obj_fallback_iou_low": 0.15,
-    "pred_obj_fallback_center_blend": 0.50,
-    "pred_conf_danger_low": 0.40,
-    "pred_conf_danger_high": 0.60,
-    "pred_conf_danger_iou_max": 0.15,
-    "obj_diversity_extra_clusters": 3,
-    "obj_diversity_weight": 0.35,
-    "obj_diversity_min_distance": 0.18,
-    "obj_diversity_close_penalty": 0.80,
-    "obj_diversity_min_dim": 4,
-}
-
-
 EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
-    ExplorerStrategy(
-        "S4_dual",
-        _strategy_overrides(
-            strategy_params={**_DUAL_SHARED_PARAMS, "mode": "dual_refine_ei"},
-            quantile_threshold=0.89,
-            bounds_margin_ratio=0.02,
-            dbscan_eps_quantile=0.88,
-        ),
-    ),
-    ExplorerStrategy(
-        "S4_pred",
-        _strategy_overrides(
-            strategy_params={**_PRED_SHARED_PARAMS, "mode": "pred_refine_ei"},
-            quantile_threshold=0.86,
-            bounds_margin_ratio=0.05,
-            dbscan_eps_quantile=0.92,
-        ),
-    ),
+    # 운영 stand-alone safe default — Modeler 없이도 동작 가능 (obj_bounds 직접 산출)
     ExplorerStrategy(
         "S4_obj",
         _strategy_overrides(
@@ -260,21 +188,13 @@ EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
             dbscan_eps_quantile=0.90,
         ),
     ),
+    # AION 모드 (Modeler task 동반 시) — dim-aware obj/dual blend (#K, L6, L9)
     ExplorerStrategy(
-        "SR_dual",
+        "S4_dual",
         _strategy_overrides(
-            strategy_params={**_ROUTED_DUAL_SHARED_PARAMS},
-            quantile_threshold=0.86,
-            bounds_margin_ratio=0.03,
-            dbscan_eps_quantile=0.88,
-        ),
-    ),
-    ExplorerStrategy(
-        "SA_dual",
-        _strategy_overrides(
-            strategy_params={**_ROUTED_DUAL_SHARED_PARAMS, "dual_acq_split": True},
-            quantile_threshold=0.86,
-            bounds_margin_ratio=0.03,
+            strategy_params={**_DUAL_SHARED_PARAMS, "mode": "dual_refine_ei"},
+            quantile_threshold=0.89,
+            bounds_margin_ratio=0.02,
             dbscan_eps_quantile=0.88,
         ),
     ),
@@ -285,9 +205,7 @@ def _strategy_map() -> dict[str, ExplorerStrategy]:
     return {s.strategy_id: s for s in EXPLORER_STRATEGIES}
 
 
-def _resolve_case_repeats(*, case: ProblemCase, default_repeats: int) -> int:
-    if case.repeats is None:
-        return int(max(int(default_repeats), 1))
+def _resolve_case_repeats(case: ProblemCase) -> int:
     return int(max(int(case.repeats), 1))
 
 
@@ -427,24 +345,16 @@ def _build_pipeline_config(
 
 def _resolve_requested_strategies(raw: str) -> list[ExplorerStrategy]:
     catalog = _strategy_map()
-    legacy_alias = {
-        "S4_ei_focus": "S4_dual",
-        # S8 family removed from this runner. Keep backward-compatible aliases.
-        "S8_dual_gradient_refine": "S4_dual",
-        "S4_pred_focus": "S4_pred",
-        "S8_pred_refine": "S4_pred",
-        "S8_dual": "S4_dual",
-        "S8_pred": "S4_pred",
-        "S8_obj": "S4_obj",
-    }
     wanted = [tok.strip() for tok in str(raw).split(",") if tok.strip()]
     if not wanted:
         wanted = [s.strategy_id for s in EXPLORER_STRATEGIES]
     out: list[ExplorerStrategy] = []
     for sid in wanted:
-        sid = legacy_alias.get(sid, sid)
         if sid not in catalog:
-            raise ValueError(f"Unknown explorer strategy: {sid}")
+            raise ValueError(
+                f"Unknown explorer strategy: {sid}. "
+                f"Valid choices: {sorted(catalog.keys())}"
+            )
         out.append(catalog[sid])
     return out
 
@@ -1059,7 +969,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Batch runner: execute multiple problems with repeated pipeline runs.",
     )
-    parser.add_argument("--repeats", type=int, default=1, help="Number of repeats for full problem suite.")
     parser.add_argument("--base-seed", type=int, default=42, help="Base seed.")
     parser.add_argument(
         "--repeat-seed-step",
@@ -1093,16 +1002,16 @@ def main() -> None:
     parser.add_argument(
         "--explorer-strategies",
         type=str,
-        default="S4_dual",
+        default="S4_obj",
         help=(
             "Comma-separated Explorer strategy IDs. "
-            "운영 단일전략 = S4_dual (p_dim<=3 && has_pre_constraints==False는 obj-equivalent 경로). "
-            "비교/검증용으로 S4_pred,S4_obj,SR_dual,SA_dual 사용 가능."
+            "기본 default = S4_obj (stand-alone safe — Modeler 미동반 시에도 동작). "
+            "AION 모드 (Modeler task 동반) 운영 시 S4_dual 선택 권고 — "
+            "p_dim<=3 비제약은 자동 obj-equivalent path, p_dim>=4는 dual blend (#K, L6, L9)."
         ),
     )
     args = parser.parse_args()
 
-    repeats = max(int(args.repeats), 1)
     base_seed = int(args.base_seed)
     repeat_seed_step = int(args.repeat_seed_step)
     continue_on_error = bool(args.continue_on_error)
@@ -1118,10 +1027,7 @@ def main() -> None:
     use_timestamp = not bool(args.no_timestamp)
     explorer_strategies = _resolve_requested_strategies(args.explorer_strategies)
 
-    total_runs = sum(
-        _resolve_case_repeats(case=case, default_repeats=repeats)
-        for case in PROBLEM_SUITE
-    )
+    total_runs = sum(_resolve_case_repeats(case) for case in PROBLEM_SUITE)
     run_counter = 0
     failures: list[dict[str, Any]] = []
     explorer_failures: list[dict[str, Any]] = []
@@ -1133,7 +1039,7 @@ def main() -> None:
     print(" Batch Pipeline 실행 시작")
     print("===================================")
     print(
-        f"- repeats={repeats} total_runs={total_runs} "
+        f"- total_runs={total_runs} "
         f"tasks(doe/modeler/explorer/optimizer)="
         f"{run_doe}/{run_modeler}/{run_explorer}/{run_optimizer} "
         f"modeler(primary_selection)={use_primary_selection}"
@@ -1144,7 +1050,7 @@ def main() -> None:
         "- problem_repeats="
         + ",".join(
             [
-                f"{case.problem_name}:{_resolve_case_repeats(case=case, default_repeats=repeats)}"
+                f"{case.problem_name}:{_resolve_case_repeats(case)}"
                 for case in PROBLEM_SUITE
             ]
         )
@@ -1153,7 +1059,7 @@ def main() -> None:
         print(f"- explorer_strategies={','.join([s.strategy_id for s in explorer_strategies])}")
 
     for idx, case in enumerate(PROBLEM_SUITE):
-        case_repeats = _resolve_case_repeats(case=case, default_repeats=repeats)
+        case_repeats = _resolve_case_repeats(case)
         for rep in range(case_repeats):
             run_counter += 1
             seed = base_seed + rep * repeat_seed_step + idx
@@ -1493,10 +1399,10 @@ def main() -> None:
     print(" Batch Pipeline 실행 완료")
     print("===================================")
     print(f"- total_runs={total_runs}")
-    print(f"- success_runs={total_runs - len(failures)}")
-    print(f"- failed_runs={len(failures)}")
-    print(f"- explorer_strategy_failed_runs={len(explorer_failures)}")
-    print(f"- optimizer_failed_runs={len(optimizer_failures)}")
+    print(f"- base_pipeline_success_runs={total_runs - len(failures)}")
+    print(f"- base_pipeline_failed_runs={len(failures)}")
+    print(f"- explorer_runtime_failed_runs={len(explorer_failures)}")
+    print(f"- optimizer_runtime_failed_runs={len(optimizer_failures)}")
     print(f"- fi_primary_try_stats_csv={fi_detail_csv}")
     print(f"- fi_primary_problem_summary_csv={fi_summary_csv}")
     print(f"- explorer_try_stats_csv={detail_csv}")

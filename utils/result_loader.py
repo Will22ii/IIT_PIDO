@@ -3,7 +3,6 @@
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Optional
 
 import pandas as pd
@@ -50,75 +49,23 @@ class ResultLoader:
         with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def _iter_run_dirs(self) -> list[str]:
-        result_root = os.path.join(self.project_root, "result")
-        if not os.path.exists(result_root):
-            return []
-        run_dirs = [
-            d for d in os.listdir(result_root)
-            if d.startswith("run_") and os.path.isdir(os.path.join(result_root, d))
-        ]
-        run_dirs.sort(reverse=True)
-        return [os.path.join(result_root, d) for d in run_dirs]
-
-    def _find_latest_metadata_v3(
-        self,
-        task: str,
-        problem_name: Optional[str] = None,
-    ) -> Optional[str]:
-        task_dir_name = self._task_dir_name(task)
-        best_path = None
-        best_time = None
-        best_mtime = None
-
-        for run_root in self._iter_run_dirs():
-            meta_path = os.path.join(run_root, task_dir_name, "metadata.json")
-            if not os.path.exists(meta_path):
-                continue
-            metadata = self._load_metadata(meta_path)
-            if not metadata:
-                continue
-            if problem_name and metadata.get("problem") != problem_name:
-                continue
-            created_at = metadata.get("created_at")
-            created_dt = None
-            if created_at:
-                try:
-                    created_dt = datetime.fromisoformat(created_at)
-                except ValueError:
-                    created_dt = None
-            if created_dt:
-                if best_time is None or created_dt > best_time:
-                    best_time = created_dt
-                    best_path = meta_path
-                    best_mtime = None
-                continue
-            mtime = os.path.getmtime(meta_path)
-            if best_time is None and (best_mtime is None or mtime > best_mtime):
-                best_mtime = mtime
-                best_path = meta_path
-
-        return best_path
-
     def _resolve_metadata_path(
         self,
         task: str,
         problem_name: Optional[str],
         metadata_path: Optional[str],
-    ) -> Optional[str]:
+    ) -> str:
+        _ = task, problem_name
+        if not metadata_path:
+            raise FileNotFoundError("metadata_path is required.")
+
         if metadata_path:
             if os.path.exists(metadata_path):
                 return metadata_path
             candidate = os.path.join(self.project_root, metadata_path)
             if os.path.exists(candidate):
                 return candidate
-            print(f"[ResultLoader] Metadata path not found: {metadata_path}")
-        meta_path = self._find_latest_metadata_v3(task, problem_name)
-        if meta_path:
-            print(
-                f"[ResultLoader] No metadata_path provided; using latest (v3): {meta_path}"
-            )
-        return meta_path
+        raise FileNotFoundError(f"Metadata path not found: {metadata_path}")
 
     def _artifact_lookup(self, metadata: dict, key: str):
         artifacts = metadata.get("artifacts", {})
@@ -170,22 +117,23 @@ class ResultLoader:
         problem_name: Optional[str] = None,
         csv_path: Optional[str] = None,
         metadata_path: Optional[str] = None,
-        allow_latest_fallback: bool = True,
+        allow_latest_fallback: bool = False,
     ) -> TaskResult:
-        if not allow_latest_fallback and not metadata_path:
-            raise FileNotFoundError(
-                "metadata_path is required when latest fallback is disabled."
+        if allow_latest_fallback:
+            raise ValueError(
+                "latest metadata fallback is no longer supported. "
+                "Provide an explicit metadata_path."
             )
 
         meta_path = self._resolve_metadata_path(task, problem_name, metadata_path)
-        if not meta_path:
-            raise FileNotFoundError(
-                f"No metadata found for task='{task}'"
-                + (f", problem='{problem_name}'" if problem_name else "")
-            )
         metadata = self._load_metadata(meta_path)
         if not metadata:
             raise RuntimeError(f"Failed to load metadata: {meta_path}")
+        if problem_name and metadata.get("problem") != problem_name:
+            raise RuntimeError(
+                "Problem mismatch between requested problem and metadata: "
+                f"requested={problem_name}, metadata={metadata.get('problem')}"
+            )
 
         if csv_path is None:
             csv_path = self._find_csv_for_metadata(metadata, meta_path)

@@ -42,13 +42,14 @@ def evaluate(x: np.ndarray, w_imp=3*1.0, w_dum=3*0.001) -> dict:
     Global minimum: f = 3 at (0, -1)
     """
 
-    # 방어 코드: 차원 불일치
-    # if len(x) != 2:
-    #     return {
-    #         "objective": None,
-    #         "constraints": {},
-    #         "success": False,
-    #     }
+    n_real = 2
+    n_dummy = n_real + 1
+    expected_dim = n_real + n_dummy
+    if len(x) != expected_dim:
+        return {
+            "objective": None,
+            "success": False,
+        }
 
     x1, x2, x3, x4, x5 = x
 

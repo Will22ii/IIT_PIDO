@@ -18,7 +18,7 @@ def main():
     #     ),
     #     cae=CAEConfig(
     #         user=CAEUserConfig(problem_name="goldstein_price", seed=42, objective_sense="min"),
-    #         system=CAESystemConfig(use_timestamp=True, allow_latest_fallback=True),
+    #         system=CAESystemConfig(use_timestamp=True, allow_latest_fallback=False),
     #     ),
     #     cae_metadata_path="result/run_<id>/CAE/metadata.json",
     #     doe_csv_path="result/run_<id>/DOE/artifacts/public/doe_results.csv",

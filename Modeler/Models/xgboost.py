@@ -46,7 +46,7 @@ class XGBoostModel(BaseModel):
         self.is_fitted = True
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        return self._estimator.predict(X)
+        return super().predict(X)
 
     @property
     def model(self):

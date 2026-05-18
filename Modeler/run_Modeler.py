@@ -413,41 +413,29 @@ def run_modeler(
 
 
 if __name__ == "__main__":
-    from utils.result_loader import ResultLoader
-
     # Standalone example (custom data path)
     # cfg = ModelerConfig(
     #     user=ModelerUserConfig(model_name="xgb", use_hpo=False, target_col="objective"),
     #     system=ModelerSystemConfig(),
     #     cae=CAEConfig(
     #         user=CAEUserConfig(problem_name="goldstein_price", seed=42, objective_sense="min"),
-    #         system=CAESystemConfig(use_timestamp=True, allow_latest_fallback=True),
+    #         system=CAESystemConfig(use_timestamp=True, allow_latest_fallback=False),
     #     ),
     #     doe_csv_path="result/run_<id>/DOE/artifacts/public/doe_results.csv",
     #     doe_metadata_path="result/run_<id>/DOE/metadata.json",
+    #     cae_metadata_path="result/run_<id>/CAE/metadata.json",
     # )
 
     problem_name = "goldstein_price"
-    loader = ResultLoader()
-    try:
-        doe_result = loader.load_task(
-            task="DOE",
-            problem_name=problem_name,
-            allow_latest_fallback=True,
-        )
-        doe_meta_path = doe_result.metadata_path
-        doe_csv_path = doe_result.csv_path
-        run_root = os.path.dirname(os.path.dirname(doe_meta_path))
-        cae_meta_path = os.path.join(run_root, "CAE", "metadata.json")
-        if not os.path.exists(cae_meta_path):
-            raise FileNotFoundError(f"CAE metadata not found: {cae_meta_path}")
-        print(f"- Standalone DOE metadata auto-detected: {doe_meta_path}")
-    except Exception as exc:
+    doe_meta_path = "result/run_<id>/DOE/metadata.json"
+    doe_csv_path = "result/run_<id>/DOE/artifacts/public/doe_results.csv"
+    cae_meta_path = "result/run_<id>/CAE/metadata.json"
+    if "<id>" in doe_meta_path or "<id>" in cae_meta_path:
         raise RuntimeError(
-            "Standalone Modeler 실행에는 DOE 입력이 필요합니다. "
-            "먼저 pipeline/run_pipeline.py 또는 DOE/run_DOE.py를 실행해 "
-            "DOE 결과를 생성하거나, cfg의 doe_metadata_path/doe_csv_path를 명시하세요."
-        ) from exc
+            "Standalone Modeler 실행에는 명시적인 DOE/CAE metadata 경로가 필요합니다. "
+            "Modeler/run_Modeler.py 하단의 doe_metadata_path, doe_csv_path, "
+            "cae_metadata_path 값을 실제 run 경로로 수정하세요."
+        )
 
     cfg = ModelerConfig(
         user=ModelerUserConfig(model_name="xgb", use_hpo=False, target_col="objective"),

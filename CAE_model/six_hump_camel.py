@@ -42,13 +42,14 @@ def evaluate(x: np.ndarray, w_imp=1.0316*1.0, w_dum=1.0316*0.001) -> dict:
         f = -1.0316 at (±0.0898, ∓0.7126)
     """
 
-    # # 방어 코드
-    # if len(x) != 2:
-    #     return {
-    #         "objective": None,
-    #         "constraints": {},
-    #         "success": False,
-    #     }
+    n_real = 2
+    n_dummy = n_real + 1
+    expected_dim = n_real + n_dummy
+    if len(x) != expected_dim:
+        return {
+            "objective": None,
+            "success": False,
+        }
 
     x1, x2, x3, x4, x5 = x
 

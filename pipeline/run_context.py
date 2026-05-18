@@ -45,8 +45,8 @@ def create_run_context(*, project_root: str, user_config_snapshot: dict) -> RunC
         )
 
     user_config_path = os.path.join(run_root, "user_config_snapshot.json")
-    with open(user_config_path, "w") as f:
-        json.dump(user_config_snapshot, f, indent=2)
+    with open(user_config_path, "w", encoding="utf-8") as f:
+        json.dump(user_config_snapshot, f, indent=2, ensure_ascii=False)
 
     index_path = os.path.join(run_root, "index.json")
     index_payload = {
@@ -54,8 +54,8 @@ def create_run_context(*, project_root: str, user_config_snapshot: dict) -> RunC
         "run_id": run_id,
         "tasks": {},
     }
-    with open(index_path, "w") as f:
-        json.dump(index_payload, f, indent=2)
+    with open(index_path, "w", encoding="utf-8") as f:
+        json.dump(index_payload, f, indent=2, ensure_ascii=False)
 
     return RunContext(
         run_id=run_id,
@@ -82,7 +82,7 @@ def _to_abs(context: RunContext, path: str | None) -> str | None:
 
 
 def update_run_index(context: RunContext, task: str, metadata_path: str) -> None:
-    with open(context.index_path, "r") as f:
+    with open(context.index_path, "r", encoding="utf-8") as f:
         payload = json.load(f)
     task_map = payload.get("tasks", {})
     if not isinstance(task_map, dict):
@@ -90,12 +90,12 @@ def update_run_index(context: RunContext, task: str, metadata_path: str) -> None
     task_map[task] = _to_run_relative(context, metadata_path)
     payload["tasks"] = task_map
     payload["schema_version"] = "3.0"
-    with open(context.index_path, "w") as f:
-        json.dump(payload, f, indent=2)
+    with open(context.index_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
 def get_task_metadata_path(context: RunContext, task: str) -> str | None:
-    with open(context.index_path, "r") as f:
+    with open(context.index_path, "r", encoding="utf-8") as f:
         payload = json.load(f)
     task_map = payload.get("tasks", {})
     if not isinstance(task_map, dict):
