@@ -1,0 +1,217 @@
+# Pipeline I/O Policy
+
+이 문서는 현재 파이프라인의 입력, 출력, metadata, debug 산출물 정책을 정의한다.
+
+## 핵심 원칙
+
+`CAE_tool_interface`는 한 run의 문제 정의 기준이다. 문제 이름, 설계 변수, bounds, objective 방향, constraint 정의는 CAE context에서 온다.
+
+각 task의 CSV는 데이터 전달용이지 schema 기준이 아니다. downstream task는 CSV column을 그대로 믿지 않고, CAE 문제 정의 또는 명시적인 selected feature list와 대조해야 한다.
+
+Explorer는 임의 CSV의 numeric column을 보고 active feature를 추론하지 않는다. active feature는 아래 순서로 결정한다.
+
+1. 명시적으로 전달되었거나 같은 run의 Modeler가 만든 `selected_features.csv`
+2. selected feature CSV가 없을 때 model bundle의 `feature_cols`
+3. Modeler layer가 없을 때 CAE design features 전체
+
+Explorer는 runtime 결정을 위해 DOE metadata나 Modeler metadata를 읽지 않는다. Explorer는 CAE context와 input CSV만 있으면 동작해야 하며, model과 selected feature는 optional layer다.
+
+Debug 산출물은 단순하게 `debug_level = "on" | "off"`로 제어한다. 기본값은 `on`이다. batch 실행에서는 `--no-debug`로 debug 산출물을 끈다.
+
+## Artifact Layer
+
+모든 task는 같은 artifact 구조를 사용한다.
+
+```text
+<run_root>/<Task>/artifacts/public/
+<run_root>/<Task>/artifacts/meta/
+<run_root>/<Task>/artifacts/debug/
+```
+
+`public`은 downstream task가 읽거나 사용자가 직접 볼 수 있는 간단한 산출물이다. 다른 task가 의존해도 되는 파일은 public에 둔다.
+
+`meta`는 구조화된 요약, analysis JSON, 재현성 정보를 담는다. meta는 debug dump가 아니므로 debug off에서도 기본적으로 유지한다.
+
+`debug`는 내부 trace, raw diagnostic table, plot, full history처럼 검증과 분석용으로 무겁거나 자세한 산출물을 둔다. `debug_level == "on"`일 때만 파일을 쓰고 metadata에 등록한다.
+
+공통 `ResultSaver` 구조 때문에 debug off에서도 빈 `artifacts/debug/` 폴더가 생길 수 있다. 빈 폴더는 허용하지만, debug 파일과 debug metadata entry는 없어야 한다.
+
+## Run Context 정책
+
+pipeline run은 항상 `CAE_tool_interface` 실행과 CAE task metadata 저장으로 시작한다.
+
+같은 run의 downstream task는 CAE context를 문제 정의 source of truth로 읽는다. 특정 task를 따로 이어서 실행할 때도 해당 run context에 CAE metadata가 이미 있어야 한다. CAE context가 없으면 fast-fail한다.
+
+문제 정의, task list, input CSV, 중요한 task 설정이 바뀌면 기존 run을 조용히 재사용하지 않고 새 run을 만드는 것을 원칙으로 한다.
+
+Backend가 기존 run을 이어서 실행하려면 `PipelineConfig.run_root`를 넘긴다. `run_root`가 있으면 `run_pipeline()`은 CAE를 다시 실행하지 않고 기존 run context의 CAE metadata를 검증한 뒤 선택된 task만 실행한다. `run_root`가 없으면 새 run context를 만들고 CAE task를 먼저 저장한다.
+
+현재 검증 기준은 problem name, objective sense, 명시된 CAE variable override의 bounds다. 파일 변경, task 설정 변경, 데이터 변경을 새 run으로 강제할지 여부는 향후 project/run 정책에서 더 고도화한다.
+
+기존 run artifact 자동 재사용은 `PipelineConfig.reuse`로 제어한다.
+
+```text
+PipelineReusePolicy.use_existing_doe_csv
+PipelineReusePolicy.use_existing_modeler_artifacts
+```
+
+기본값은 둘 다 `True`다. Backend가 기존 `run_root`는 유지하되 기존 DOE CSV나 Modeler artifact를 의도적으로 쓰고 싶지 않으면 해당 값을 `False`로 넘긴다.
+
+## 실행 진입점 정책
+
+공식 실행 진입점은 pipeline layer에 둔다.
+
+```text
+pipeline/run_pipeline.py   # 단일 문제, task 선택형 실행
+pipeline/run_AION.py       # 단일 문제, full preset 실행
+pipeline/run_pipelines.py  # benchmark/batch 분석용
+```
+
+Task별 `run_*.py` 파일은 직접 실행용이 아니라 내부 runner module이다.
+
+```text
+CAE_tool_interface/run_CAE.py
+DOE/run_DOE.py
+Modeler/run_Modeler.py
+Explorer/run_Explorer.py
+Optimizer/run_Optimizer.py
+```
+
+사용자 또는 backend는 task별 runner를 직접 실행하지 않고 `run_pipeline()` 또는 preset runner를 통해 조합 실행한다.
+
+## CSV 정책
+
+외부 CSV는 허용한다. 단, 현재 CAE 문제 정의와 맞는지 검증해야 한다.
+
+Explorer에 필요한 column:
+
+- `objective`
+- active feature column 전체
+
+Explorer에서 optional인 column:
+
+- `success`
+- `feasible`
+
+`success` 또는 `feasible`이 없으면 기본적으로 row가 usable하다고 본다. column이 있으면 task logic에서 filtering에 사용할 수 있다.
+
+CSV의 constraint column은 schema 입력으로 쓰지 않는다. constraint 정의는 CSV가 아니라 `CAE_tool_interface`에서 온다.
+
+## Downstream 입력 우선순위
+
+`run_pipeline()`은 downstream data/model layer를 아래 우선순위로 연결한다.
+
+### DOE/Input CSV
+
+1. Task config에 명시된 explicit input CSV
+   - `ModelerConfig.doe_csv_path`
+   - `ExplorerConfig.doe_csv_path`
+   - `OptimizerConfig.user.doe_csv_path`
+   - `OptimizerConfig.doe_csv_path`
+2. 이번 `run_pipeline()` 호출에서 새로 실행한 DOE public CSV
+3. 기존 `run_root` 안의 DOE public CSV
+   - `DOE/artifacts/public/doe_results.csv`
+
+Explicit CSV가 있으면 가장 우선한다. 따라서 `run_doe=True`로 DOE를 새로 실행하더라도 downstream에는 explicit CSV가 기본 입력으로 전달된다. 새 DOE 결과를 downstream에 쓰고 싶으면 explicit CSV를 넘기지 않는다.
+
+여러 task에 서로 다른 explicit CSV가 동시에 들어오면 현재 정책에서는 fast-fail한다. Task별로 다른 CSV를 의도적으로 쓰는 정책은 나중에 별도 옵션으로 확장한다.
+
+`PipelineReusePolicy.use_existing_doe_csv=False`이면 3번 fallback은 사용하지 않는다.
+
+### Modeler layer
+
+Explorer의 model/selected feature layer는 아래 우선순위로 연결한다.
+
+1. Explorer config에 명시된 explicit model/selected feature path
+   - `ExplorerConfig.model_pkl_path`
+   - `ExplorerConfig.selected_features_csv_path`
+2. 이번 `run_pipeline()` 호출에서 새로 실행한 Modeler public artifacts
+   - `Modeler/artifacts/public/modeler_selected_models.pkl`
+   - `Modeler/artifacts/public/selected_features.csv`
+3. 기존 `run_root` 안의 Modeler public artifacts
+
+Modeler layer가 없으면 Explorer는 CAE design features 전체와 input CSV의 objective data로 동작한다. 이때 prediction model 기반 candidate generation과 prediction cluster는 비활성화된다.
+
+`PipelineReusePolicy.use_existing_modeler_artifacts=False`이면 3번 fallback은 사용하지 않는다.
+
+## AION preset 정책
+
+`pipeline/run_AION.py`는 task 선택권이 없는 full preset runner다. Backend/Python code에서 `run_aion(config=AIONConfig(...))` 형태로 호출한다.
+
+AION preset은 아래 task를 모두 실행한다.
+
+```text
+CAE -> DOE(additional on) -> Modeler(primary selection only) -> Explorer(S4_dual) -> Optimizer
+```
+
+AION은 실험/운영에서 리소스를 더 사용하더라도 최선의 결과를 노리는 기본 조합이다. `additional DOE`와 `Modeler`는 필수이며, Explorer strategy는 `S4_dual`로 고정한다. Secondary selection은 사용하지 않는다. 세부 preset은 `AIONConfig`와 `build_aion_pipeline_config()`에서 관리한다.
+
+일반 `run_pipeline()`의 기본 task config 정책은 AION과 다르다.
+
+```text
+DOE additional: optional, default off
+Modeler: primary selection on, secondary selection off
+Explorer: S4_obj default
+Optimizer: 연결은 유지하되 향후 고도화 대상
+```
+
+## Feature 정책
+
+CAE design features는 가능한 전체 feature universe다.
+
+Modeler는 `selected_features.csv`를 통해 더 작은 active feature set을 제공할 수 있다. 이 selected feature list는 CAE 문제 정의를 바꾸는 것이 아니라, downstream feature-reduced operation을 위한 override다.
+
+Selected feature가 CAE design feature에 없는 이름을 포함하면 fast-fail한다.
+
+Input CSV에 active feature column이 하나라도 없으면 fast-fail한다.
+
+Model bundle을 사용하는 경우, bundle의 `feature_cols`는 active selected feature list와 정확히 일치해야 한다.
+
+## Debug 정책
+
+공식 값:
+
+```text
+debug_level = "on"
+debug_level = "off"
+```
+
+기본값:
+
+```text
+debug_level = "on"
+```
+
+Legacy 값:
+
+```text
+debug_level = "full"
+```
+
+`full`은 기존 config 호환을 위해 `on` alias로만 허용한다. 새 config와 문서는 `on`을 사용한다.
+
+Batch runner:
+
+```text
+python -m pipeline.run_pipelines             # debug on
+python -m pipeline.run_pipelines --no-debug  # debug off
+```
+
+Debug off일 때:
+
+- DOE internal CSV를 쓰지 않는다.
+- Modeler raw FI debug table과 FI plot을 유지하지 않는다.
+- Explorer plot을 쓰지 않는다.
+- Optimizer full history CSV를 쓰지 않는다.
+
+## Task별 문서
+
+Task별 상세 정책은 아래 문서에 둔다.
+
+```text
+docs/tasks/cae_tool_interface.md
+docs/tasks/doe.md
+docs/tasks/modeler.md
+docs/tasks/explorer.md
+docs/tasks/optimizer.md
+```

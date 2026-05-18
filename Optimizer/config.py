@@ -84,8 +84,8 @@ class OptimizerSystemConfig:
     no_doe_objective_proxy: str = "center_distance"
     # 중복 판정 반올림 자릿수
     dedup_decimals: int = 12
-    # 로그 레벨: off | full
-    debug_level: str = "off"
+    # 디버그 산출물 생성 여부: off | on
+    debug_level: str = "on"
 
 
 @dataclass

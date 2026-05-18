@@ -1,12 +1,10 @@
 import json
 import os
 
-from CAE_tool_interface.config import CAEConfig, CAEUserConfig, CAESystemConfig
 from CAE_tool_interface.executor.configurator import select_cae_by_name
 from DOE.config import (
     DOEConfig,
     DOESystemConfig,
-    DOEUserConfig,
     build_additional_cfg_from_system,
 )
 from DOE.executor.doe_orchestrator import run_doe_orchestrator
@@ -20,9 +18,11 @@ from DOE.doe_algorithm.registry import get_doe_algorithm
 
 
 def _normalize_debug_level(value: str | None) -> str:
-    level = str(value or "off").strip().lower()
-    if level not in {"off", "full"}:
-        raise ValueError("DOE debug_level must be one of: off, full")
+    level = str(value or "on").strip().lower()
+    if level == "full":
+        level = "on"
+    if level not in {"off", "on"}:
+        raise ValueError("DOE debug_level must be one of: off, on")
     return level
 
 
@@ -291,16 +291,7 @@ def run_doe(*, config: DOEConfig, run_context: RunContext | None = None) -> dict
 
 
 if __name__ == "__main__":
-    # Standalone 실행은 CAE metadata 경로가 필요합니다.
-    # 예: "result/run_<id>/CAE/metadata.json"
-    cfg = DOEConfig(
-        cae=CAEConfig(
-            user=CAEUserConfig(problem_name="goldstein_price", seed=42),
-            system=CAESystemConfig(use_timestamp=True),
-        ),
-        cae_user=None,
-        user=DOEUserConfig(algo_name="lhs", use_additional=False),
-        system=DOESystemConfig(n_samples=100),
-        cae_metadata_path=None,
+    raise SystemExit(
+        "DOE/run_DOE.py is an internal task runner. "
+        "Use pipeline/run_pipeline.py as the execution entrypoint."
     )
-    run_doe(config=cfg)

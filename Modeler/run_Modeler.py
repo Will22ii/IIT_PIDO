@@ -34,15 +34,16 @@ from Modeler.feature_selection import (
     run_secondary_selection,
 )
 from utils.result_saver import ResultSaver
-from Modeler.config import ModelerConfig, ModelerSystemConfig, ModelerUserConfig, build_feature_selection_config
-from CAE_tool_interface.config import CAEConfig, CAEUserConfig, CAESystemConfig
+from Modeler.config import ModelerConfig, build_feature_selection_config
 from pipeline.run_context import RunContext
 
 
 def _normalize_debug_level(value: str | None) -> str:
-    level = str(value or "off").strip().lower()
-    if level not in {"off", "full"}:
-        raise ValueError("Modeler debug_level must be one of: off, full")
+    level = str(value or "on").strip().lower()
+    if level == "full":
+        level = "on"
+    if level not in {"off", "on"}:
+        raise ValueError("Modeler debug_level must be one of: off, on")
     return level
 
 
@@ -93,7 +94,7 @@ def run_modeler(
     perm_sample_size = config.system.perm_sample_size
     perm_repeats = config.system.perm_repeats
     debug_level = _normalize_debug_level(config.system.debug_level)
-    keep_debug = debug_level == "full"
+    keep_debug = debug_level == "on"
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     if model_name != "xgb" and use_hpo:
@@ -361,6 +362,8 @@ def run_modeler(
     feas_model_path = artifact_result.feas_model_path
     feas_model_kind = artifact_result.feas_model_kind
     feas_model_stats = artifact_result.feas_model_stats
+    print(f"[Modeler] Selected features ({len(selected_features)}): {', '.join(map(str, selected_features))}")
+    print(f"[Modeler] Selected features CSV: {selected_path}")
 
     save_result = save_modeler_outputs(
         saver=saver,
@@ -410,43 +413,16 @@ def run_modeler(
     print("===================================")
     print(" MODELER 실행 완료")
     print("===================================")
+    return {
+        "metadata_path": save_result.metadata_path,
+        "model_path": model_path,
+        "selected_features_csv_path": selected_path,
+        "feas_model_path": feas_model_path,
+    }
 
 
 if __name__ == "__main__":
-    # Standalone example (custom data path)
-    # cfg = ModelerConfig(
-    #     user=ModelerUserConfig(model_name="xgb", use_hpo=False, target_col="objective"),
-    #     system=ModelerSystemConfig(),
-    #     cae=CAEConfig(
-    #         user=CAEUserConfig(problem_name="goldstein_price", seed=42, objective_sense="min"),
-    #         system=CAESystemConfig(use_timestamp=True, allow_latest_fallback=False),
-    #     ),
-    #     doe_csv_path="result/run_<id>/DOE/artifacts/public/doe_results.csv",
-    #     doe_metadata_path="result/run_<id>/DOE/metadata.json",
-    #     cae_metadata_path="result/run_<id>/CAE/metadata.json",
-    # )
-
-    problem_name = "goldstein_price"
-    doe_meta_path = "result/run_<id>/DOE/metadata.json"
-    doe_csv_path = "result/run_<id>/DOE/artifacts/public/doe_results.csv"
-    cae_meta_path = "result/run_<id>/CAE/metadata.json"
-    if "<id>" in doe_meta_path or "<id>" in cae_meta_path:
-        raise RuntimeError(
-            "Standalone Modeler 실행에는 명시적인 DOE/CAE metadata 경로가 필요합니다. "
-            "Modeler/run_Modeler.py 하단의 doe_metadata_path, doe_csv_path, "
-            "cae_metadata_path 값을 실제 run 경로로 수정하세요."
-        )
-
-    cfg = ModelerConfig(
-        user=ModelerUserConfig(model_name="xgb", use_hpo=False, target_col="objective"),
-        system=ModelerSystemConfig(),
-        cae=CAEConfig(
-            user=CAEUserConfig(problem_name=problem_name, seed=42, objective_sense="min"),
-            system=CAESystemConfig(use_timestamp=True, allow_latest_fallback=False),
-        ),
-        cae_user=None,
-        doe_csv_path=doe_csv_path,
-        doe_metadata_path=doe_meta_path,
-        cae_metadata_path=cae_meta_path,
+    raise SystemExit(
+        "Modeler/run_Modeler.py is an internal task runner. "
+        "Use pipeline/run_pipeline.py as the execution entrypoint."
     )
-    run_modeler(config=cfg)

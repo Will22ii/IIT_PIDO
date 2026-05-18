@@ -1,6 +1,6 @@
 # run_CAE.py
 
-from CAE_tool_interface.config import CAEConfig, CAEUserConfig
+from CAE_tool_interface.config import CAEConfig
 from CAE_tool_interface.executor.configurator import (
     configure_objective_sense_from_config,
     configure_variables_from_spec,
@@ -40,8 +40,10 @@ def run_cae(*, config: CAEConfig | dict) -> dict:
 
 
 def main():
-    cfg = CAEConfig(user=CAEUserConfig(problem_name="goldstein_price"))
-    run_cae(config=cfg)
+    raise SystemExit(
+        "CAE_tool_interface/run_CAE.py is an internal task runner. "
+        "Use pipeline/run_pipeline.py as the execution entrypoint."
+    )
 
 
 if __name__ == "__main__":

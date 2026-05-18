@@ -11,7 +11,6 @@ import pandas as pd
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.gaussian_process import GaussianProcessRegressor
 
-from utils.result_loader import ResultLoader
 from utils.result_saver import ResultSaver
 from utils.bool_mask import to_bool_mask
 from DOE.doe_algorithm.lhs import latin_hypercube_sampling
@@ -243,9 +242,11 @@ def _prepare_post_feasibility_adapter_strict(
 
 
 def _normalize_debug_level(value: str | None) -> str:
-    level = str(value or "off").strip().lower()
-    if level not in {"off", "full"}:
-        raise ValueError("Explorer debug_level must be one of: off, full")
+    level = str(value or "on").strip().lower()
+    if level == "full":
+        level = "on"
+    if level not in {"off", "on"}:
+        raise ValueError("Explorer debug_level must be one of: off, on")
     return level
 
 
@@ -1338,7 +1339,6 @@ class ExplorerOrchestrator:
         if self.config.cae is None:
             raise RuntimeError("ExplorerConfig.cae is required.")
 
-        loader = ResultLoader()
         cae_meta_path = _resolve_existing_cae_metadata_path(
             config=self.config,
             run_context=self.run_context,
@@ -1359,162 +1359,107 @@ class ExplorerOrchestrator:
             )
 
         doe_meta = {}
-        modeler_meta = {}
-        doe_df = None
-        modeler_df = None
-        doe_problem_name = None
-        modeler_problem_name = None
+        doe_problem_name = cae_problem_name
         doe_csv_path = None
         modeler_pkl_path = None
         modeler_feas_pkl_path = None
+        selected_features_csv_path = self.config.selected_features_csv_path
         modeler_task_dir = None
 
-        if self.config.doe_metadata_path:
-            print(f"[Explorer] DOE metadata path provided: {self.config.doe_metadata_path}")
-            doe_result = loader.load_task(
-                task="DOE",
-                metadata_path=self.config.doe_metadata_path,
-                csv_path=self.config.doe_csv_path,
-                allow_latest_fallback=False,
-            )
-            doe_df = doe_result.df
-            doe_meta = doe_result.metadata or {}
-            doe_problem_name = doe_result.problem_name
-            doe_csv_path = doe_result.csv_path
-            if doe_problem_name and str(doe_problem_name).strip() != str(cae_problem_name).strip():
-                raise RuntimeError(
-                    "Problem mismatch between DOE metadata and CAE metadata: "
-                    f"doe={doe_problem_name}, cae={cae_problem_name}"
-                )
-        elif self.config.doe_csv_path:
-            if not os.path.exists(self.config.doe_csv_path):
-                raise FileNotFoundError(f"DOE CSV not found: {self.config.doe_csv_path}")
+        if self.config.doe_csv_path:
             doe_csv_path = self.config.doe_csv_path
-            doe_df = pd.read_csv(doe_csv_path)
-            doe_problem_name = (
-                self.config.cae.user.problem_name if self.config.cae else None
-            )
         elif self.run_context:
-            doe_meta_path = get_task_metadata_path(self.run_context, "DOE")
-            if not doe_meta_path:
-                raise RuntimeError("DOE metadata not found in run context.")
-            doe_result = loader.load_task(
-                task="DOE",
-                metadata_path=doe_meta_path,
-                allow_latest_fallback=False,
+            candidate = os.path.join(
+                self.run_context.run_root,
+                "DOE",
+                "artifacts",
+                "public",
+                "doe_results.csv",
             )
-            doe_df = doe_result.df
-            doe_meta = doe_result.metadata or {}
-            doe_problem_name = doe_result.problem_name
-            doe_csv_path = doe_result.csv_path
-            if doe_problem_name and str(doe_problem_name).strip() != str(cae_problem_name).strip():
-                raise RuntimeError(
-                    "Problem mismatch between DOE metadata and CAE metadata: "
-                    f"doe={doe_problem_name}, cae={cae_problem_name}"
-                )
-        else:
-            raise RuntimeError(
-                "Explorer requires explicit DOE/Modeler inputs. "
-                "Provide paths or run via pipeline run_context."
-            )
+            if os.path.exists(candidate):
+                doe_csv_path = candidate
 
-        if self.config.modeler_metadata_path:
-            print(f"[Explorer] Modeler metadata path provided: {self.config.modeler_metadata_path}")
-            modeler_task_dir = os.path.dirname(self.config.modeler_metadata_path)
-            modeler_result = loader.load_task(
-                task="Modeler",
-                metadata_path=self.config.modeler_metadata_path,
-                allow_latest_fallback=False,
+        if not doe_csv_path:
+            raise RuntimeError(
+                "Explorer requires an input CSV. Provide ExplorerConfig.doe_csv_path "
+                "or run DOE earlier in the same run_context."
             )
-            modeler_df = modeler_result.df
-            modeler_meta = modeler_result.metadata or {}
-            modeler_problem_name = modeler_result.problem_name
-            modeler_pkl_path = self.config.model_pkl_path or modeler_result.pkl_path
-            if not modeler_pkl_path:
-                model_ref = _artifact_ref(modeler_meta, "model_path")
-                if model_ref:
-                    modeler_pkl_path = (
-                        model_ref if os.path.isabs(model_ref) else os.path.join(modeler_task_dir, model_ref)
-                    )
-            feas_model_ref = _artifact_ref(modeler_meta, "feas_model_path")
-            if feas_model_ref:
-                modeler_feas_pkl_path = (
-                    feas_model_ref
-                    if os.path.isabs(feas_model_ref)
-                    else os.path.join(modeler_task_dir, feas_model_ref)
-                )
-        elif self.config.model_pkl_path:
-            if not os.path.exists(self.config.model_pkl_path):
-                raise FileNotFoundError(f"Model PKL not found: {self.config.model_pkl_path}")
+        if not os.path.exists(doe_csv_path):
+            raise FileNotFoundError(f"Explorer input CSV not found: {doe_csv_path}")
+        doe_df = pd.read_csv(doe_csv_path)
+        print(f"[Explorer] Input CSV: {doe_csv_path}")
+        if "objective" not in doe_df.columns:
+            raise RuntimeError("Explorer input CSV must include an 'objective' column.")
+
+        if self.config.model_pkl_path:
             modeler_pkl_path = self.config.model_pkl_path
-            modeler_meta = {}
         elif self.run_context:
-            modeler_meta_path = get_task_metadata_path(self.run_context, "Modeler")
-            if not modeler_meta_path:
-                raise RuntimeError("Modeler metadata not found in run context.")
-            modeler_task_dir = os.path.dirname(modeler_meta_path)
-            modeler_result = loader.load_task(
-                task="Modeler",
-                metadata_path=modeler_meta_path,
-                allow_latest_fallback=False,
+            modeler_task_dir = os.path.join(self.run_context.run_root, "Modeler")
+            candidate = os.path.join(
+                modeler_task_dir,
+                "artifacts",
+                "public",
+                "modeler_selected_models.pkl",
             )
-            modeler_df = modeler_result.df
-            modeler_meta = modeler_result.metadata or {}
-            modeler_problem_name = modeler_result.problem_name
-            modeler_pkl_path = modeler_result.pkl_path
-            feas_model_ref = _artifact_ref(modeler_meta, "feas_model_path")
-            if feas_model_ref:
-                modeler_feas_pkl_path = (
-                    feas_model_ref
-                    if os.path.isabs(feas_model_ref)
-                    else os.path.join(modeler_task_dir, feas_model_ref)
-                )
+            if os.path.exists(candidate):
+                modeler_pkl_path = candidate
+        if modeler_pkl_path and not os.path.exists(modeler_pkl_path):
+            raise FileNotFoundError(f"Model bundle not found: {modeler_pkl_path}")
+
+        if not selected_features_csv_path and self.run_context:
+            if modeler_task_dir is None:
+                modeler_task_dir = os.path.join(self.run_context.run_root, "Modeler")
+            candidate = os.path.join(
+                modeler_task_dir,
+                "artifacts",
+                "public",
+                "selected_features.csv",
+            )
+            if os.path.exists(candidate):
+                selected_features_csv_path = candidate
+
+        if self.run_context:
+            if modeler_task_dir is None:
+                modeler_task_dir = os.path.join(self.run_context.run_root, "Modeler")
+            candidate = os.path.join(
+                modeler_task_dir,
+                "artifacts",
+                "public",
+                "modeler_feas_models.pkl",
+            )
+            if os.path.exists(candidate):
+                modeler_feas_pkl_path = candidate
+
+        models: list = []
+        feature_cols: list[str] = []
+        if modeler_pkl_path:
+            models, feature_cols = _load_models(modeler_pkl_path)
+            print(
+                f"[Explorer] Model bundle loaded: {modeler_pkl_path} "
+                f"(models={len(models)}, features={len(feature_cols)})"
+            )
         else:
-            raise RuntimeError(
-                "Explorer requires explicit DOE/Modeler inputs. "
-                "Provide paths or run via pipeline run_context."
-            )
+            print("[Explorer] Model bundle not provided; using objective-data layer only.")
 
-        if modeler_feas_pkl_path and not os.path.isabs(modeler_feas_pkl_path):
-            base_dir = modeler_task_dir or (
-                os.path.dirname(self.config.modeler_metadata_path)
-                if self.config.modeler_metadata_path
-                else None
-            )
-            if base_dir:
-                modeler_feas_pkl_path = os.path.join(base_dir, modeler_feas_pkl_path)
-
-        if not doe_problem_name:
-            doe_problem_name = cae_problem_name
-        if not doe_problem_name:
-            raise RuntimeError("Problem name not found from DOE/CAE metadata.")
-        if str(doe_problem_name).strip() != str(cae_problem_name).strip():
-            raise RuntimeError(
-                "Problem mismatch between DOE source and CAE metadata: "
-                f"doe={doe_problem_name}, cae={cae_problem_name}"
-            )
-        if modeler_problem_name and str(modeler_problem_name).strip() != str(cae_problem_name).strip():
-            raise RuntimeError(
-                "Problem mismatch between Modeler metadata and CAE metadata: "
-                f"modeler={modeler_problem_name}, cae={cae_problem_name}"
-            )
-
-        if not modeler_pkl_path:
-            raise RuntimeError("Modeler PKL not found. Check modeler metadata.")
-
-        models, feature_cols = _load_models(modeler_pkl_path)
-
+        design_features = [
+            str(v.get("name"))
+            for v in cae_variables
+            if isinstance(v, dict) and str(v.get("name", "")).strip()
+        ]
         selected_features = resolve_selected_features(
-            feature_cols=feature_cols,
+            feature_cols=feature_cols if feature_cols else None,
+            design_features=design_features,
+            selected_features_csv_path=selected_features_csv_path,
             doe_df=doe_df,
         )
+        if feature_cols and [str(f) for f in feature_cols] != [str(f) for f in selected_features]:
+            raise RuntimeError(
+                "Model bundle feature_cols must match active selected features exactly. "
+                f"model_bundle={feature_cols}, active_features={selected_features}"
+            )
 
         # FI scores path resolve (fi_aware 모드용)
-        fi_scores_path = self.config.fi_scores_path
-        if not fi_scores_path and modeler_task_dir:
-            _candidate = os.path.join(modeler_task_dir, "artifacts", "public", "selected_features.csv")
-            if os.path.exists(_candidate):
-                fi_scores_path = _candidate
+        fi_scores_path = self.config.fi_scores_path or selected_features_csv_path
 
         raw_constraint_defs = (
             (doe_meta or {}).get("constraint_defs")
@@ -1589,9 +1534,9 @@ class ExplorerOrchestrator:
                     f"feature_dim={len(selected_features)}"
                 )
             else:
-                raise RuntimeError(
-                    "FAILED_POST_FEAS_MODEL_PREFLIGHT: post constraints exist but "
-                    "feasibility model not found."
+                print(
+                    "[Explorer] post constraints exist, but no feasibility model was provided; "
+                    "post-constraint penalty layer disabled."
                 )
 
         variables = None
@@ -1620,6 +1565,7 @@ class ExplorerOrchestrator:
         rng_seed = int(cae_seed)
 
         rng = np.random.default_rng(rng_seed)
+        has_model_layer = bool(models)
         has_post_penalty = bool(has_post_constraints and post_feas_adapter is not None)
 
         def _meta_get(key: str, default=None):
@@ -1691,7 +1637,7 @@ class ExplorerOrchestrator:
         offset = spans * 0.0
 
         X_boundary_raw = np.empty((0, len(bounds)), dtype=float)
-        if n_boundary > 0:
+        if has_model_layer and n_boundary > 0:
             corner_ratio = max(0.0, min(1.0, float(self.config.system.boundary_corner_ratio)))
             n_corner = int(round(n_boundary * corner_ratio))
             n_partial = n_boundary - n_corner
@@ -1735,7 +1681,7 @@ class ExplorerOrchestrator:
             bounds=bounds,
             rng=rng,
             n_divisions=max(n_lhc, 1),
-        ) if n_lhc > 0 else np.empty((0, len(bounds)), dtype=float)
+        ) if has_model_layer and n_lhc > 0 else np.empty((0, len(bounds)), dtype=float)
 
         pre_generated = int(X_boundary_raw.shape[0] + X_lhc_raw.shape[0])
         pre_kept = pre_generated
@@ -1760,12 +1706,18 @@ class ExplorerOrchestrator:
             X_lhc = X_lhc_raw
 
         X = np.vstack([X_boundary, X_lhc]) if X_boundary.size or X_lhc.size else X_lhc
-        if X.shape[0] == 0:
+        if has_model_layer and X.shape[0] == 0:
             raise RuntimeError("Explorer generated zero candidates after pre-constraint filtering.")
 
-        y_mean, y_std = _predict_ensemble(models, X)
-        score = y_mean.copy()
-        p_feasible_pred = np.ones((X.shape[0],), dtype=float)
+        if has_model_layer:
+            y_mean, y_std = _predict_ensemble(models, X)
+            score = y_mean.copy()
+            p_feasible_pred = np.ones((X.shape[0],), dtype=float)
+        else:
+            y_mean = np.array([], dtype=float)
+            y_std = np.array([], dtype=float)
+            score = np.array([], dtype=float)
+            p_feasible_pred = np.array([], dtype=float)
         post_lambda_raw = _meta_get("post_lambda", None)
         if post_lambda_raw is None:
             post_lambda = float(self.config.system.post_lambda_default)
@@ -1777,7 +1729,7 @@ class ExplorerOrchestrator:
             except Exception:
                 post_lambda = float(self.config.system.post_lambda_default)
                 post_lambda_source = "default_invalid_metadata"
-        if has_post_penalty:
+        if has_model_layer and has_post_penalty:
             p_feasible_pred = _predict_post_feasible_prob_batch(
                 adapter=post_feas_adapter,
                 X=X,
@@ -1798,10 +1750,12 @@ class ExplorerOrchestrator:
             str(cae_objective_sense)
         )
         quantile_threshold = float(self.config.system.quantile_threshold)
-        if objective_sense == "min":
+        if has_model_layer and score.size > 0 and objective_sense == "min":
             q_mask = score <= float(np.quantile(score, 1.0 - quantile_threshold))
-        else:
+        elif has_model_layer and score.size > 0:
             q_mask = score >= float(np.quantile(score, quantile_threshold))
+        else:
+            q_mask = np.zeros((0,), dtype=bool)
         n_q_samples = int(np.sum(q_mask))
 
         project_root = os.path.dirname(
@@ -1846,7 +1800,8 @@ class ExplorerOrchestrator:
             else False
         )
         debug_level = _normalize_debug_level(self.config.system.debug_level)
-        save_plot = bool(self.config.system.save_plot)
+        debug_enabled = debug_level == "on"
+        save_plot = bool(debug_enabled and self.config.system.save_plot)
         dbscan_min_samples = self.config.system.dbscan_min_samples
 
         x_opt = _resolve_known_optimum(
@@ -1927,24 +1882,30 @@ class ExplorerOrchestrator:
         try:
             # (1) Model prediction clusters from LHC
             min_samples = dbscan_min_samples or max(5, 2 * len(selected_features))
-            pred_cluster_values = np.asarray(score, dtype=float).reshape(-1)
-            if pred_uq_target_enabled and pred_cluster_beta_used > 0.0:
-                if objective_sense == "max":
-                    pred_cluster_values = np.asarray(score, dtype=float).reshape(-1) + pred_cluster_beta_used * np.asarray(y_std, dtype=float).reshape(-1)
-                else:
-                    pred_cluster_values = np.asarray(score, dtype=float).reshape(-1) - pred_cluster_beta_used * np.asarray(y_std, dtype=float).reshape(-1)
-                pred_cluster_signal_mode = "score_beta_sigma"
-            X_pred_sel, labels_pred, pred_stats = select_top_clusters(
-                X=X,
-                y=pred_cluster_values,
-                objective_sense=objective_sense,
-                quantile_threshold=quantile_threshold,
-                min_samples=min_samples,
-                bounds=bounds,
-                min_topk_count=min_topk_count,
-                max_topk_count=max_topk_count_used,
-                eps_quantile=float(self.config.system.dbscan_eps_quantile),
-            )
+            pred_cluster_values = np.array([], dtype=float)
+            if has_model_layer:
+                pred_cluster_values = np.asarray(score, dtype=float).reshape(-1)
+                if pred_uq_target_enabled and pred_cluster_beta_used > 0.0:
+                    if objective_sense == "max":
+                        pred_cluster_values = np.asarray(score, dtype=float).reshape(-1) + pred_cluster_beta_used * np.asarray(y_std, dtype=float).reshape(-1)
+                    else:
+                        pred_cluster_values = np.asarray(score, dtype=float).reshape(-1) - pred_cluster_beta_used * np.asarray(y_std, dtype=float).reshape(-1)
+                    pred_cluster_signal_mode = "score_beta_sigma"
+                X_pred_sel, labels_pred, pred_stats = select_top_clusters(
+                    X=X,
+                    y=pred_cluster_values,
+                    objective_sense=objective_sense,
+                    quantile_threshold=quantile_threshold,
+                    min_samples=min_samples,
+                    bounds=bounds,
+                    min_topk_count=min_topk_count,
+                    max_topk_count=max_topk_count_used,
+                    eps_quantile=float(self.config.system.dbscan_eps_quantile),
+                )
+            else:
+                X_pred_sel = np.empty((0, len(selected_features)))
+                labels_pred = np.array([], dtype=int)
+                pred_stats = {}
 
             # (2) Objective clusters from executed DOE data
             if doe_df is not None:
@@ -2080,6 +2041,13 @@ class ExplorerOrchestrator:
         strategy_alias = strategy_alias_requested
         if dual_obj_equivalent_forced and strategy_alias in {"s4", "s8"}:
             strategy_alias = "s4_obj" if strategy_alias == "s4" else "s8_obj"
+        if not has_model_layer and strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}:
+            fallback_alias = "s4_obj" if strategy_alias in {"s4", "s4_pred"} else "s8_obj"
+            print(
+                "[Explorer] model layer unavailable; "
+                f"strategy {strategy_alias} degraded to {fallback_alias}."
+            )
+            strategy_alias = fallback_alias
         refine_pre_filter_applied = bool(has_pre_constraints)
         refine_pre_removed_pred = 0
         refine_pre_removed_obj = 0
@@ -4200,16 +4168,9 @@ class ExplorerOrchestrator:
             except Exception as exc:
                 print(f"[Explorer] Dual cluster plots skipped: {exc}")
 
-        workflow_info = (doe_meta or {}).get("workflow_info", {})
-        workflow_info["EXPLORER"] = "LHC"
+        workflow_info = {"EXPLORER": "objective_data_plus_optional_model"}
 
         saver = ResultSaver(use_timestamp=bool(use_timestamp))
-        prev_doe_meta = get_task_metadata_path(self.run_context, "DOE")
-        prev_modeler_meta = get_task_metadata_path(self.run_context, "Modeler")
-        if not prev_doe_meta:
-            prev_doe_meta = self.config.doe_metadata_path
-        if not prev_modeler_meta:
-            prev_modeler_meta = self.config.modeler_metadata_path
 
         def _rel_or_abs(path: str | None) -> str | None:
             if not path:
@@ -4220,12 +4181,15 @@ class ExplorerOrchestrator:
                 return path
 
         previous = {}
-        prev_doe_ref = _rel_or_abs(prev_doe_meta)
-        prev_modeler_ref = _rel_or_abs(prev_modeler_meta)
-        if prev_doe_ref:
-            previous["DOE"] = prev_doe_ref
-        if prev_modeler_ref:
-            previous["Modeler"] = prev_modeler_ref
+        data_csv_ref = _rel_or_abs(doe_csv_path)
+        model_ref = _rel_or_abs(modeler_pkl_path)
+        selected_features_ref = _rel_or_abs(selected_features_csv_path)
+        if data_csv_ref:
+            previous["data_csv"] = data_csv_ref
+        if model_ref:
+            previous["model_bundle"] = model_ref
+        if selected_features_ref:
+            previous["selected_features_csv"] = selected_features_ref
 
         inputs = {
             "user_config": os.path.relpath(
@@ -4272,6 +4236,7 @@ class ExplorerOrchestrator:
             "previous": previous,
             "selected_features": selected_features,
             "model_path_input": modeler_pkl_path,
+            "selected_features_csv_input": selected_features_csv_path,
             "doe_csv_input": doe_csv_path,
         }
         # --- Operational metadata ---

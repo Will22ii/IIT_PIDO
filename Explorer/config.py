@@ -121,8 +121,11 @@ class ExplorerSystemConfig:
 
     # 7) 실행/메타
     save_plot: bool = True
-    debug_level: str = "off"
-    strategy_id: str = "S4_dual"
+    debug_level: str = "on"
+    # 시스템 기본 strategy — stand-alone safe (Modeler 미동반 환경에서도 동작).
+    # run_pipelines 등 AION 모드 (Modeler task 동반) entry-point에서는 호출자가
+    # S4_dual로 명시 override한다. (예: pipeline/run_pipelines.py argparse default)
+    strategy_id: str = "S4_obj"
     # Dual source_mode 기본 정책 라우터
     dual_policy_mode_default: str = "routed_v2"
     probe_multistart: int = 20
@@ -141,6 +144,7 @@ class ExplorerConfig:
     cae_metadata_path: str | None = None
     doe_csv_path: str | None = None
     doe_metadata_path: str | None = None
+    selected_features_csv_path: str | None = None
     model_pkl_path: str | None = None
     modeler_metadata_path: str | None = None
     fi_scores_path: str | None = None

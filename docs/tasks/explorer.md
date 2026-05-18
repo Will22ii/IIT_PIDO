@@ -1,0 +1,105 @@
+# Explorer Policy
+
+Explorer는 실행된 data를 읽고, optional Modeler output을 layer로 사용할 수 있다. CAE context와 input CSV만으로 standalone objective-data operation이 가능해야 한다.
+
+## Inputs
+
+필수 입력:
+
+- CAE context
+- `objective`와 active feature columns를 포함한 input CSV
+
+Optional 입력:
+
+- `selected_features.csv`
+- model bundle PKL
+- post-feasibility model PKL
+- FI scores path
+
+Explorer는 runtime 동작을 위해 DOE metadata나 Modeler metadata를 요구하지 않는다.
+
+## Input CSV 정책
+
+Explorer input CSV는 아래 경로 중 하나에서 올 수 있다.
+
+- `ExplorerConfig.doe_csv_path`
+- 현재 run의 DOE public CSV: `DOE/artifacts/public/doe_results.csv`
+- user-provided external CSV
+
+필수 column:
+
+- `objective`
+- active feature columns 전체
+
+Optional column:
+
+- `success`
+- `feasible`
+
+`success` 또는 `feasible`이 없어도 허용한다. Column이 있으면 filtering에 사용할 수 있다.
+
+CSV의 constraint column은 schema로 읽지 않는다. Constraints는 CAE에서 온다.
+
+## Active Feature Resolution
+
+Explorer는 active feature를 아래 우선순위로 결정한다.
+
+1. `selected_features.csv`
+2. model bundle `feature_cols`
+3. CAE design features
+
+Resolved features는 CAE design features의 subset이어야 한다.
+
+Input CSV에는 모든 active feature column이 있어야 한다. 빠진 column이 있으면 fast-fail한다.
+
+Model bundle이 있으면 bundle의 `feature_cols`는 active features와 정확히 일치해야 한다.
+
+## Model Layer 정책
+
+Model layer는 optional이다.
+
+Model bundle이 있으면 Explorer는 LHC/boundary candidate와 prediction cluster를 만들 수 있다.
+
+Model bundle이 없으면 prediction candidate generation과 prediction cluster 생성을 건너뛴다. Objective-data strategy는 input CSV만으로 동작해야 한다.
+
+Model layer 없이 prediction-based 또는 dual strategy를 요청하면 matching objective-only strategy로 degrade할 수 있다.
+
+- `S4`, `S4_pred` -> `S4_obj`
+- `S8`, `S8_pred` -> `S8_obj`
+
+## Public Outputs
+
+주요 public artifacts:
+
+```text
+Explorer/artifacts/public/<strategy>/explorer_results_<strategy>.csv
+Explorer/artifacts/public/<strategy>/selected_bounds.json
+```
+
+`selected_bounds.json`은 downstream-facing public artifact이며 Optimizer가 사용할 수 있다.
+
+## Debug Outputs
+
+`debug_level == "on"`이고 `save_plot == True`일 때 Explorer는 아래 plot을 쓸 수 있다.
+
+- pairwise dual cluster plots
+- DOE-vs-optimum plots
+
+실제 plot 조건:
+
+```text
+plots_enabled = debug_level == "on" and save_plot
+```
+
+`debug_level == "off"`이면 Explorer plot을 쓰거나 debug artifact로 등록하지 않는다.
+
+## Metadata
+
+Explorer metadata는 provenance 용도로 아래 input reference를 기록할 수 있다.
+
+- input CSV
+- model bundle
+- selected feature CSV
+
+이 reference들은 schema authority가 아니다.
+

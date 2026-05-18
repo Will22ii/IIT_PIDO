@@ -7,6 +7,8 @@ from datetime import datetime
 
 @dataclass
 class RunContext:
+    # Backend/user-facing identifier is run_root. RunContext is the internal
+    # execution object that resolves paths and updates index.json.
     run_id: str
     run_root: str
     user_config_snapshot_path: str
@@ -26,6 +28,11 @@ def _build_run_id(*, problem: str) -> str:
 
 
 def create_run_context(*, project_root: str, user_config_snapshot: dict) -> RunContext:
+    """Create a new run directory and initialize index.json.
+
+    Use this when backend starts a new execution. Existing executions should be
+    opened with load_run_context(run_root=...).
+    """
     problem = _sanitize_run_name(str(user_config_snapshot.get("problem", "")))
     run_id = ""
     run_root = ""
@@ -62,6 +69,45 @@ def create_run_context(*, project_root: str, user_config_snapshot: dict) -> RunC
         run_root=run_root,
         user_config_snapshot_path=user_config_path,
         index_path=index_path,
+    )
+
+
+def load_run_context(*, run_root: str) -> RunContext:
+    """Open an existing run directory passed by backend.
+
+    This does not decide whether reuse is allowed. It only validates that the
+    run_root has the minimum files needed to act as a run context.
+    """
+    run_root_abs = os.path.abspath(str(run_root))
+    if not os.path.isdir(run_root_abs):
+        raise FileNotFoundError(f"Run root not found: {run_root_abs}")
+
+    index_path = os.path.join(run_root_abs, "index.json")
+    if not os.path.exists(index_path):
+        raise FileNotFoundError(f"Run index not found: {index_path}")
+
+    with open(index_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Invalid run index payload: {index_path}")
+
+    run_id = str(payload.get("run_id") or os.path.basename(run_root_abs))
+    user_config_snapshot_path = os.path.join(run_root_abs, "user_config_snapshot.json")
+    if not os.path.exists(user_config_snapshot_path):
+        raise FileNotFoundError(
+            f"Run user config snapshot not found: {user_config_snapshot_path}"
+        )
+
+    task_paths = payload.get("tasks", {})
+    if not isinstance(task_paths, dict):
+        task_paths = {}
+
+    return RunContext(
+        run_id=run_id,
+        run_root=run_root_abs,
+        user_config_snapshot_path=user_config_snapshot_path,
+        index_path=index_path,
+        task_paths=dict(task_paths),
     )
 
 

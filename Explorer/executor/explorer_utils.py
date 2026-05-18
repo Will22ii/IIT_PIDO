@@ -8,24 +8,65 @@ import pandas as pd
 def resolve_selected_features(
     *,
     feature_cols: list[str] | None,
+    design_features: list[str] | None = None,
+    selected_features_csv_path: str | None = None,
     doe_df: pd.DataFrame | None = None,
 ) -> list[str]:
-    # pkl에서 추출한 feature_cols가 곧 selected_features
-    if feature_cols:
-        return list(feature_cols)
+    if not design_features:
+        raise RuntimeError("CAE design feature list is required.")
 
-    # fallback: DOE DataFrame 컬럼에서 추출
+    design = [str(f) for f in design_features]
+    design_set = set(design)
+
+    selected: list[str]
+    source = "cae_context"
+    if selected_features_csv_path:
+        if not os.path.exists(selected_features_csv_path):
+            raise FileNotFoundError(f"Selected features CSV not found: {selected_features_csv_path}")
+        selected_df = pd.read_csv(selected_features_csv_path)
+        if "feature" not in selected_df.columns:
+            raise RuntimeError(
+                "Selected features CSV must include a 'feature' column: "
+                f"{selected_features_csv_path}"
+            )
+        selected = selected_df["feature"].dropna().astype(str).tolist()
+        source = "selected_features_csv"
+    elif feature_cols:
+        selected = [str(f) for f in feature_cols]
+        source = "model_bundle"
+    else:
+        selected = list(design)
+
+    if not selected:
+        raise RuntimeError(f"Selected features are empty (source={source}).")
+
+    seen: set[str] = set()
+    selected_unique: list[str] = []
+    for name in selected:
+        if name not in seen:
+            selected_unique.append(name)
+            seen.add(name)
+    selected = selected_unique
+
+    unknown = [name for name in selected if name not in design_set]
+    if unknown:
+        raise RuntimeError(
+            "Selected features must be a subset of CAE design features: "
+            f"unknown={unknown}, design_features={design}"
+        )
+
     if doe_df is not None:
-        ignore_cols = {"id", "objective", "constraints", "feasible", "success", "source", "round", "exec_scope"}
-        selected_features = [
-            c for c in doe_df.columns
-            if c not in ignore_cols and not str(c).startswith("constraint_")
-        ]
-        if selected_features:
-            print("[Explorer] No feature_cols from model; fallback to DOE columns.")
-            return selected_features
+        missing = [name for name in selected if name not in doe_df.columns]
+        if missing:
+            raise RuntimeError(
+                "Input CSV missing required feature columns from CAE/selected feature list: "
+                f"missing={missing}"
+            )
+        if "objective" not in doe_df.columns:
+            raise RuntimeError("Input CSV must include an 'objective' column.")
 
-    raise RuntimeError("Selected features not found. Provide model pkl or DOE data.")
+    print(f"[Explorer] Active features ({source}, n={len(selected)}): {', '.join(selected)}")
+    return selected
 
 
 def resolve_bounds(

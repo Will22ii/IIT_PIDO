@@ -71,8 +71,11 @@ def save_optimizer_outputs(
             history_df[col] = pd.NA
     opt_points_df = history_df[opt_point_cols].copy()
 
-    history_full_path = os.path.join(debug_dir, "optimizer_history_full.csv")
-    history_df.to_csv(history_full_path, index=False)
+    debug_enabled = str(config.system.debug_level).strip().lower() == "on"
+    history_full_path = None
+    if debug_enabled:
+        history_full_path = os.path.join(debug_dir, "optimizer_history_full.csv")
+        history_df.to_csv(history_full_path, index=False)
 
     previous = {}
     if resolved.doe_metadata_path:
@@ -171,9 +174,11 @@ def save_optimizer_outputs(
             "best_point": best_point_path,
             "optimizer_points": os.path.join(public_dir, "opt_results.csv"),
         },
-        debug_artifacts={
-            "history_full": history_full_path,
-        },
+        debug_artifacts=(
+            {"history_full": history_full_path}
+            if history_full_path
+            else {}
+        ),
     )
     update_run_index(run_context, task_name, task_out["metadata"])
     return task_out

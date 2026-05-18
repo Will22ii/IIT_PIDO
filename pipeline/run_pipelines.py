@@ -244,13 +244,9 @@ def _choose_strategies_by_dim(
 ) -> tuple[str, list[ExplorerStrategy]]:
     requested_map = {s.strategy_id: s for s in requested}
     policy = "low_dim_active" if selected_feature_count <= 3 else "high_dim_active"
-    ordered = [
-        "S4_dual",
-        "S4_pred",
-        "S4_obj",
-        "SR_dual",
-        "SA_dual",
-    ]
+    # 정렬 우선순위: S4_dual (AION) → S4_obj (stand-alone). EXPLORER_STRATEGIES와
+    # 동일 catalog 사용.
+    ordered = ["S4_dual", "S4_obj"]
     chosen = [requested_map[sid] for sid in ordered if sid in requested_map]
     if not chosen:
         chosen = requested[:]
@@ -270,6 +266,7 @@ def _build_pipeline_config(
     use_hpo: bool,
     use_primary_selection: bool,
     use_timestamp: bool,
+    debug_level: str,
 ) -> PipelineConfig:
     cae_cfg = CAEConfig(
         user=CAEUserConfig(
@@ -287,7 +284,7 @@ def _build_pipeline_config(
         cae=cae_cfg,
         cae_user=None,
         user=DOEUserConfig(algo_name="lhs", use_additional=bool(use_additional)),
-        system=DOESystemConfig(n_samples=int(case.n_samples)),
+        system=DOESystemConfig(n_samples=int(case.n_samples), debug_level=str(debug_level)),
     )
 
     modeler_cfg = ModelerConfig(
@@ -298,6 +295,7 @@ def _build_pipeline_config(
         ),
         system=ModelerSystemConfig(
             use_primary_selection=bool(use_primary_selection),
+            debug_level=str(debug_level),
         ),
         cae=cae_cfg,
         doe_csv_path=None,
@@ -306,7 +304,7 @@ def _build_pipeline_config(
 
     explorer_cfg = ExplorerConfig(
         user=ExplorerUserConfig(known_optimum=case.known_optimum),
-        system=ExplorerSystemConfig(),
+        system=ExplorerSystemConfig(debug_level=str(debug_level)),
         cae=cae_cfg,
         doe_csv_path=None,
         doe_metadata_path=None,
@@ -320,7 +318,7 @@ def _build_pipeline_config(
 
         optimizer_cfg = OptimizerConfig(
             user=OptimizerUserConfig(n_samples=int(max(int(optimizer_n_samples), 0))),
-            system=OptimizerSystemConfig(),
+            system=OptimizerSystemConfig(debug_level=str(debug_level)),
             cae=cae_cfg,
             cae_metadata_path=None,
             doe_metadata_path=None,
@@ -385,6 +383,7 @@ def _build_strategy_explorer_config(
         cae_metadata_path=base_explorer.cae_metadata_path,
         doe_csv_path=base_explorer.doe_csv_path,
         doe_metadata_path=base_explorer.doe_metadata_path,
+        selected_features_csv_path=base_explorer.selected_features_csv_path,
         model_pkl_path=base_explorer.model_pkl_path,
         modeler_metadata_path=base_explorer.modeler_metadata_path,
         fi_scores_path=base_explorer.fi_scores_path,
@@ -994,20 +993,31 @@ def main() -> None:
     parser.add_argument("--skip-explorer", action="store_true", help="Skip Explorer stage.")
     parser.add_argument("--run-optimizer", action="store_true", help="Enable Optimizer stage.")
     parser.add_argument(
+        "--no-debug",
+        action="store_true",
+        help="Disable debug artifacts and plots for enabled tasks.",
+    )
+    parser.add_argument(
         "--optimizer-samples",
         type=int,
         default=30,
         help="Optimizer user n_samples.",
     )
+    # ExplorerSystemConfig 의 system-wide default (stand-alone safe = S4_obj) 를
+    # fetch한 뒤, pipeline entry-point에서는 Modeler 동반(AION 모드)을 가정하여
+    # S4_dual 로 명시 override 한다.
+    _explorer_system_default = ExplorerSystemConfig().strategy_id
+    _pipeline_explorer_default = "S4_dual"
     parser.add_argument(
         "--explorer-strategies",
         type=str,
-        default="S4_obj",
+        default=_pipeline_explorer_default,
         help=(
             "Comma-separated Explorer strategy IDs. "
-            "기본 default = S4_obj (stand-alone safe — Modeler 미동반 시에도 동작). "
-            "AION 모드 (Modeler task 동반) 운영 시 S4_dual 선택 권고 — "
-            "p_dim<=3 비제약은 자동 obj-equivalent path, p_dim>=4는 dual blend (#K, L6, L9)."
+            f"pipeline default = {_pipeline_explorer_default} (AION 모드 — Modeler task "
+            f"동반 가정. p_dim<=3 비제약은 자동 obj-equivalent path, p_dim>=4는 dual blend). "
+            f"Explorer system default = {_explorer_system_default} (stand-alone safe — "
+            f"Modeler 미동반 환경). stand-alone Explorer 호출 시 system default 적용."
         ),
     )
     args = parser.parse_args()
@@ -1025,6 +1035,7 @@ def main() -> None:
     use_hpo = not bool(args.no_hpo)
     use_primary_selection = not bool(args.no_primary_selection)
     use_timestamp = not bool(args.no_timestamp)
+    debug_level = "off" if bool(args.no_debug) else "on"
     explorer_strategies = _resolve_requested_strategies(args.explorer_strategies)
 
     total_runs = sum(_resolve_case_repeats(case) for case in PROBLEM_SUITE)
@@ -1042,7 +1053,8 @@ def main() -> None:
         f"- total_runs={total_runs} "
         f"tasks(doe/modeler/explorer/optimizer)="
         f"{run_doe}/{run_modeler}/{run_explorer}/{run_optimizer} "
-        f"modeler(primary_selection)={use_primary_selection}"
+        f"modeler(primary_selection)={use_primary_selection} "
+        f"debug={debug_level}"
     )
     if run_optimizer:
         print(f"- optimizer_n_samples={optimizer_n_samples}")
@@ -1081,6 +1093,7 @@ def main() -> None:
                 use_hpo=use_hpo,
                 use_primary_selection=use_primary_selection,
                 use_timestamp=use_timestamp,
+                debug_level=debug_level,
             )
 
             try:

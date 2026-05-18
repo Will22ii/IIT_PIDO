@@ -216,8 +216,8 @@ class ModelerSystemConfig:
     # -----------------------------
     # 10) 디버그
     # -----------------------------
-    # 디버그 출력 수준: off | full
-    debug_level: str = "full"
+    # 디버그 산출물/plot 생성 여부: off | on
+    debug_level: str = "on"
 
     # -----------------------------
     # 11) Primary / Secondary Selection

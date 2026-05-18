@@ -32,9 +32,11 @@ DEFAULT_ADDITIONAL_CFG = build_additional_cfg_from_system(DOESystemConfig())
 
 
 def _normalize_debug_level(value: str | None) -> str:
-    level = str(value or "off").strip().lower()
-    if level not in {"off", "full"}:
-        raise ValueError("DOE debug_level must be one of: off, full")
+    level = str(value or "on").strip().lower()
+    if level == "full":
+        level = "on"
+    if level not in {"off", "on"}:
+        raise ValueError("DOE debug_level must be one of: off, on")
     return level
 
 
@@ -145,10 +147,10 @@ def _save_doe_results(
     meta_artifacts_extra: dict | None = None,
     task_name: str = "DOE",
     constraint_defs: list[dict] | None = None,
-    debug_level: str = "off",
+    debug_level: str = "on",
 ) -> dict:
     debug_level = _normalize_debug_level(debug_level)
-    keep_debug = debug_level == "full"
+    keep_debug = debug_level == "on"
     var_names = [v["name"] for v in variables]
     constraint_column_map = _build_constraint_column_map(
         results=results,
@@ -162,9 +164,6 @@ def _save_doe_results(
             "objective": r["objective"],
             "feasible": r.get("feasible", True),
             "success": r["success"],
-            "source": r.get("source", "basic"),
-            "round": r.get("round"),
-            "exec_scope": r.get("exec_scope", "basic"),
         }
         for name, v in zip(var_names, r["x"]):
             row_public[name] = v
@@ -180,19 +179,21 @@ def _save_doe_results(
             if resolved_id:
                 constraint_by_id[resolved_id] = cinfo
 
+        constraint_value_cols = {}
         for constraint_id, token in constraint_column_map.items():
             cinfo = constraint_by_id.get(constraint_id)
-            row_public[f"constraint_{token}_value"] = (
+            constraint_value_cols[f"constraint_{token}_value"] = (
                 cinfo.get("value") if isinstance(cinfo, dict) else np.nan
             )
             ok = cinfo.get("ok") if isinstance(cinfo, dict) else None
-            row_public[f"constraint_{token}_feasible"] = (
+            constraint_value_cols[f"constraint_{token}_feasible"] = (
                 bool(ok) if ok is not None else None
             )
 
         rows_public.append(row_public)
 
         row_internal = dict(row_public)
+        row_internal.update(constraint_value_cols)
         row_internal["feasible_pre"] = r.get("feasible_pre", True)
         row_internal["feasible_post"] = r.get("feasible_post", True)
         row_internal["margin_pre"] = r.get("margin_pre", float("inf"))
@@ -292,7 +293,7 @@ def run_doe_orchestrator(
     run_context: RunContext | None = None,
     task_name: str = "DOE",
 ) -> list[dict]:
-    run_cfg["debug_level"] = _normalize_debug_level(run_cfg.get("debug_level", "off"))
+    run_cfg["debug_level"] = _normalize_debug_level(run_cfg.get("debug_level", "on"))
     dim = len(variables)
     seed = run_cfg["seed"]
     n_samples_total = int(run_cfg["n_samples"])
@@ -599,7 +600,7 @@ def run_doe_orchestrator(
             },
             task_name=task_name,
             constraint_defs=constraint_defs,
-            debug_level=str(run_cfg.get("debug_level", "off")),
+            debug_level=str(run_cfg.get("debug_level", "on")),
         )
 
         print("\n===================================")
@@ -886,7 +887,7 @@ def run_doe_orchestrator(
             "phase2_entered": diagnostics.get("phase2_entered"),
         },
         constraint_defs=constraint_defs,
-        debug_level=str(run_cfg.get("debug_level", "off")),
+        debug_level=str(run_cfg.get("debug_level", "on")),
         meta_artifacts_extra={"analysis": os.path.join("artifacts", "meta", "analysis.json")},
     )
 

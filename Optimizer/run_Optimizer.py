@@ -7,8 +7,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from CAE_tool_interface.config import CAEConfig, CAESystemConfig, CAEUserConfig
-from Optimizer.config import OptimizerConfig, OptimizerSystemConfig, OptimizerUserConfig
+from Optimizer.config import OptimizerConfig
 from Optimizer.executor.bo_engine import run_bo_engine
 from Optimizer.executor.input_workflow import resolve_optimizer_inputs
 from Optimizer.executor.output_workflow import save_optimizer_outputs
@@ -16,9 +15,11 @@ from pipeline.run_context import RunContext, create_run_context, get_task_metada
 
 
 def _normalize_debug_level(value: str | None) -> str:
-    level = str(value or "off").strip().lower()
-    if level not in {"off", "full"}:
-        raise ValueError("Optimizer debug_level must be one of: off, full")
+    level = str(value or "on").strip().lower()
+    if level == "full":
+        level = "on"
+    if level not in {"off", "on"}:
+        raise ValueError("Optimizer debug_level must be one of: off, on")
     return level
 
 
@@ -120,21 +121,7 @@ def run_optimizer(
 
 
 if __name__ == "__main__":
-    # Standalone 실행은 CAE/DOE/Explorer 입력 경로가 필요합니다.
-    cfg = OptimizerConfig(
-        user=OptimizerUserConfig(
-            n_samples=30,
-            doe_csv_path=None,
-            explorer_bounds_path=None,
-        ),
-        system=OptimizerSystemConfig(),
-        cae=CAEConfig(
-            user=CAEUserConfig(problem_name="goldstein_price", seed=42, objective_sense="min"),
-            system=CAESystemConfig(use_timestamp=True, allow_latest_fallback=False),
-        ),
-        cae_metadata_path=None,
-        doe_metadata_path=None,
-        explorer_metadata_path=None,
-        modeler_metadata_path=None,
+    raise SystemExit(
+        "Optimizer/run_Optimizer.py is an internal task runner. "
+        "Use pipeline/run_pipeline.py as the execution entrypoint."
     )
-    run_optimizer(config=cfg)

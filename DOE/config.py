@@ -171,7 +171,7 @@ class DOESystemConfig:
 
     # 11) 기타
     additional_cfg: dict | None = None
-    debug_level: str = "off"
+    debug_level: str = "on"
 
 
 def build_additional_cfg_from_system(
