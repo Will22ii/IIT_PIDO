@@ -60,6 +60,13 @@ def save_optimizer_outputs(
         "pre_generated_count",
         "pre_fallback_used",
         "iter",
+        "opt_focus_level",
+        "opt_focus_name",
+        "focus3_budget_class",
+        "focus3_budget_ratio",
+        "source_prob_topk",
+        "source_prob_boundary",
+        "source_prob_random",
         "phase",
         "acq_type",
         "source_mode",
@@ -104,6 +111,30 @@ def save_optimizer_outputs(
             "n_restarts": int(config.system.n_restarts),
             "starts_per_iter": int(config.system.starts_per_iter),
             "random_starts_ratio": float(config.system.random_starts_ratio),
+            "focus3_budget_policy_enabled": bool(config.system.focus3_budget_policy_enabled),
+            "focus3_budget_ultra_low_np": float(config.system.focus3_budget_ultra_low_np),
+            "focus3_budget_low_np": float(config.system.focus3_budget_low_np),
+            "focus3_budget_normal_np": float(config.system.focus3_budget_normal_np),
+            "focus3_ultra_low_source_probs": [
+                float(config.system.focus3_ultra_low_source_topk_prob),
+                float(config.system.focus3_ultra_low_source_boundary_prob),
+                float(config.system.focus3_ultra_low_source_random_prob),
+            ],
+            "focus3_low_source_probs": [
+                float(config.system.focus3_low_source_topk_prob),
+                float(config.system.focus3_low_source_boundary_prob),
+                float(config.system.focus3_low_source_random_prob),
+            ],
+            "focus3_normal_source_probs": [
+                float(config.system.focus3_normal_source_topk_prob),
+                float(config.system.focus3_normal_source_boundary_prob),
+                float(config.system.focus3_normal_source_random_prob),
+            ],
+            "focus3_rich_source_probs": [
+                float(config.system.focus3_rich_source_topk_prob),
+                float(config.system.focus3_rich_source_boundary_prob),
+                float(config.system.focus3_rich_source_random_prob),
+            ],
             "init_from_doe_topk": int(config.system.init_from_doe_topk),
             "doe_seed_scope": str(config.system.doe_seed_scope),
             "gp_refit_every": int(config.system.gp_refit_every),
@@ -134,8 +165,17 @@ def save_optimizer_outputs(
         "n_features": int(len(resolved.selected_features)),
         "n_constraints": int(len(resolved.constraint_defs)),
         "n_samples_requested": int(config.user.n_samples),
-        "phase_naming_scheme": "phase1_phase2_phase3",
+        "focus_naming_scheme": "focus1_space_scan__focus2_region_focus__focus3_point_converge__focus4_reserved_final_verify",
+        "phase_naming_scheme": "legacy_phase1_phase2_phase3",
     }
+
+    focus_labels: list[str] = []
+    if "opt_focus_name" in history_df.columns:
+        seen = set()
+        for v in history_df["opt_focus_name"].astype(str).tolist():
+            if v not in seen:
+                focus_labels.append(v)
+                seen.add(v)
 
     phase_labels: list[str] = []
     if "phase" in history_df.columns:
@@ -143,6 +183,14 @@ def save_optimizer_outputs(
         for v in history_df["phase"].astype(str).tolist():
             if v not in seen:
                 phase_labels.append(v)
+                seen.add(v)
+
+    focus3_budget_classes: list[str] = []
+    if "focus3_budget_class" in history_df.columns:
+        seen = set()
+        for v in history_df["focus3_budget_class"].astype(str).tolist():
+            if v not in seen:
+                focus3_budget_classes.append(v)
                 seen.add(v)
 
     results = {
@@ -158,6 +206,8 @@ def save_optimizer_outputs(
         "feasibility_status": str(bo_result.feasibility_status),
         "n_history_rows": int(len(bo_result.history_df)),
         "n_archive_rows": int(len(bo_result.archive_df)),
+        "focus_labels": focus_labels,
+        "focus3_budget_classes": focus3_budget_classes,
         "phase_labels": phase_labels,
     }
 

@@ -109,6 +109,51 @@ def _normalize_source_probs(*, topk: float, boundary: float, random_p: float) ->
     return float(out[0]), float(out[1]), float(out[2])
 
 
+def _resolve_focus3_budget_class(
+    *,
+    n_samples: int,
+    p_dim: int,
+    system: OptimizerSystemConfig,
+) -> tuple[str, float]:
+    ratio = float(max(int(n_samples), 0)) / float(max(int(p_dim), 1))
+    ultra = float(getattr(system, "focus3_budget_ultra_low_np", 3.0))
+    low = float(getattr(system, "focus3_budget_low_np", 8.0))
+    normal = float(getattr(system, "focus3_budget_normal_np", 20.0))
+    if ratio < ultra:
+        return "ultra_low", ratio
+    if ratio < low:
+        return "low", ratio
+    if ratio < normal:
+        return "normal", ratio
+    return "rich", ratio
+
+
+def _resolve_focus3_source_probs(
+    *,
+    system: OptimizerSystemConfig,
+    budget_class: str,
+) -> tuple[float, float, float]:
+    if not bool(getattr(system, "focus3_budget_policy_enabled", True)):
+        return _normalize_source_probs(
+            topk=float(getattr(system, "source_topk_prob", 0.60)),
+            boundary=float(getattr(system, "source_boundary_prob", 0.25)),
+            random_p=float(getattr(system, "source_random_prob", 0.15)),
+        )
+
+    cls = str(budget_class or "normal").strip().lower()
+    prefix = {
+        "ultra_low": "focus3_ultra_low",
+        "low": "focus3_low",
+        "normal": "focus3_normal",
+        "rich": "focus3_rich",
+    }.get(cls, "focus3_normal")
+    return _normalize_source_probs(
+        topk=float(getattr(system, f"{prefix}_source_topk_prob")),
+        boundary=float(getattr(system, f"{prefix}_source_boundary_prob")),
+        random_p=float(getattr(system, f"{prefix}_source_random_prob")),
+    )
+
+
 def _select_warmstart_top_diversity(
     *,
     X: np.ndarray,
@@ -381,7 +426,7 @@ def _resolve_no_doe_mode(
     n_samples: int,
     threshold: int,
 ) -> str:
-    return "three_phase" if int(n_samples) >= int(threshold) else "two_stage"
+    return "three_focus" if int(n_samples) >= int(threshold) else "two_focus"
 
 
 def _resolve_no_doe_segment(
@@ -392,27 +437,42 @@ def _resolve_no_doe_segment(
     system: OptimizerSystemConfig,
 ) -> str:
     n = max(int(n_samples), 1)
-    if mode == "three_phase":
+    if mode in {"three_focus", "three_phase"}:
         n1 = int(max(1, round(float(system.no_doe_phase1_ratio) * n)))
         n2 = int(max(1, round(float(system.no_doe_phase2_ratio) * n)))
         if i < n1:
-            return "phase1"
+            return "focus1"
         if i < min(n1 + n2, n):
-            return "phase2"
-        return "phase3"
+            return "focus2"
+        return "focus3"
     n1 = int(max(1, round(float(system.no_doe_stage1_ratio) * n)))
     if i < n1:
-        return "stage1"
-    return "stage2"
+        return "focus1"
+    return "focus2"
+
+
+def _segment_to_focus(*, segment: str, mode_no_doe: bool) -> tuple[int, str]:
+    seg = str(segment or "").strip().lower()
+    if not mode_no_doe:
+        return 3, "point_converge"
+    if seg in {"stage1", "phase1", "focus1"}:
+        return 1, "space_scan"
+    if seg in {"stage2", "phase2", "focus2"}:
+        return 2, "region_focus"
+    if seg in {"phase3", "focus3"}:
+        return 3, "point_converge"
+    if seg in {"focus4"}:
+        return 4, "final_verify"
+    return 3, "point_converge"
 
 
 def _segment_to_phase_label(*, segment: str, mode_no_doe: bool) -> str:
     seg = str(segment or "").strip().lower()
     if not mode_no_doe:
         return "phase3"
-    if seg in {"stage1", "phase1"}:
+    if seg in {"stage1", "phase1", "focus1"}:
         return "phase1"
-    if seg in {"stage2", "phase2"}:
+    if seg in {"stage2", "phase2", "focus2"}:
         return "phase2"
     return "phase3"
 
@@ -755,6 +815,11 @@ def run_bo_engine(
     gp_fallback_used = False
     var_names = list(selected_features)
     best_raw_history: list[float] = [float(best_y_raw)]
+    focus3_budget_class, focus3_budget_ratio = _resolve_focus3_budget_class(
+        n_samples=int(n_samples),
+        p_dim=len(selected_features),
+        system=system,
+    )
 
     for i in range(int(n_samples)):
         if i == 0 or (int(system.gp_refit_every) > 0 and i % int(system.gp_refit_every) == 0):
@@ -790,6 +855,9 @@ def run_bo_engine(
         pre_retry_used = 0
         pre_generated_count = 0
         pre_fallback_used = False
+        source_prob_topk = float("nan")
+        source_prob_boundary = float("nan")
+        source_prob_random = float("nan")
         if mode_no_doe:
             segment = _resolve_no_doe_segment(
                 i=i,
@@ -797,10 +865,10 @@ def run_bo_engine(
                 mode=no_doe_mode_name,
                 system=system,
             )
-            if segment in {"stage1", "phase1"}:
+            if segment in {"stage1", "phase1", "focus1"}:
                 # 초기 대역 탐색
                 x_next = rng.uniform(lb, ub, size=(lb.shape[0],))
-            elif segment in {"stage2", "phase2"}:
+            elif segment in {"stage2", "phase2", "focus2"}:
                 # 중간 단계: acq + local 혼합
                 if gp_model is not None and rng.uniform(0.0, 1.0) < 0.45:
                     x_next = acq.optimize(
@@ -825,7 +893,7 @@ def run_bo_engine(
                         radius_ratio=0.10,
                     )
             else:
-                # phase3: exploitation 강화
+                # focus3: exploitation 강화
                 if gp_model is not None and rng.uniform(0.0, 1.0) < 0.80:
                     x_next = acq.optimize(
                         model=gp_model,
@@ -850,10 +918,9 @@ def run_bo_engine(
                     )
         else:
             if bool(getattr(system, "source_mixture_enabled", True)) and has_doe_objective:
-                p_topk, p_bnd, p_rand = _normalize_source_probs(
-                    topk=float(getattr(system, "source_topk_prob", 0.60)),
-                    boundary=float(getattr(system, "source_boundary_prob", 0.25)),
-                    random_p=float(getattr(system, "source_random_prob", 0.15)),
+                p_topk, p_bnd, p_rand = _resolve_focus3_source_probs(
+                    system=system,
+                    budget_class=focus3_budget_class,
                 )
                 win = int(max(int(getattr(system, "source_stagnation_window", 8)), 2))
                 tol = float(max(float(getattr(system, "source_stagnation_tol", 1e-8)), 0.0))
@@ -872,6 +939,9 @@ def run_bo_engine(
                             random_p=p_rand,
                         )
 
+                source_prob_topk = float(p_topk)
+                source_prob_boundary = float(p_bnd)
+                source_prob_random = float(p_rand)
                 source = str(rng.choice(np.asarray(["topk", "boundary", "random"]), p=[p_topk, p_bnd, p_rand]))
                 source_mode = str(source)
                 pre_active = bool(system.enforce_pre_constraints) and bool(constraint_defs)
@@ -895,7 +965,7 @@ def run_bo_engine(
                     min_starts=int(getattr(system, "source_feasible_min_starts", 1)),
                 )
                 acq_type_source = "EI" if source == "topk" else "LCB"
-                segment = "phase3"
+                segment = "focus3"
                 if gp_model is not None and pool_starts.shape[0] > 0:
                     def _pre_fn(x_arr: np.ndarray) -> bool:
                         ok, _m = _evaluate_pre_constraint(
@@ -1053,6 +1123,10 @@ def run_bo_engine(
             best_x_eff = x_next.copy()
         best_raw_history.append(float(best_y_raw))
 
+        opt_focus_level, opt_focus_name = _segment_to_focus(
+            segment=segment,
+            mode_no_doe=mode_no_doe,
+        )
         row = {
             "iter": int(i + 1),
             "acq_type": str(acq_type),
@@ -1068,6 +1142,13 @@ def run_bo_engine(
             "init_source": str(init_source),
             "no_doe_mode": str(no_doe_mode_name),
             "segment": str(segment),
+            "opt_focus_level": int(opt_focus_level),
+            "opt_focus_name": str(opt_focus_name),
+            "focus3_budget_class": str(focus3_budget_class),
+            "focus3_budget_ratio": float(focus3_budget_ratio),
+            "source_prob_topk": float(source_prob_topk),
+            "source_prob_boundary": float(source_prob_boundary),
+            "source_prob_random": float(source_prob_random),
             "phase": _segment_to_phase_label(segment=segment, mode_no_doe=mode_no_doe),
             "source_mode": str(source_mode),
             "gp_fallback_used": bool(gp_fallback_used),

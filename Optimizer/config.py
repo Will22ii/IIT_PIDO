@@ -32,6 +32,23 @@ class OptimizerSystemConfig:
     source_topk_prob: float = 0.60
     source_boundary_prob: float = 0.25
     source_random_prob: float = 0.15
+    # focus3 budget class별 source mixture. n_opt / p 기준.
+    focus3_budget_policy_enabled: bool = True
+    focus3_budget_ultra_low_np: float = 3.0
+    focus3_budget_low_np: float = 8.0
+    focus3_budget_normal_np: float = 20.0
+    focus3_ultra_low_source_topk_prob: float = 0.85
+    focus3_ultra_low_source_boundary_prob: float = 0.10
+    focus3_ultra_low_source_random_prob: float = 0.05
+    focus3_low_source_topk_prob: float = 0.75
+    focus3_low_source_boundary_prob: float = 0.15
+    focus3_low_source_random_prob: float = 0.10
+    focus3_normal_source_topk_prob: float = 0.60
+    focus3_normal_source_boundary_prob: float = 0.25
+    focus3_normal_source_random_prob: float = 0.15
+    focus3_rich_source_topk_prob: float = 0.45
+    focus3_rich_source_boundary_prob: float = 0.35
+    focus3_rich_source_random_prob: float = 0.20
     # 정체(stagnation) 감지 시 탐색 강화
     source_stagnation_window: int = 8
     source_stagnation_tol: float = 1e-8
@@ -42,7 +59,7 @@ class OptimizerSystemConfig:
     source_topk_fraction: float = 0.20
     source_topk_perturb_sigma: float = 0.08
     source_boundary_near_ratio: float = 0.03
-    # pre-constraint 후보 생성 정책 (phase3)
+    # pre-constraint 후보 생성 정책 (focus3 / point_converge)
     source_feasible_multiplier: int = 3
     source_feasible_retry: int = 3
     source_feasible_min_starts: int = 1
@@ -73,11 +90,11 @@ class OptimizerSystemConfig:
     surrogate_only_mode: bool = True
     # DOE가 없을 때 bootstrap 랜덤 샘플 수
     no_doe_bootstrap_size: int = 12
-    # DOE가 없을 때 2-stage/3-phase 분기 임계값
+    # DOE가 없을 때 2-focus/3-focus 분기 임계값
     no_doe_mode_threshold: int = 200
-    # DOE 없음 + two-stage 비율
+    # DOE 없음 + two-focus 비율
     no_doe_stage1_ratio: float = 0.35
-    # DOE 없음 + three-phase 비율
+    # DOE 없음 + three-focus 비율
     no_doe_phase1_ratio: float = 0.25
     no_doe_phase2_ratio: float = 0.45
     # Deprecated: 실제 CAE objective 평가로 전환되어 현재 미사용
