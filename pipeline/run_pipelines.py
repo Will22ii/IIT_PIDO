@@ -96,9 +96,9 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
 # Activate only the cases used in this run.
 ACTIVE_PROBLEM_CASES: list[str] = [
     "cantilever_beam",
-    # "rosenbrock",
-    # "goldstein_price",
-    # "six_hump_camel",
+    "rosenbrock",
+    "goldstein_price",
+    "six_hump_camel",
     # "cantilever_beam_nodummy",
     # "rosenbrock_nodummy",
     # "goldstein_price_nodummy",
