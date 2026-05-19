@@ -44,15 +44,15 @@ CSV의 constraint column은 schema로 읽지 않는다. Constraints는 CAE에서
 
 Explorer는 active feature를 아래 우선순위로 결정한다.
 
-1. `selected_features.csv`
-2. model bundle `feature_cols`
+1. model bundle `feature_cols`
+2. model bundle이 없을 때 `selected_features.csv`의 selected rows
 3. CAE design features
 
 Resolved features는 CAE design features의 subset이어야 한다.
 
 Input CSV에는 모든 active feature column이 있어야 한다. 빠진 column이 있으면 fast-fail한다.
 
-Model bundle이 있으면 bundle의 `feature_cols`는 active features와 정확히 일치해야 한다.
+Model bundle이 있으면 bundle의 `feature_cols`가 active features의 권위 소스다. `selected_features.csv`는 사용자-facing feature-selection report이며 FI score 입력으로 참조될 수 있다.
 
 ## Model Layer 정책
 
@@ -102,4 +102,3 @@ Explorer metadata는 provenance 용도로 아래 input reference를 기록할 �
 - selected feature CSV
 
 이 reference들은 schema authority가 아니다.
-

@@ -72,6 +72,14 @@ def _load_feasibility_model(pkl_path: str) -> dict:
     return payload
 
 
+def _load_json_object(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Invalid JSON object payload: {path}")
+    return payload
+
+
 def _artifact_ref(metadata: dict | None, key: str) -> str | None:
     if not isinstance(metadata, dict):
         return None
@@ -1390,6 +1398,21 @@ class ExplorerOrchestrator:
         print(f"[Explorer] Input CSV: {doe_csv_path}")
         if "objective" not in doe_df.columns:
             raise RuntimeError("Explorer input CSV must include an 'objective' column.")
+
+        doe_meta_path = self.config.doe_metadata_path
+        if not doe_meta_path and self.run_context:
+            doe_meta_path = get_task_metadata_path(self.run_context, "DOE")
+        if doe_meta_path:
+            if not os.path.exists(doe_meta_path):
+                raise FileNotFoundError(f"DOE metadata not found: {doe_meta_path}")
+            doe_meta = _load_json_object(doe_meta_path)
+            doe_problem_name = str(doe_meta.get("problem", "")).strip() or doe_problem_name
+            if doe_problem_name and doe_problem_name != cae_problem_name:
+                raise RuntimeError(
+                    "Problem mismatch between DOE metadata and CAE metadata: "
+                    f"doe={doe_problem_name}, cae={cae_problem_name}"
+                )
+            print(f"[Explorer] DOE metadata hints loaded: {doe_meta_path}")
 
         if self.config.model_pkl_path:
             modeler_pkl_path = self.config.model_pkl_path

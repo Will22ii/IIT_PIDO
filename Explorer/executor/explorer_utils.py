@@ -4,6 +4,18 @@ import os
 import numpy as np
 import pandas as pd
 
+from utils.bool_mask import to_bool_mask
+
+
+def _unique_in_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for name in values:
+        if name not in seen:
+            unique.append(name)
+            seen.add(name)
+    return unique
+
 
 def resolve_selected_features(
     *,
@@ -20,7 +32,10 @@ def resolve_selected_features(
 
     selected: list[str]
     source = "cae_context"
-    if selected_features_csv_path:
+    if feature_cols:
+        selected = [str(f) for f in feature_cols]
+        source = "model_bundle"
+    elif selected_features_csv_path:
         if not os.path.exists(selected_features_csv_path):
             raise FileNotFoundError(f"Selected features CSV not found: {selected_features_csv_path}")
         selected_df = pd.read_csv(selected_features_csv_path)
@@ -29,24 +44,22 @@ def resolve_selected_features(
                 "Selected features CSV must include a 'feature' column: "
                 f"{selected_features_csv_path}"
             )
+        if "selected" in selected_df.columns:
+            selected_mask = to_bool_mask(
+                selected_df["selected"],
+                column_name="selected",
+                warn_prefix="[Explorer][SelectedFeatures]",
+            )
+            selected_df = selected_df.loc[selected_mask]
         selected = selected_df["feature"].dropna().astype(str).tolist()
         source = "selected_features_csv"
-    elif feature_cols:
-        selected = [str(f) for f in feature_cols]
-        source = "model_bundle"
     else:
         selected = list(design)
 
     if not selected:
         raise RuntimeError(f"Selected features are empty (source={source}).")
 
-    seen: set[str] = set()
-    selected_unique: list[str] = []
-    for name in selected:
-        if name not in seen:
-            selected_unique.append(name)
-            seen.add(name)
-    selected = selected_unique
+    selected = _unique_in_order(selected)
 
     unknown = [name for name in selected if name not in design_set]
     if unknown:

@@ -28,9 +28,9 @@ Optional public artifact:
 Modeler/artifacts/public/modeler_feas_models.pkl
 ```
 
-Model bundle은 trained models와 `feature_cols`를 포함해야 한다.
+Model bundle은 trained models와 `feature_cols`를 포함해야 한다. Model-backed downstream task에서는 이 `feature_cols`가 active feature schema의 권위 소스다.
 
-`selected_features.csv`는 사람이 보기 좋고 downstream이 읽기 쉬운 selected feature artifact다. 반드시 `feature` column을 포함해야 한다.
+`selected_features.csv`는 사람이 보기 좋은 feature-selection report다. 반드시 `feature` column을 포함해야 하며, `selected` column이 있으면 selected row가 active selected features를 뜻한다.
 
 ## Selected Feature 정책
 
@@ -38,7 +38,7 @@ Modeler selected features는 downstream feature-reduced operation에서 CAE full
 
 Selected features는 CAE design features의 subset이어야 한다.
 
-Model bundle과 selected features를 같이 사용하는 경우, model bundle의 `feature_cols`는 active selected feature list와 정확히 일치해야 한다.
+Model bundle과 selected features report를 같이 사용하는 경우, model bundle의 `feature_cols`를 downstream model input schema로 사용한다.
 
 ## Debug Outputs
 
@@ -62,4 +62,3 @@ Modeler/artifacts/meta/
 이 summary는 debug dump가 아니다. Batch analysis와 재현성을 위해 유지할 수 있다.
 
 Explorer는 runtime에 Modeler metadata를 요구하지 않는다. 명시적으로 전달되었거나 같은 run에서 생성된 Modeler public artifact만 optional layer로 사용할 수 있다.
-

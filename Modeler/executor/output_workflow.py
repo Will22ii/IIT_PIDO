@@ -12,7 +12,6 @@ from utils.result_saver import ResultSaver
 @dataclass
 class ModelerSaveResult:
     metadata_path: str
-    hpo_params_csv_path: str | None
 
 
 def save_modeler_outputs(
@@ -169,16 +168,6 @@ def save_modeler_outputs(
             task_dir,
         )
 
-    hpo_params_csv_path = None
-    if hpo_params_used and best_params:
-        df_params = pd.DataFrame(
-            [{"param": k, "value": v} for k, v in best_params.items()]
-        )
-        _hpo_dir = os.path.dirname(processed_path) if processed_path else os.path.join(task_dir, "artifacts", "meta")
-        hpo_params_csv_path = os.path.join(_hpo_dir, "hpo_best_params.csv")
-        df_params.to_csv(hpo_params_csv_path, index=False)
-        meta_artifacts["hpo_best_params"] = os.path.relpath(hpo_params_csv_path, task_dir)
-
     debug_artifacts = {}
     if keep_debug:
         if perm_path and os.path.exists(perm_path):
@@ -218,5 +207,4 @@ def save_modeler_outputs(
 
     return ModelerSaveResult(
         metadata_path=str(out["metadata"]),
-        hpo_params_csv_path=hpo_params_csv_path,
     )

@@ -10,8 +10,8 @@
 
 Explorer는 임의 CSV의 numeric column을 보고 active feature를 추론하지 않는다. active feature는 아래 순서로 결정한다.
 
-1. 명시적으로 전달되었거나 같은 run의 Modeler가 만든 `selected_features.csv`
-2. selected feature CSV가 없을 때 model bundle의 `feature_cols`
+1. model bundle이 있으면 `feature_cols`
+2. model bundle이 없고 `selected_features.csv`가 있으면 CSV의 selected feature rows
 3. Modeler layer가 없을 때 CAE design features 전체
 
 Explorer는 runtime 결정을 위해 DOE metadata나 Modeler metadata를 읽지 않는다. Explorer는 CAE context와 input CSV만 있으면 동작해야 하며, model과 selected feature는 optional layer다.
@@ -159,13 +159,13 @@ Optimizer: 연결은 유지하되 향후 고도화 대상
 
 CAE design features는 가능한 전체 feature universe다.
 
-Modeler는 `selected_features.csv`를 통해 더 작은 active feature set을 제공할 수 있다. 이 selected feature list는 CAE 문제 정의를 바꾸는 것이 아니라, downstream feature-reduced operation을 위한 override다.
+Modeler는 model bundle의 `feature_cols`를 통해 더 작은 active feature set을 제공할 수 있다. `selected_features.csv`는 사용자가 볼 수 있는 feature-selection report이며, model bundle이 없을 때만 downstream selected-feature fallback으로 사용한다. 이 selected feature list는 CAE 문제 정의를 바꾸는 것이 아니라, downstream feature-reduced operation을 위한 override다.
 
 Selected feature가 CAE design feature에 없는 이름을 포함하면 fast-fail한다.
 
 Input CSV에 active feature column이 하나라도 없으면 fast-fail한다.
 
-Model bundle을 사용하는 경우, bundle의 `feature_cols`는 active selected feature list와 정확히 일치해야 한다.
+Model bundle을 사용하는 경우, bundle의 `feature_cols`가 active selected feature list의 권위 소스다.
 
 ## Debug 정책
 
