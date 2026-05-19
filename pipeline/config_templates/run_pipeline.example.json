@@ -1,0 +1,53 @@
+{
+  "problem": {
+    "name": "cantilever_beam",
+    "seed": 42,
+    "objective_sense": "min",
+    "known_optimum": {
+      "H": 7.0,
+      "h1": 0.1,
+      "b1": 9.48482,
+      "b2": 0.1
+    }
+  },
+  "run": {
+    "run_root": null,
+    "debug_level": "on",
+    "use_timestamp": false
+  },
+  "tasks": {
+    "doe": true,
+    "modeler": true,
+    "explorer": true,
+    "optimizer": false
+  },
+  "reuse": {
+    "use_existing_doe_csv": true,
+    "use_existing_modeler_artifacts": true
+  },
+  "inputs": {
+    "doe_csv_path": null,
+    "selected_features_csv_path": null,
+    "model_pkl_path": null,
+    "fi_scores_path": null,
+    "explorer_bounds_path": null
+  },
+  "doe": {
+    "n_samples": 90,
+    "algo_name": "lhs",
+    "use_additional": false
+  },
+  "modeler": {
+    "model_name": "xgb",
+    "use_hpo": false,
+    "use_primary_selection": true,
+    "use_secondary_selection": false
+  },
+  "explorer": {
+    "strategy_id": "S4_obj",
+    "save_plot": true
+  },
+  "optimizer": {
+    "n_samples": 30
+  }
+}

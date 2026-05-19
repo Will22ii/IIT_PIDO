@@ -1,0 +1,28 @@
+{
+  "problem": {
+    "name": "cantilever_beam",
+    "seed": 42,
+    "objective_sense": "min",
+    "known_optimum": {
+      "H": 7.0,
+      "h1": 0.1,
+      "b1": 9.48482,
+      "b2": 0.1
+    }
+  },
+  "run": {
+    "run_root": null,
+    "debug_level": "on",
+    "use_timestamp": false
+  },
+  "reuse": {
+    "use_existing_doe_csv": true,
+    "use_existing_modeler_artifacts": true
+  },
+  "doe": {
+    "n_samples": 90
+  },
+  "optimizer": {
+    "n_samples": 30
+  }
+}

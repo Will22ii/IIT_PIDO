@@ -7,6 +7,7 @@ from DOE.run_DOE import run_doe
 from Explorer.executor.explorer_orchestrator import ExplorerOrchestrator
 from Modeler.run_Modeler import run_modeler
 from pipeline.config import PipelineConfig
+from pipeline.config_io import pipeline_config_from_dict, pipeline_config_from_json
 from pipeline.run_context import RunContext
 from pipeline.run_context import create_run_context
 from pipeline.run_context import get_task_metadata_path
@@ -271,8 +272,16 @@ def run_pipeline(*, config: PipelineConfig) -> dict:
     }
 
 
+def run_pipeline_from_dict(payload: dict) -> dict:
+    return run_pipeline(config=pipeline_config_from_dict(payload))
+
+
+def run_pipeline_from_json(config_path: str) -> dict:
+    return run_pipeline(config=pipeline_config_from_json(config_path))
+
+
 if __name__ == "__main__":
     raise SystemExit(
         "pipeline/run_pipeline.py exposes run_pipeline(config=...). "
-        "CLI is not implemented yet; call it from backend/Python code."
+        "CLI is disabled by policy; call run_pipeline_from_dict/json from backend/Python code."
     )

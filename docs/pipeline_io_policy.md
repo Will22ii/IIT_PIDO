@@ -67,6 +67,36 @@ pipeline/run_AION.py       # 단일 문제, full preset 실행
 pipeline/run_pipelines.py  # benchmark/batch 분석용
 ```
 
+CLI는 `pipeline/run_pipelines.py`에만 둔다. `run_pipeline.py`와 `run_AION.py`는 서비스/API entrypoint이므로 JSON/dict config로만 호출한다.
+
+```text
+run_pipeline_from_dict(payload)
+run_pipeline_from_json(config_path)
+run_aion_from_dict(payload)
+run_aion_from_json(config_path)
+```
+
+서비스 화면과 backend가 주고받는 사용자 입력 config는 아래 top-level section을 사용한다.
+
+```text
+problem   # 문제명, seed, objective_sense, variables, known_optimum
+run       # run_root, debug_level, use_timestamp
+tasks     # doe/modeler/explorer/optimizer on/off (run_pipeline only)
+reuse     # 기존 run artifact fallback 정책
+inputs    # 외부 CSV/model/bounds path
+doe       # DOE 사용자 입력
+modeler   # Modeler 사용자 입력
+explorer  # Explorer 사용자 입력
+optimizer # Optimizer 사용자 입력
+```
+
+Config example은 아래에 둔다.
+
+```text
+pipeline/config_templates/run_pipeline.example.json
+pipeline/config_templates/run_AION.example.json
+```
+
 Task별 `run_*.py` 파일은 직접 실행용이 아니라 내부 runner module이다.
 
 ```text

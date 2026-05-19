@@ -18,7 +18,7 @@ Optional 입력:
 
 Explorer는 runtime 동작을 위해 DOE metadata나 Modeler metadata를 요구하지 않는다.
 
-Input resolution은 `Explorer/executor/input_workflow.py`가 담당한다. Debug plot 생성은 `Explorer/executor/plot_workflow.py`가 담당한다. Public/meta/debug artifact 저장은 `Explorer/executor/output_workflow.py`가 담당한다. Orchestrator는 resolved input bundle을 받아 candidate generation과 strategy execution을 수행한 뒤 plot/output workflow로 후처리를 위임한다.
+Input resolution은 `Explorer/executor/input_workflow.py`가 담당한다. Strategy alias/source-mode 결정은 `Explorer/executor/strategy_workflow.py`가 담당한다. Bounds/array/acquisition helper는 `Explorer/executor/math_workflow.py`가 담당한다. Debug plot 생성은 `Explorer/executor/plot_workflow.py`가 담당한다. Report metadata 조립은 `Explorer/executor/report_workflow.py`가 담당한다. Public/meta/debug artifact 저장은 `Explorer/executor/output_workflow.py`가 담당한다. Orchestrator는 resolved input bundle을 받아 candidate generation과 refinement 계산을 수행한 뒤 plot/output workflow로 후처리를 위임한다.
 
 ## Input CSV 정책
 

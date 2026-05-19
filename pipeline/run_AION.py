@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
+from typing import Any
 
 from CAE_tool_interface.config import CAEConfig, CAESystemConfig, CAEUserConfig
 from DOE.config import DOEConfig, DOESystemConfig, DOEUserConfig
@@ -9,6 +10,7 @@ from Explorer.strategy_presets import apply_explorer_strategy_preset
 from Modeler.config import ModelerConfig, ModelerSystemConfig, ModelerUserConfig
 from Optimizer.config import OptimizerConfig, OptimizerSystemConfig, OptimizerUserConfig
 from pipeline.config import PipelineConfig, PipelineReusePolicy, PipelineTasks
+from pipeline.config_io import load_json_object
 from pipeline.run_pipeline import run_pipeline
 
 
@@ -85,10 +87,8 @@ def build_aion_pipeline_config(*, config: AIONConfig) -> PipelineConfig:
         system=explorer_system,
         cae=cae_cfg,
         doe_csv_path=None,
-        doe_metadata_path=None,
         selected_features_csv_path=None,
         model_pkl_path=None,
-        modeler_metadata_path=None,
     )
 
     optimizer_cfg = OptimizerConfig(
@@ -127,8 +127,112 @@ def run_aion(*, config: AIONConfig) -> dict:
     return run_pipeline(config=pipeline_config)
 
 
+def _as_dict(value: Any, *, name: str, required: bool = False) -> dict[str, Any]:
+    if value is None:
+        if required:
+            raise RuntimeError(f"Missing required config section: {name}")
+        return {}
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Config section must be an object: {name}")
+    return value
+
+
+def _apply_reuse_overrides(reuse: PipelineReusePolicy, payload: dict[str, Any]) -> None:
+    valid = {f.name for f in fields(reuse)}
+    unknown = sorted(str(k) for k in payload.keys() if str(k) not in valid)
+    if unknown:
+        raise RuntimeError(
+            f"Unknown config key(s) in reuse: {unknown}. Valid keys: {sorted(valid)}"
+        )
+    for key, value in payload.items():
+        setattr(reuse, key, value)
+
+
+def aion_config_from_dict(payload: dict[str, Any]) -> AIONConfig:
+    if not isinstance(payload, dict):
+        raise RuntimeError("AION config payload must be a dict.")
+    valid_top = {"problem", "run", "reuse", "doe", "optimizer", "explorer"}
+    unknown_top = sorted(str(k) for k in payload.keys() if str(k) not in valid_top)
+    if unknown_top:
+        raise RuntimeError(
+            f"Unknown top-level AION config key(s): {unknown_top}. "
+            f"Valid keys: {sorted(valid_top)}"
+        )
+
+    problem = _as_dict(payload.get("problem"), name="problem", required=True).copy()
+    run = _as_dict(payload.get("run"), name="run").copy()
+    reuse_payload = _as_dict(payload.get("reuse", run.get("reuse")), name="reuse").copy()
+    doe = _as_dict(payload.get("doe"), name="doe").copy()
+    optimizer = _as_dict(payload.get("optimizer"), name="optimizer").copy()
+    explorer = _as_dict(payload.get("explorer"), name="explorer").copy()
+
+    problem_name = problem.pop("name", None)
+    if problem_name is None:
+        problem_name = problem.pop("problem_name", None)
+    if not str(problem_name or "").strip():
+        raise RuntimeError("AION config problem.name is required.")
+
+    reuse = PipelineReusePolicy()
+    _apply_reuse_overrides(reuse, reuse_payload)
+
+    n_doe_samples = doe.pop("n_samples", None)
+    if n_doe_samples is None:
+        n_doe_samples = doe.pop("n_doe_samples", 100)
+    optimizer_n_samples = optimizer.pop("n_samples", None)
+    if optimizer_n_samples is None:
+        optimizer_n_samples = optimizer.pop("optimizer_n_samples", 30)
+
+    problem_known_optimum = problem.pop("known_optimum", None)
+    explorer_known_optimum = explorer.pop("known_optimum", None)
+    known_optimum = (
+        explorer_known_optimum
+        if explorer_known_optimum is not None
+        else problem_known_optimum
+    )
+
+    cfg = AIONConfig(
+        problem_name=str(problem_name),
+        objective_sense=str(problem.pop("objective_sense", "min")),
+        seed=int(problem.pop("seed", 42)),
+        variables=problem.pop("variables", None),
+        known_optimum=known_optimum,
+        run_root=run.pop("run_root", None),
+        debug_level=str(run.pop("debug_level", "on")),
+        use_timestamp=bool(run.pop("use_timestamp", False)),
+        n_doe_samples=int(n_doe_samples),
+        optimizer_n_samples=int(optimizer_n_samples),
+        reuse=reuse,
+    )
+
+    for section_name, section in (
+        ("problem", problem),
+        ("run", run),
+        ("doe", doe),
+        ("optimizer", optimizer),
+        ("explorer", explorer),
+    ):
+        if section:
+            raise RuntimeError(
+                f"Unknown config key(s) in {section_name}: {sorted(section.keys())}"
+            )
+
+    return cfg
+
+
+def aion_config_from_json(path: str) -> AIONConfig:
+    return aion_config_from_dict(load_json_object(path))
+
+
+def run_aion_from_dict(payload: dict[str, Any]) -> dict:
+    return run_aion(config=aion_config_from_dict(payload))
+
+
+def run_aion_from_json(config_path: str) -> dict:
+    return run_aion(config=aion_config_from_json(config_path))
+
+
 if __name__ == "__main__":
     raise SystemExit(
         "pipeline/run_AION.py exposes run_aion(config=...). "
-        "CLI is not implemented yet; call it from backend/Python code."
+        "CLI is disabled by policy; call run_aion_from_dict/json from backend/Python code."
     )

@@ -96,9 +96,9 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
 # Activate only the cases used in this run.
 ACTIVE_PROBLEM_CASES: list[str] = [
     "cantilever_beam",
-    "rosenbrock",
-    "goldstein_price",
-    "six_hump_camel",
+    # "rosenbrock",
+    # "goldstein_price",
+    # "six_hump_camel",
     # "cantilever_beam_nodummy",
     # "rosenbrock_nodummy",
     # "goldstein_price_nodummy",
@@ -214,9 +214,7 @@ def _build_pipeline_config(
         system=ExplorerSystemConfig(debug_level=str(debug_level)),
         cae=cae_cfg,
         doe_csv_path=None,
-        doe_metadata_path=None,
         model_pkl_path=None,
-        modeler_metadata_path=None,
     )
 
     optimizer_cfg = None
@@ -282,10 +280,8 @@ def _build_strategy_explorer_config(
         cae=base_explorer.cae,
         cae_metadata_path=base_explorer.cae_metadata_path,
         doe_csv_path=base_explorer.doe_csv_path,
-        doe_metadata_path=base_explorer.doe_metadata_path,
         selected_features_csv_path=base_explorer.selected_features_csv_path,
         model_pkl_path=base_explorer.model_pkl_path,
-        modeler_metadata_path=base_explorer.modeler_metadata_path,
         fi_scores_path=base_explorer.fi_scores_path,
     )
 
