@@ -19,6 +19,9 @@ from CAE_tool_interface.config import CAEConfig, CAEUserConfig, CAESystemConfig
 from DOE.config import DOEConfig, DOESystemConfig, DOEUserConfig
 from Explorer.config import ExplorerConfig, ExplorerSystemConfig, ExplorerUserConfig
 from Explorer.executor.explorer_orchestrator import ExplorerOrchestrator
+from Explorer.strategy_presets import EXPLORER_STRATEGIES, ExplorerStrategy
+from Explorer.strategy_presets import apply_explorer_strategy_preset
+from Explorer.strategy_presets import strategy_map
 from Modeler.config import ModelerConfig, ModelerSystemConfig, ModelerUserConfig
 from pipeline.config import PipelineConfig, PipelineTasks
 from pipeline.run_pipeline import run_pipeline
@@ -31,12 +34,6 @@ class ProblemCase:
     n_samples: int
     objective_sense: str = "min"
     repeats: int = 1
-
-
-@dataclass(frozen=True)
-class ExplorerStrategy:
-    strategy_id: str
-    overrides: dict[str, Any]
 
 
 PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
@@ -111,98 +108,8 @@ ACTIVE_PROBLEM_CASES: list[str] = [
 PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIVE_PROBLEM_CASES]
 
 
-def _strategy_overrides(
-    *,
-    strategy_params: dict[str, Any],
-    quantile_threshold: float,
-    bounds_margin_ratio: float,
-    dbscan_eps_quantile: float,
-    bounds_expansion_mode: str = "fi_aware",
-) -> dict[str, Any]:
-    return {
-        "strategy_params": dict(strategy_params),
-        "bounds_expansion_mode": bounds_expansion_mode,
-        "quantile_threshold": quantile_threshold,
-        "bounds_margin_ratio": bounds_margin_ratio,
-        "dbscan_eps_quantile": dbscan_eps_quantile,
-    }
-
-
-# DUAL base (S4/S8)
-_DUAL_SHARED_PARAMS: dict[str, Any] = {
-    "max_volume_ratio_target": 0.249,
-    "dual_policy_mode": "routed_v2",
-    "dual_total_starts": 40,
-    "dual_np_ratio_low": 12.0,
-    "dual_np_ratio_high": 24.0,
-    "dual_obj_ratio_low_np": 0.62,
-    "dual_obj_ratio_mid_np": 0.50,
-    "dual_obj_ratio_high_np": 0.42,
-    "dual_high_dim_threshold": 6,
-    "dual_high_dim_obj_bonus": 0.08,
-    "dual_disagree_l1_threshold": 0.35,
-    "dual_disagree_iou_threshold": 0.20,
-    "dual_disagree_obj_bonus": 0.12,
-    "dual_obj_ratio_min": 0.25,
-    "dual_obj_ratio_max": 0.75,
-    "dual_center_tilt_strength": 0.45,
-    "dual_center_tilt_aniso_gamma": 0.6,
-    "dual_center_bias_obj_ratio_weight": 0.50,
-    "pred_cluster_beta": 0.20,
-    "pred_refine_bounds_scale": 1.30,
-    "pred_multistart_det_fraction": 0.35,
-    "pred_obj_disjoint_iou": 0.10,
-    "pred_obj_fallback_conf_high": 0.45,
-    "pred_obj_fallback_iou_low": 0.15,
-    "pred_obj_fallback_center_blend": 0.50,
-    "pred_conf_danger_low": 0.40,
-    "pred_conf_danger_high": 0.60,
-    "pred_conf_danger_iou_max": 0.15,
-    "obj_diversity_extra_clusters": 2,
-    "obj_diversity_weight": 0.35,
-    "obj_diversity_min_distance": 0.22,
-    "obj_diversity_close_penalty": 0.80,
-    "obj_diversity_min_dim": 4,
-}
-
-# OBJ base (S4_obj — stand-alone safe default)
-_OBJ_SHARED_PARAMS: dict[str, Any] = {
-    "max_volume_ratio_target": 0.249,
-    "dual_policy_mode": "routed_v2",
-    "obj_refine_bounds_scale": 1.45,
-    "obj_diversity_extra_clusters": 2,
-    "obj_diversity_weight": 0.35,
-    "obj_diversity_min_distance": 0.22,
-    "obj_diversity_close_penalty": 0.80,
-    "obj_diversity_min_dim": 4,
-}
-
-EXPLORER_STRATEGIES: list[ExplorerStrategy] = [
-    # 운영 stand-alone safe default — Modeler 없이도 동작 가능 (obj_bounds 직접 산출)
-    ExplorerStrategy(
-        "S4_obj",
-        _strategy_overrides(
-            strategy_params={**_OBJ_SHARED_PARAMS, "mode": "obj_refine_ei"},
-            quantile_threshold=0.88,
-            bounds_margin_ratio=0.03,
-            dbscan_eps_quantile=0.90,
-        ),
-    ),
-    # AION 모드 (Modeler task 동반 시) — dim-aware obj/dual blend (#K, L6, L9)
-    ExplorerStrategy(
-        "S4_dual",
-        _strategy_overrides(
-            strategy_params={**_DUAL_SHARED_PARAMS, "mode": "dual_refine_ei"},
-            quantile_threshold=0.89,
-            bounds_margin_ratio=0.02,
-            dbscan_eps_quantile=0.88,
-        ),
-    ),
-]
-
-
 def _strategy_map() -> dict[str, ExplorerStrategy]:
-    return {s.strategy_id: s for s in EXPLORER_STRATEGIES}
+    return strategy_map()
 
 
 def _resolve_case_repeats(case: ProblemCase) -> int:
@@ -344,16 +251,18 @@ def _build_pipeline_config(
 def _resolve_requested_strategies(raw: str) -> list[ExplorerStrategy]:
     catalog = _strategy_map()
     wanted = [tok.strip() for tok in str(raw).split(",") if tok.strip()]
-    if not wanted:
+    if not wanted or (len(wanted) == 1 and wanted[0].lower() == "all"):
         wanted = [s.strategy_id for s in EXPLORER_STRATEGIES]
+    catalog_by_lower = {key.lower(): value for key, value in catalog.items()}
     out: list[ExplorerStrategy] = []
     for sid in wanted:
-        if sid not in catalog:
+        strategy = catalog.get(sid) or catalog_by_lower.get(sid.lower())
+        if strategy is None:
             raise ValueError(
                 f"Unknown explorer strategy: {sid}. "
                 f"Valid choices: {sorted(catalog.keys())}"
             )
-        out.append(catalog[sid])
+        out.append(strategy)
     return out
 
 
@@ -362,19 +271,10 @@ def _build_strategy_explorer_config(
     base_explorer: ExplorerConfig,
     strategy: ExplorerStrategy,
 ) -> ExplorerConfig:
-    system_cfg = copy.deepcopy(base_explorer.system)
-    system_cfg.strategy_id = strategy.strategy_id
-
-    merged_params = dict(system_cfg.strategy_params or {})
-    for key, value in strategy.overrides.items():
-        if key == "strategy_params" and isinstance(value, dict):
-            merged_params.update(value)
-            continue
-        if hasattr(system_cfg, key):
-            setattr(system_cfg, key, value)
-        else:
-            merged_params[key] = value
-    system_cfg.strategy_params = merged_params
+    system_cfg = apply_explorer_strategy_preset(
+        copy.deepcopy(base_explorer.system),
+        strategy.strategy_id,
+    )
 
     return ExplorerConfig(
         user=copy.deepcopy(base_explorer.user),

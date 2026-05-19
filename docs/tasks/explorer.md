@@ -18,6 +18,8 @@ Optional 입력:
 
 Explorer는 runtime 동작을 위해 DOE metadata나 Modeler metadata를 요구하지 않는다.
 
+Input resolution은 `Explorer/executor/input_workflow.py`가 담당한다. Debug plot 생성은 `Explorer/executor/plot_workflow.py`가 담당한다. Public/meta/debug artifact 저장은 `Explorer/executor/output_workflow.py`가 담당한다. Orchestrator는 resolved input bundle을 받아 candidate generation과 strategy execution을 수행한 뒤 plot/output workflow로 후처리를 위임한다.
+
 ## Input CSV 정책
 
 Explorer input CSV는 아래 경로 중 하나에서 올 수 있다.
@@ -62,10 +64,9 @@ Model bundle이 있으면 Explorer는 LHC/boundary candidate와 prediction clust
 
 Model bundle이 없으면 prediction candidate generation과 prediction cluster 생성을 건너뛴다. Objective-data strategy는 input CSV만으로 동작해야 한다.
 
-Model layer 없이 prediction-based 또는 dual strategy를 요청하면 matching objective-only strategy로 degrade할 수 있다.
+Public strategy는 `S4_obj`와 `S4_dual`만 둔다.
 
-- `S4`, `S4_pred` -> `S4_obj`
-- `S8`, `S8_pred` -> `S8_obj`
+Model layer 없이 `S4_dual`을 요청하면 prediction cluster를 만들 수 없으므로 `S4_obj`로 degrade한다.
 
 ## Public Outputs
 
@@ -84,6 +85,8 @@ Explorer/artifacts/public/<strategy>/selected_bounds.json
 
 - pairwise dual cluster plots
 - DOE-vs-optimum plots
+
+DOE-vs-optimum plot은 같은 run context의 `DOE/artifacts/debug/doe_results_internal.csv`가 있으면 그 파일을 사용한다. 이 파일이 없으면 input CSV로 fallback하며, DOE metadata는 읽지 않는다.
 
 실제 plot 조건:
 

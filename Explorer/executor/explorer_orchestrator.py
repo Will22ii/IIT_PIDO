@@ -1,7 +1,4 @@
-import ast
-import json
 import os
-import pickle
 import warnings
 from math import erf, sqrt
 from typing import Optional
@@ -11,9 +8,10 @@ import pandas as pd
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.gaussian_process import GaussianProcessRegressor
 
-from utils.result_saver import ResultSaver
 from utils.bool_mask import to_bool_mask
 from DOE.doe_algorithm.lhs import latin_hypercube_sampling
+from Explorer.strategy_presets import apply_explorer_strategy_preset
+from Explorer.strategy_presets import normalize_explorer_strategy_id
 from DOE.executor.anchor_refiner import (
     AcquisitionOptimizer,
     fit_gp_with_fallback,
@@ -27,7 +25,6 @@ from utils.bounds_utils import compute_spans_lbs
 from DOE.executor.constraint_filter import (
     evaluate_constraints_batch,
     evaluate_constraints_point,
-    validate_constraint_defs,
 )
 from Explorer.executor.explorer_utils import (
     apply_bounds_margin,
@@ -35,73 +32,30 @@ from Explorer.executor.explorer_utils import (
     compute_gp_boundary_uncertainty,
     compute_selected_bounds,
     format_span_rows,
-    resolve_bounds,
-    resolve_selected_features,
+)
+from Explorer.executor.input_workflow import (
+    load_feasibility_model,
+    resolve_explorer_inputs,
+)
+from Explorer.executor.output_workflow import (
+    save_explorer_outputs,
+    save_selected_bounds_artifact,
+)
+from Explorer.executor.plot_workflow import (
+    render_explorer_debug_plots,
+    resolve_doe_plot_dataframe,
 )
 from Explorer.executor.routing import (
     RouterInput,
     RouterOutput,
     route_v2,
 )
-from Explorer.visualization.explorer_plots import (
-    plot_dual_cluster_pair,
-    plot_bounds_pair,
-)
-from Explorer.visualization.plot_doe_vs_optimum import plot_doe_vs_optimum
 from pipeline.run_context import (
     RunContext,
     create_run_context,
     get_task_metadata_path,
     update_run_index,
 )
-
-
-def _load_models(pkl_path: str) -> tuple[list, list[str]]:
-    with open(pkl_path, "rb") as f:
-        payload = pickle.load(f)
-    models = payload.get("models", [])
-    feature_cols = payload.get("feature_cols", [])
-    return models, feature_cols
-
-
-def _load_feasibility_model(pkl_path: str) -> dict:
-    with open(pkl_path, "rb") as f:
-        payload = pickle.load(f)
-    if not isinstance(payload, dict):
-        raise RuntimeError("Invalid feasibility model payload format.")
-    return payload
-
-
-def _load_json_object(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"Invalid JSON object payload: {path}")
-    return payload
-
-
-def _artifact_ref(metadata: dict | None, key: str) -> str | None:
-    if not isinstance(metadata, dict):
-        return None
-    artifacts = metadata.get("artifacts", {})
-    if not isinstance(artifacts, dict):
-        return None
-    if key in artifacts:
-        return artifacts[key]
-    for layer in ("public", "meta", "debug"):
-        layer_map = artifacts.get(layer, {})
-        if isinstance(layer_map, dict) and key in layer_map:
-            return layer_map[key]
-    return None
-
-
-def _extract_expr_vars(expr: str) -> set[str]:
-    tree = ast.parse(expr, mode="eval")
-    return {
-        n.id
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Name)
-    }
 
 
 def _predict_ensemble(models: list, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -259,10 +213,10 @@ def _normalize_debug_level(value: str | None) -> str:
 
 
 def _normalize_strategy_id(value: str | None) -> str:
-    raw = str(value or "S4_dual").strip()
+    raw = normalize_explorer_strategy_id(value or "S4_obj")
     safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in raw)
     safe = safe.strip("_")
-    return safe or "S4_dual"
+    return safe or "S4_obj"
 
 
 def _safe_stack(points: list[np.ndarray], n_dim: int) -> np.ndarray:
@@ -1185,118 +1139,15 @@ def _resolve_strategy_alias(strategy_id: str, mode: str) -> str:
     sid = str(strategy_id).strip().lower()
     if sid.startswith("s4_obj"):
         return "s4_obj"
-    if sid.startswith("s8_obj"):
-        return "s8_obj"
-    if sid.startswith("s4_pred"):
-        return "s4_pred"
-    if sid.startswith("s8_pred"):
-        return "s8_pred"
-    if sid.startswith("s4_"):
+    if sid.startswith("s4_dual"):
         return "s4"
-    if sid.startswith("s8_"):
-        return "s8"
 
     m = str(mode).strip().lower()
     mode_map = {
         "dual_refine_ei": "s4",
-        "dual_refine_lcb": "s8",
-        "dual_gradient_refine": "s8",
-        "pred_refine_ei": "s4_pred",
-        "pred_refine_lcb": "s8_pred",
         "obj_refine_ei": "s4_obj",
-        "obj_refine_lcb": "s8_obj",
     }
-    return mode_map.get(m, "s4")
-
-
-def _resolve_existing_cae_metadata_path(
-    *,
-    config: ExplorerConfig,
-    run_context: RunContext | None,
-) -> str:
-    if run_context is not None:
-        path = get_task_metadata_path(run_context, "CAE")
-        if path and os.path.exists(path):
-            return path
-        raise RuntimeError(
-            "Explorer requires existing CAE metadata in run context. "
-            "Run CAE task first and then execute Explorer."
-        )
-
-    raw = str(config.cae_metadata_path or "").strip()
-    if raw:
-        candidates = [raw]
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        candidates.append(os.path.join(project_root, raw))
-        for p in candidates:
-            if os.path.exists(p):
-                return p
-        raise FileNotFoundError(f"CAE metadata not found: {raw}")
-
-    raise RuntimeError(
-        "Explorer requires existing CAE metadata. "
-        "Provide ExplorerConfig.cae_metadata_path or run via pipeline run_context."
-    )
-
-
-def _load_cae_metadata(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"Invalid CAE metadata payload: {path}")
-    return payload
-
-
-def _extract_cae_fields(cae_meta: dict) -> tuple[str, list, list, str]:
-    problem_name = str(cae_meta.get("problem", "")).strip()
-    inputs = cae_meta.get("inputs", {}) if isinstance(cae_meta.get("inputs", {}), dict) else {}
-    variables = inputs.get("variables", [])
-    if not isinstance(variables, list):
-        variables = []
-    constraint_defs = inputs.get("constraint_defs", [])
-    if not isinstance(constraint_defs, list):
-        constraint_defs = []
-    resolved = cae_meta.get("resolved_params", {}) if isinstance(cae_meta.get("resolved_params", {}), dict) else {}
-    objective_sense = str(resolved.get("objective_sense", "min")).strip().lower()
-    if objective_sense not in {"min", "max"}:
-        objective_sense = "min"
-    if not problem_name:
-        raise RuntimeError("CAE metadata missing required field: problem")
-    if len(variables) == 0:
-        raise RuntimeError("CAE metadata missing required field: inputs.variables")
-    return problem_name, variables, constraint_defs, objective_sense
-
-
-def _extract_seed_from_cae_metadata(*, cae_meta: dict, cae_meta_path: str) -> int:
-    resolved = cae_meta.get("resolved_params", {}) if isinstance(cae_meta.get("resolved_params", {}), dict) else {}
-    direct_candidates = [
-        resolved.get("seed"),
-        cae_meta.get("seed"),
-        (cae_meta.get("inputs", {}) if isinstance(cae_meta.get("inputs", {}), dict) else {}).get("seed"),
-    ]
-    for cand in direct_candidates:
-        try:
-            if cand is not None:
-                return int(cand)
-        except Exception:
-            pass
-
-    inputs = cae_meta.get("inputs", {}) if isinstance(cae_meta.get("inputs", {}), dict) else {}
-    user_ref = str(inputs.get("user_config", "")).strip()
-    if user_ref:
-        user_cfg_path = user_ref
-        if not os.path.isabs(user_cfg_path):
-            user_cfg_path = os.path.join(os.path.dirname(cae_meta_path), user_cfg_path)
-        if os.path.exists(user_cfg_path):
-            with open(user_cfg_path, "r", encoding="utf-8") as f:
-                user_cfg = json.load(f)
-            if isinstance(user_cfg, dict) and ("seed" in user_cfg):
-                return int(user_cfg["seed"])
-
-    raise RuntimeError(
-        "CAE metadata missing seed information. "
-        "Expected one of: resolved_params.seed, inputs.seed, or inputs.user_config(seed)."
-    )
+    return mode_map.get(m, "s4_obj")
 
 
 def _resolve_known_optimum(
@@ -1344,198 +1195,28 @@ class ExplorerOrchestrator:
         self.run_context = run_context
 
     def run(self) -> dict:
-        if self.config.cae is None:
-            raise RuntimeError("ExplorerConfig.cae is required.")
-
-        cae_meta_path = _resolve_existing_cae_metadata_path(
+        input_bundle = resolve_explorer_inputs(
             config=self.config,
             run_context=self.run_context,
         )
-        cae_meta = _load_cae_metadata(cae_meta_path)
-        (
-            cae_problem_name,
-            cae_variables,
-            cae_constraint_defs,
-            cae_objective_sense,
-        ) = _extract_cae_fields(cae_meta)
-        cae_seed = _extract_seed_from_cae_metadata(cae_meta=cae_meta, cae_meta_path=cae_meta_path)
-        configured_problem = str(self.config.cae.user.problem_name).strip()
-        if configured_problem and configured_problem != cae_problem_name:
-            raise RuntimeError(
-                "Problem mismatch between Explorer config and CAE metadata: "
-                f"config={configured_problem}, cae_metadata={cae_problem_name}"
-            )
-
-        doe_meta = {}
-        doe_problem_name = cae_problem_name
-        doe_csv_path = None
-        modeler_pkl_path = None
-        modeler_feas_pkl_path = None
-        selected_features_csv_path = self.config.selected_features_csv_path
-        modeler_task_dir = None
-
-        if self.config.doe_csv_path:
-            doe_csv_path = self.config.doe_csv_path
-        elif self.run_context:
-            candidate = os.path.join(
-                self.run_context.run_root,
-                "DOE",
-                "artifacts",
-                "public",
-                "doe_results.csv",
-            )
-            if os.path.exists(candidate):
-                doe_csv_path = candidate
-
-        if not doe_csv_path:
-            raise RuntimeError(
-                "Explorer requires an input CSV. Provide ExplorerConfig.doe_csv_path "
-                "or run DOE earlier in the same run_context."
-            )
-        if not os.path.exists(doe_csv_path):
-            raise FileNotFoundError(f"Explorer input CSV not found: {doe_csv_path}")
-        doe_df = pd.read_csv(doe_csv_path)
-        print(f"[Explorer] Input CSV: {doe_csv_path}")
-        if "objective" not in doe_df.columns:
-            raise RuntimeError("Explorer input CSV must include an 'objective' column.")
-
-        doe_meta_path = self.config.doe_metadata_path
-        if not doe_meta_path and self.run_context:
-            doe_meta_path = get_task_metadata_path(self.run_context, "DOE")
-        if doe_meta_path:
-            if not os.path.exists(doe_meta_path):
-                raise FileNotFoundError(f"DOE metadata not found: {doe_meta_path}")
-            doe_meta = _load_json_object(doe_meta_path)
-            doe_problem_name = str(doe_meta.get("problem", "")).strip() or doe_problem_name
-            if doe_problem_name and doe_problem_name != cae_problem_name:
-                raise RuntimeError(
-                    "Problem mismatch between DOE metadata and CAE metadata: "
-                    f"doe={doe_problem_name}, cae={cae_problem_name}"
-                )
-            print(f"[Explorer] DOE metadata hints loaded: {doe_meta_path}")
-
-        if self.config.model_pkl_path:
-            modeler_pkl_path = self.config.model_pkl_path
-        elif self.run_context:
-            modeler_task_dir = os.path.join(self.run_context.run_root, "Modeler")
-            candidate = os.path.join(
-                modeler_task_dir,
-                "artifacts",
-                "public",
-                "modeler_selected_models.pkl",
-            )
-            if os.path.exists(candidate):
-                modeler_pkl_path = candidate
-        if modeler_pkl_path and not os.path.exists(modeler_pkl_path):
-            raise FileNotFoundError(f"Model bundle not found: {modeler_pkl_path}")
-
-        if not selected_features_csv_path and self.run_context:
-            if modeler_task_dir is None:
-                modeler_task_dir = os.path.join(self.run_context.run_root, "Modeler")
-            candidate = os.path.join(
-                modeler_task_dir,
-                "artifacts",
-                "public",
-                "selected_features.csv",
-            )
-            if os.path.exists(candidate):
-                selected_features_csv_path = candidate
-
-        if self.run_context:
-            if modeler_task_dir is None:
-                modeler_task_dir = os.path.join(self.run_context.run_root, "Modeler")
-            candidate = os.path.join(
-                modeler_task_dir,
-                "artifacts",
-                "public",
-                "modeler_feas_models.pkl",
-            )
-            if os.path.exists(candidate):
-                modeler_feas_pkl_path = candidate
-
-        models: list = []
-        feature_cols: list[str] = []
-        if modeler_pkl_path:
-            models, feature_cols = _load_models(modeler_pkl_path)
-            print(
-                f"[Explorer] Model bundle loaded: {modeler_pkl_path} "
-                f"(models={len(models)}, features={len(feature_cols)})"
-            )
-        else:
-            print("[Explorer] Model bundle not provided; using objective-data layer only.")
-
-        design_features = [
-            str(v.get("name"))
-            for v in cae_variables
-            if isinstance(v, dict) and str(v.get("name", "")).strip()
-        ]
-        selected_features = resolve_selected_features(
-            feature_cols=feature_cols if feature_cols else None,
-            design_features=design_features,
-            selected_features_csv_path=selected_features_csv_path,
-            doe_df=doe_df,
-        )
-        if feature_cols and [str(f) for f in feature_cols] != [str(f) for f in selected_features]:
-            raise RuntimeError(
-                "Model bundle feature_cols must match active selected features exactly. "
-                f"model_bundle={feature_cols}, active_features={selected_features}"
-            )
-
-        # FI scores path resolve (fi_aware 모드용)
-        fi_scores_path = self.config.fi_scores_path or selected_features_csv_path
-
-        raw_constraint_defs = (
-            (doe_meta or {}).get("constraint_defs")
-            or (doe_meta or {}).get("inputs", {}).get("constraint_defs")
-            or cae_constraint_defs
-            or []
-        )
-        try:
-            constraint_defs = validate_constraint_defs(raw_constraint_defs)
-        except Exception as exc:
-            print(f"[Explorer] constraint_defs validation failed -> skip constraint policy: {exc}")
-            constraint_defs = []
-
-        pre_constraint_defs = [
-            c for c in constraint_defs
-            if str(c.get("scope", "pre")).strip().lower() == "pre"
-        ]
-        post_constraint_defs = [
-            c for c in constraint_defs
-            if str(c.get("scope", "pre")).strip().lower() == "post"
-        ]
-        has_pre_constraints = len(pre_constraint_defs) > 0
-        has_post_constraints = len(post_constraint_defs) > 0
-        pre_filter_disabled_reason = None
-
-        # pre 제약식을 selected_features 축에서 평가할 수 없는 경우(식 변수 누락)는 pre 필터를 끈다.
-        if has_pre_constraints:
-            allowed_tokens = {
-                "abs", "min", "max", "pow", "sqrt", "sin", "cos", "tan",
-                "exp", "log", "pi", "e",
-            }
-            missing_vars: set[str] = set()
-            for c in pre_constraint_defs:
-                expr = str(c.get("expr", ""))
-                try:
-                    names = _extract_expr_vars(expr)
-                    req = {n for n in names if n not in allowed_tokens}
-                    req_missing = {n for n in req if n not in set(selected_features)}
-                    missing_vars.update(req_missing)
-                except Exception:
-                    # 문법 문제는 DOE에서 이미 fail-fast 됐어야 하므로 여기서는 보수적으로 skip 처리
-                    missing_vars.add("__expr_parse_error__")
-            if missing_vars:
-                print(
-                    "[Explorer] pre-constraint filter disabled: "
-                    f"missing vars in selected_features -> {sorted(missing_vars)}"
-                )
-                pre_filter_disabled_reason = (
-                    "missing_vars_in_selected_features:"
-                    + ",".join(sorted(missing_vars))
-                )
-                has_pre_constraints = False
-                pre_constraint_defs = []
+        cae_meta_path = input_bundle.cae_metadata_path
+        doe_problem_name = input_bundle.problem_name
+        cae_variables = input_bundle.cae_variables
+        cae_objective_sense = input_bundle.objective_sense
+        doe_csv_path = input_bundle.input_csv_path
+        doe_df = input_bundle.input_df
+        modeler_pkl_path = input_bundle.model_path
+        modeler_feas_pkl_path = input_bundle.modeler_feasibility_model_path
+        selected_features_csv_path = input_bundle.selected_features_csv_path
+        models = input_bundle.models
+        selected_features = input_bundle.selected_features
+        fi_scores_path = input_bundle.fi_scores_path
+        constraint_defs = input_bundle.constraint_defs
+        pre_constraint_defs = input_bundle.pre_constraint_defs
+        post_constraint_defs = input_bundle.post_constraint_defs
+        has_pre_constraints = input_bundle.has_pre_constraints
+        has_post_constraints = input_bundle.has_post_constraints
+        pre_filter_disabled_reason = input_bundle.pre_filter_disabled_reason
 
         feasibility_payload = None
         post_feas_adapter = None
@@ -1543,7 +1224,7 @@ class ExplorerOrchestrator:
         feasibility_model_path_used = None
         if has_post_constraints:
             if modeler_feas_pkl_path and os.path.exists(modeler_feas_pkl_path):
-                feasibility_payload = _load_feasibility_model(modeler_feas_pkl_path)
+                feasibility_payload = load_feasibility_model(modeler_feas_pkl_path)
                 feasibility_model_kind_used = str(feasibility_payload.get("kind", "unknown"))
                 feasibility_model_path_used = modeler_feas_pkl_path
                 print(f"[Explorer] feasibility model loaded: {modeler_feas_pkl_path}")
@@ -1562,42 +1243,13 @@ class ExplorerOrchestrator:
                     "post-constraint penalty layer disabled."
                 )
 
-        variables = None
-        if doe_meta:
-            variables = doe_meta.get("variables") or doe_meta.get("inputs", {}).get("variables")
-        if not variables and cae_variables:
-            variables = cae_variables
-        if not variables and self.config.cae and self.config.cae.user.variables:
-            variables = self.config.cae.user.variables
-        if not variables and self.run_context:
-            with open(self.run_context.user_config_snapshot_path, "r") as f:
-                user_snapshot = json.load(f)
-            design_bounds = user_snapshot.get("design_bounds")
-            if design_bounds:
-                variables = [
-                    {"name": name, "lb": bounds[0], "ub": bounds[1]}
-                    for name, bounds in design_bounds.items()
-                ]
-
-        bounds = resolve_bounds(
-            selected_features=selected_features,
-            variables=variables,
-            df=doe_df,
-        )
-
-        rng_seed = int(cae_seed)
+        variables = input_bundle.variables
+        bounds = input_bundle.bounds
+        rng_seed = int(input_bundle.seed)
 
         rng = np.random.default_rng(rng_seed)
         has_model_layer = bool(models)
         has_post_penalty = bool(has_post_constraints and post_feas_adapter is not None)
-
-        def _meta_get(key: str, default=None):
-            if key in (doe_meta or {}):
-                return (doe_meta or {}).get(key, default)
-            resolved = (doe_meta or {}).get("resolved_params", {})
-            if isinstance(resolved, dict) and key in resolved:
-                return resolved.get(key, default)
-            return default
 
         success_mask_base = (
             to_bool_mask(
@@ -1619,6 +1271,22 @@ class ExplorerOrchestrator:
             feasible_mask_base = success_mask_base.copy()
             base_mask = success_mask_base
         base_n = int(np.sum(base_mask))
+        constraint_rate_hat = (
+            float(np.mean(feasible_mask_base))
+            if "feasible" in doe_df.columns and feasible_mask_base.size > 0
+            else 1.0
+        )
+        if not np.isfinite(constraint_rate_hat) or constraint_rate_hat <= 0.0:
+            constraint_rate_hat = 1.0
+        explorer_data_meta = {
+            "usable_n": int(base_n),
+            "constraint_rate_hat": float(constraint_rate_hat),
+            "constraint_r_hat": float(constraint_rate_hat),
+        }
+
+        def _meta_get(key: str, default=None):
+            return explorer_data_meta.get(key, default)
+
         sample_multiplier = self.config.system.sample_multiplier
 
         nominal_n = int(base_n * float(sample_multiplier)) if sample_multiplier is not None else int(self.config.system.n_samples)
@@ -1640,7 +1308,7 @@ class ExplorerOrchestrator:
                 r_used = 1.0
             if not np.isfinite(r_used) or r_used <= 0.0:
                 r_used = 1.0
-            r_used_source = "doe_metadata"
+            r_used_source = "input_csv_feasible_rate"
             n_samples = int(np.ceil(max(nominal_n, 1) / r_used))
         elif sample_multiplier is not None:
             n_samples = int(nominal_n)
@@ -1741,17 +1409,8 @@ class ExplorerOrchestrator:
             y_std = np.array([], dtype=float)
             score = np.array([], dtype=float)
             p_feasible_pred = np.array([], dtype=float)
-        post_lambda_raw = _meta_get("post_lambda", None)
-        if post_lambda_raw is None:
-            post_lambda = float(self.config.system.post_lambda_default)
-            post_lambda_source = "default"
-        else:
-            try:
-                post_lambda = float(post_lambda_raw)
-                post_lambda_source = "metadata"
-            except Exception:
-                post_lambda = float(self.config.system.post_lambda_default)
-                post_lambda_source = "default_invalid_metadata"
+        post_lambda = float(self.config.system.post_lambda_default)
+        post_lambda_source = "system_default"
         if has_model_layer and has_post_penalty:
             p_feasible_pred = _predict_post_feasible_prob_batch(
                 adapter=post_feas_adapter,
@@ -1807,6 +1466,7 @@ class ExplorerOrchestrator:
         if get_task_metadata_path(self.run_context, "CAE") is None:
             update_run_index(self.run_context, "CAE", os.path.abspath(cae_meta_path))
 
+        apply_explorer_strategy_preset(self.config.system, self.config.system.strategy_id)
         strategy_id = _normalize_strategy_id(self.config.system.strategy_id)
         task_dir = os.path.join(self.run_context.run_root, "Explorer")
         artifacts_root = os.path.join(task_dir, "artifacts")
@@ -1825,6 +1485,14 @@ class ExplorerOrchestrator:
         debug_level = _normalize_debug_level(self.config.system.debug_level)
         debug_enabled = debug_level == "on"
         save_plot = bool(debug_enabled and self.config.system.save_plot)
+        doe_plot_df = (
+            resolve_doe_plot_dataframe(
+                run_context=self.run_context,
+                fallback_df=doe_df,
+            )
+            if save_plot
+            else doe_df
+        )
         dbscan_min_samples = self.config.system.dbscan_min_samples
 
         x_opt = _resolve_known_optimum(
@@ -1836,26 +1504,24 @@ class ExplorerOrchestrator:
         # -------------------------------------------------
         # Dual-cluster comparison: model vs objective
         # -------------------------------------------------
-        pair_overlay_paths = []
-        doe_vs_optimum_plot_paths = []
         pred_stats = {}
         obj_stats = {}
         strategy_params = dict(self.config.system.strategy_params or {})
         strategy_mode_hint = str(strategy_params.get("mode", "")).strip().lower()
         strategy_alias_hint = _resolve_strategy_alias(strategy_id=strategy_id, mode=strategy_mode_hint)
         dual_obj_equivalent_forced = bool(
-            strategy_alias_hint in {"s4", "s8"}
+            strategy_alias_hint == "s4"
             and (not has_pre_constraints)
             and len(selected_features) <= 3
         )
         if dual_obj_equivalent_forced:
-            strategy_alias_hint = "s4_obj" if strategy_alias_hint == "s4" else "s8_obj"
+            strategy_alias_hint = "s4_obj"
             print(
                 "[Explorer] low-dim dual override: "
                 f"p_dim={len(selected_features)}, has_pre_constraints={has_pre_constraints} "
                 f"-> force obj-equivalent path ({strategy_alias_hint})"
             )
-        pred_uq_target_enabled = strategy_alias_hint in {"s4", "s8", "s4_pred", "s8_pred"}
+        pred_uq_target_enabled = strategy_alias_hint == "s4"
         pred_cluster_beta = float(np.clip(float(strategy_params.get("pred_cluster_beta", 0.2)), 0.0, 2.0))
         pred_cluster_beta_used = float(pred_cluster_beta) if pred_uq_target_enabled else 0.0
         pred_cluster_signal_mode = "score"
@@ -1869,8 +1535,6 @@ class ExplorerOrchestrator:
         pred_multistart_det_fraction_used = None
         pred_refine_bounds_scale_used = None
         pred_n_starts_used = None
-        pred_overconf_guard_triggered = False
-        pred_overconf_guard_reason = None
         obj_div_extra = int(max(0, int(strategy_params.get("obj_diversity_extra_clusters", 0))))
         obj_div_weight = float(strategy_params.get("obj_diversity_weight", 0.35))
         obj_div_min_dist = float(strategy_params.get("obj_diversity_min_distance", 0.22))
@@ -2062,10 +1726,10 @@ class ExplorerOrchestrator:
         strategy_mode = str((self.config.system.strategy_params or {}).get("mode", "")).strip().lower()
         strategy_alias_requested = _resolve_strategy_alias(strategy_id=strategy_id, mode=strategy_mode)
         strategy_alias = strategy_alias_requested
-        if dual_obj_equivalent_forced and strategy_alias in {"s4", "s8"}:
-            strategy_alias = "s4_obj" if strategy_alias == "s4" else "s8_obj"
-        if not has_model_layer and strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}:
-            fallback_alias = "s4_obj" if strategy_alias in {"s4", "s4_pred"} else "s8_obj"
+        if dual_obj_equivalent_forced and strategy_alias == "s4":
+            strategy_alias = "s4_obj"
+        if not has_model_layer and strategy_alias == "s4":
+            fallback_alias = "s4_obj"
             print(
                 "[Explorer] model layer unavailable; "
                 f"strategy {strategy_alias} degraded to {fallback_alias}."
@@ -2094,15 +1758,13 @@ class ExplorerOrchestrator:
         # routed_v2: dual 모드 내부 라우터. 활성화되면 obj_ratio/tilt/cap/expansion/dse2 override
         routed_v2_decision: RouterOutput | None = None
 
-        if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred", "s4_obj", "s8_obj"}:
+        if strategy_alias in {"s4", "s4_obj"}:
             source_mode = "dual"
-            if strategy_alias in {"s4_pred", "s8_pred"}:
-                source_mode = "pred"
-            elif strategy_alias in {"s4_obj", "s8_obj"}:
+            if strategy_alias == "s4_obj":
                 source_mode = "obj"
-            use_pred_model = source_mode in {"dual", "pred"}
+            use_pred_model = source_mode == "dual"
             use_obj_model = source_mode in {"dual", "obj"}
-            acq_type = "EI" if strategy_alias in {"s4", "s4_pred", "s4_obj"} else "LCB"
+            acq_type = "EI"
             d = max(int(len(selected_features)), 1)
             n_min = max(20, 4 * d + 4)
             min_fit = max(8, d + 2)
@@ -2110,7 +1772,7 @@ class ExplorerOrchestrator:
             ei_xi = float((self.config.system.strategy_params or {}).get("ei_xi", 0.01))
             acq = AcquisitionOptimizer()
             strategy_params_local = dict(self.config.system.strategy_params or {})
-            pred_family_alias = strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}
+            pred_family_alias = strategy_alias == "s4"
             pred_multistart_det_fraction = float(
                 np.clip(
                     float(strategy_params_local.get("pred_multistart_det_fraction", 0.35 if pred_family_alias else 0.5)),
@@ -2137,49 +1799,6 @@ class ExplorerOrchestrator:
             obj_refine_bounds_scale = float(
                 max(float(strategy_params_local.get("obj_refine_bounds_scale", obj_refine_bounds_scale_default)), 1.0)
             )
-            if source_mode == "pred" and strategy_alias in {"s4_pred", "s8_pred"}:
-                overconf_guard_enabled = bool(strategy_params_local.get("pred_overconf_guard_enabled", False))
-                if overconf_guard_enabled:
-                    overconf_conf_high = float(
-                        np.clip(float(strategy_params_local.get("pred_overconf_conf_high", 0.58)), 0.0, 1.0)
-                    )
-                    overconf_iou_high = float(max(float(strategy_params_local.get("pred_overconf_iou_high", 0.24)), 0.0))
-                    overconf_scale_boost = float(max(float(strategy_params_local.get("pred_overconf_scale_boost", 0.0)), 0.0))
-                    overconf_scale_cap = float(
-                        max(
-                            float(strategy_params_local.get("pred_overconf_scale_cap", max(pred_refine_bounds_scale, 1.0))),
-                            1.0,
-                        )
-                    )
-                    overconf_det_fraction = float(
-                        np.clip(
-                            float(strategy_params_local.get("pred_overconf_det_fraction", pred_multistart_det_fraction)),
-                            0.0,
-                            1.0,
-                        )
-                    )
-                    overconf_iou_now = _bounds_iou_ratio(pred_bounds, obj_bounds)
-                    if (
-                        pred_cluster_confidence is not None
-                        and np.isfinite(pred_cluster_confidence)
-                        and overconf_iou_now is not None
-                        and np.isfinite(overconf_iou_now)
-                        and float(pred_cluster_confidence) >= overconf_conf_high
-                        and float(overconf_iou_now) >= overconf_iou_high
-                    ):
-                        pred_refine_bounds_scale = float(
-                            np.clip(pred_refine_bounds_scale + overconf_scale_boost, 1.0, overconf_scale_cap)
-                        )
-                        pred_multistart_det_fraction = float(overconf_det_fraction)
-                        pred_overconf_guard_triggered = True
-                        pred_overconf_guard_reason = (
-                            f"conf={float(pred_cluster_confidence):.3f}, iou={float(overconf_iou_now):.4f}"
-                        )
-                        print(
-                            "[Explorer] pred-overconf guard applied: "
-                            f"{pred_overconf_guard_reason} -> "
-                            f"scale={pred_refine_bounds_scale:.3f}, det_frac={pred_multistart_det_fraction:.3f}"
-                        )
             pred_multistart_det_fraction_used = float(pred_multistart_det_fraction)
             pred_refine_bounds_scale_used = float(pred_refine_bounds_scale)
             if source_mode == "dual":
@@ -2504,9 +2123,6 @@ class ExplorerOrchestrator:
                     n_obj_starts = int(round(total * obj_ratio))
                     n_obj_starts = int(np.clip(n_obj_starts, 1, total - 1))
                     n_pred_starts = int(total - n_obj_starts)
-            elif source_mode == "pred":
-                n_pred_starts = 40
-                n_obj_starts = 0
             else:
                 n_pred_starts = 0
                 n_obj_starts = 40
@@ -2810,7 +2426,7 @@ class ExplorerOrchestrator:
 
             pred_seed_pool = np.asarray(X_pred_sel, dtype=float)
             pred_seed_rank_values = np.asarray(score, dtype=float).reshape(-1)
-            if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"} and pred_cluster_signal_mode == "score_beta_sigma":
+            if strategy_alias == "s4" and pred_cluster_signal_mode == "score_beta_sigma":
                 if objective_sense == "max":
                     pred_seed_rank_values = np.asarray(score, dtype=float).reshape(-1) + float(pred_cluster_beta_used) * np.asarray(y_std, dtype=float).reshape(-1)
                 else:
@@ -2928,11 +2544,6 @@ class ExplorerOrchestrator:
                 y_pred_train = y_union_train
                 X_obj_train = X_union_train
                 y_obj_train = y_union_train
-            elif source_mode == "pred":
-                X_pred_train, y_pred_train, pred_region_used = _build_side_dataset(
-                    seed_points=pred_starts,
-                    region_bounds=pred_region,
-                )
             elif source_mode == "obj":
                 X_obj_train, y_obj_train, obj_region_used = _build_side_dataset(
                     seed_points=obj_starts,
@@ -2994,22 +2605,14 @@ class ExplorerOrchestrator:
 
             if source_mode == "dual":
                 selected_points = _safe_stack([ref_pred, ref_obj, X_pred_sel, X_obj_sel], n_dim=len(selected_features))
-            elif source_mode == "pred":
-                selected_points = _safe_stack([ref_pred, X_pred_sel], n_dim=len(selected_features))
             else:
                 selected_points = _safe_stack([ref_obj, X_obj_sel], n_dim=len(selected_features))
             if selected_points.shape[0] == 0:
-                if source_mode in {"dual", "obj"}:
-                    selected_points = _safe_stack([X_obj_sel], n_dim=len(selected_features))
-                else:
-                    selected_points = _safe_stack([X_pred_sel], n_dim=len(selected_features))
+                selected_points = _safe_stack([X_obj_sel], n_dim=len(selected_features))
             selected_points, removed_sel = _filter_points_pre_feasible(selected_points)
             refine_pre_removed_selected += int(removed_sel)
             if selected_points.shape[0] == 0:
-                if source_mode in {"dual", "obj"}:
-                    selected_points = _safe_stack([X_obj_sel], n_dim=len(selected_features))
-                else:
-                    selected_points = _safe_stack([X_pred_sel], n_dim=len(selected_features))
+                selected_points = _safe_stack([X_obj_sel], n_dim=len(selected_features))
             selected_bounds = _bounds_from_points(selected_points, q_low=0.01, q_high=0.99)
             if source_mode == "dual" and selected_bounds is not None:
                 strategy_params_local = dict(self.config.system.strategy_params or {})
@@ -3129,7 +2732,7 @@ class ExplorerOrchestrator:
                         dual_center_hint = blended_center
                         dual_center_tilt_applied = True
 
-            if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}:
+            if strategy_alias == "s4":
                 pred_obj_iou = _bounds_iou_ratio(pred_bounds, obj_bounds)
                 pred_center = _bounds_center(pred_bounds)
                 obj_center = _bounds_center(obj_bounds)
@@ -3160,8 +2763,7 @@ class ExplorerOrchestrator:
                 # obj 는 평가 데이터 기반(ground truth), pred 는 모델 예측. dual 계열도 포함.
                 disjoint_fallback_fired = False
                 if (
-                    strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}
-                    and pred_obj_miss_case == "pred_obj_disjoint"
+                    pred_obj_miss_case == "pred_obj_disjoint"
                     and obj_bounds is not None
                     and selected_bounds is not None
                 ):
@@ -3184,7 +2786,6 @@ class ExplorerOrchestrator:
                 # iou 도 낮으면 pred 예측을 신뢰할 수 없음. obj_bounds 로 전환.
                 if (
                     not disjoint_fallback_fired
-                    and strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}
                     and pred_cluster_confidence is not None
                     and obj_bounds is not None
                     and selected_bounds is not None
@@ -3249,8 +2850,7 @@ class ExplorerOrchestrator:
                 )
                 _dsea_blend = _exp2_blend_high_crate if _exp2_is_high_crate else _dsea_blend_base
                 if (
-                    strategy_alias in {"s4", "s8", "s4_pred", "s8_pred"}
-                    and pred_cluster_confidence is not None
+                    pred_cluster_confidence is not None
                     and pred_cluster_confidence >= _dsea_conf_high
                     and pred_obj_iou is not None
                     and pred_obj_iou < _dsea_iou_low
@@ -3279,15 +2879,12 @@ class ExplorerOrchestrator:
                         selected_bounds = recentred
 
         if selected_bounds is None:
-            if strategy_alias in {"s4_pred", "s8_pred"} and pred_bounds is not None:
-                selected_bounds = pred_bounds
-                selected_points = _safe_stack([selected_points, X_pred_sel], n_dim=len(selected_features))
-            elif strategy_alias in {"s4_obj", "s8_obj"} and obj_bounds is not None:
+            if strategy_alias == "s4_obj" and obj_bounds is not None:
                 selected_bounds = obj_bounds
                 selected_points = _safe_stack([selected_points, X_obj_sel], n_dim=len(selected_features))
-            elif strategy_alias in {"s4", "s8"}:
+            elif strategy_alias == "s4":
                 raise RuntimeError("Dual refinement produced no selected bounds.")
-            elif strategy_alias in {"s4_obj", "s8_obj"}:
+            elif strategy_alias == "s4_obj":
                 raise RuntimeError("Obj refinement produced no selected bounds.")
 
         bounds_path = None
@@ -3644,7 +3241,7 @@ class ExplorerOrchestrator:
 
             # DSE-2: dual disagreement이 매우 낮을 때(pred·obj 클러스터 거의 분리)
             # selected_bounds를 pred ∪ obj로 확장. 후속 vol cap이 boundary-pin과 함께
-            # 두 region의 corner를 보존할 수 있도록 함. dual 모드(s4/s8)에 한정.
+            # 두 region의 corner를 보존할 수 있도록 함. dual 모드에 한정.
             _dse2_strategy_params = dict(self.config.system.strategy_params or {})
             _dse2_iou_threshold = float(_dse2_strategy_params.get(
                 "dse2_low_iou_union_threshold", 0.20
@@ -3653,7 +3250,7 @@ class ExplorerOrchestrator:
             if routed_v2_decision is not None:
                 _dse2_iou_threshold = float(routed_v2_decision.dse2_iou_threshold)
             if (
-                strategy_alias in {"s4", "s8"}
+                strategy_alias == "s4"
                 and pred_bounds is not None
                 and obj_bounds is not None
                 and dual_disagreement_iou is not None
@@ -3765,7 +3362,7 @@ class ExplorerOrchestrator:
             # - ignore strategy/routed overrides
             # - keep fixed target at 24.99%
             dual_cap_raw = 0.2499
-            if strategy_alias in {"s4", "s8", "s4_pred", "s8_pred", "s4_obj", "s8_obj"}:  # K: pred/obj 전략에도 volume cap 적용
+            if strategy_alias in {"s4", "s4_obj"}:
                 try:
                     dual_volume_cap_target = float(dual_cap_raw)
                 except Exception:
@@ -4098,102 +3695,37 @@ class ExplorerOrchestrator:
                 obj_bounds_widths_normalized = _widths_normalized(obj_bounds)
             except Exception:
                 obj_bounds_widths_normalized = None
-            # persist selected bounds as artifact (json)
-            if selected_features and len(selected_features) == len(selected_bounds):
-                bounds_payload = {
-                    "selected_bounds": {
-                        name: {"lb": float(lb), "ub": float(ub)}
-                        for name, (lb, ub) in zip(selected_features, selected_bounds)
-                    },
-                    "volume_ratio": float(vol_ratio) if vol_ratio is not None else None,
-                    "bounds_order": list(selected_features),
-                    "strategy_alias": strategy_alias,
-                }
-            else:
-                bounds_payload = {
-                    "selected_bounds": [
-                        {"lb": float(lb), "ub": float(ub)} for lb, ub in selected_bounds
-                    ],
-                    "volume_ratio": float(vol_ratio) if vol_ratio is not None else None,
-                    "bounds_order": list(selected_features),
-                    "strategy_alias": strategy_alias,
-                }
-            bounds_path = os.path.join(public_dir, "selected_bounds.json")
-            with open(bounds_path, "w", encoding="utf-8") as f:
-                json.dump(bounds_payload, f, indent=2)
+            bounds_path = save_selected_bounds_artifact(
+                public_dir=public_dir,
+                selected_features=selected_features,
+                selected_bounds=selected_bounds,
+                volume_ratio=vol_ratio,
+                strategy_alias=strategy_alias,
+            )
 
-        if save_plot:
-            try:
-                # Pairwise plots for all feature pairs
-                if len(selected_features) >= 2 and X_pred_sel.size and X_obj_sel.size:
-                    pairs = [(i, j) for i in range(len(selected_features)) for j in range(i + 1, len(selected_features))]
-                    for i, j in pairs:
-                        out_path = os.path.join(
-                            debug_dir,
-                            f"pair_dual_{selected_features[i]}_{selected_features[j]}.png",
-                        )
-                        pair_overlay_paths.append(
-                            plot_dual_cluster_pair(
-                                X_pred=X_pred_sel,
-                                labels_pred=labels_pred,
-                                X_obj=X_obj_sel,
-                                labels_obj=labels_obj,
-                                feature_names=selected_features,
-                                pair=(i, j),
-                                bounds=bounds,
-                                x_opt=x_opt,
-                                problem_name=doe_problem_name,
-                                project_root=project_root,
-                                use_timestamp=bool(use_timestamp),
-                                save_path=out_path,
-                            )
-                        )
-
-                # Selected bounds plot
-                if selected_bounds is not None and selected_points is not None and len(selected_features) >= 2:
-                    pairs = [(i, j) for i in range(len(selected_features)) for j in range(i + 1, len(selected_features))]
-                    for i, j in pairs:
-                        out_path = os.path.join(
-                            debug_dir,
-                            f"pair_bounds_{selected_features[i]}_{selected_features[j]}.png",
-                        )
-                        pair_overlay_paths.append(
-                            plot_bounds_pair(
-                                X_points=selected_points,
-                                X_pred=X_pred_sel if X_pred_sel.size else None,
-                                X_obj=X_obj_sel if X_obj_sel.size else None,
-                                feature_names=selected_features,
-                                pair=(i, j),
-                                bounds=bounds,
-                                selected_bounds=selected_bounds,
-                                x_opt=x_opt,
-                                problem_name=doe_problem_name,
-                                project_root=project_root,
-                                use_timestamp=bool(use_timestamp),
-                                save_path=out_path,
-                            )
-                        )
-
-                # DOE/Explorer pairwise debug: stage-wise + known optimum + constraint-aware filtering
-                try:
-                    plot_out = plot_doe_vs_optimum(
-                        doe_df=doe_df if doe_df is not None else pd.DataFrame(),
-                        explorer_df=df,
-                        selected_features=selected_features,
-                        known_optimum=self.config.user.known_optimum,
-                        objective_sense=objective_sense,
-                        out_dir=debug_dir,
-                        respect_constraints=bool(has_pre_constraints or has_post_constraints),
-                    )
-                    doe_vs_optimum_plot_paths = list(plot_out.get("saved", []))
-                except Exception as exc:
-                    print(f"[Explorer] DOE-vs-optimum plot skipped: {exc}")
-            except Exception as exc:
-                print(f"[Explorer] Dual cluster plots skipped: {exc}")
-
-        workflow_info = {"EXPLORER": "objective_data_plus_optional_model"}
-
-        saver = ResultSaver(use_timestamp=bool(use_timestamp))
+        plot_result = render_explorer_debug_plots(
+            enabled=save_plot,
+            debug_dir=debug_dir,
+            selected_features=selected_features,
+            X_pred_sel=X_pred_sel,
+            labels_pred=labels_pred,
+            X_obj_sel=X_obj_sel,
+            labels_obj=labels_obj,
+            selected_points=selected_points,
+            selected_bounds=selected_bounds,
+            bounds=bounds,
+            x_opt=x_opt,
+            problem_name=doe_problem_name,
+            project_root=project_root,
+            use_timestamp=bool(use_timestamp),
+            doe_plot_df=doe_plot_df,
+            explorer_df=df,
+            known_optimum=self.config.user.known_optimum,
+            objective_sense=objective_sense,
+            respect_constraints=bool(has_pre_constraints or has_post_constraints),
+        )
+        pair_overlay_paths = plot_result.pair_overlay_paths
+        doe_vs_optimum_plot_paths = plot_result.doe_vs_optimum_plot_paths
 
         def _rel_or_abs(path: str | None) -> str | None:
             if not path:
@@ -4390,8 +3922,6 @@ class ExplorerOrchestrator:
             "pred_multistart_det_fraction_used": pred_multistart_det_fraction_used,
             "pred_refine_bounds_scale_used": pred_refine_bounds_scale_used,
             "pred_n_starts_used": pred_n_starts_used,
-            "pred_overconf_guard_triggered": bool(pred_overconf_guard_triggered),
-            "pred_overconf_guard_reason": pred_overconf_guard_reason,
             # Dual
             "dual_policy_mode": dual_policy_mode,
             "dual_total_starts_target": dual_total_starts_target,
@@ -4414,12 +3944,6 @@ class ExplorerOrchestrator:
                 routed_v2_decision.to_dict() if routed_v2_decision is not None else None
             ),
         }
-        _safe_strategy_id = _normalize_strategy_id(strategy_id)
-        _analysis_filename = f"analysis_{_safe_strategy_id}.json" if _safe_strategy_id else "analysis.json"
-        _analysis_path = os.path.join(task_dir, "artifacts", "meta", _analysis_filename)
-        os.makedirs(os.path.dirname(_analysis_path), exist_ok=True)
-        with open(_analysis_path, "w", encoding="utf-8") as _af:
-            json.dump(_explorer_analysis_meta, _af, ensure_ascii=False, indent=2, default=str)
         n_clusters = int(pred_stats.get("n_clusters", 0)) if isinstance(pred_stats, dict) else 0
         cluster_sizes: list[int] = []
         results_summary = {
@@ -4432,40 +3956,28 @@ class ExplorerOrchestrator:
             "strategy_id": strategy_id,
         }
 
-        public_artifacts = {}
-        meta_artifacts = {
-            "analysis": os.path.relpath(_analysis_path, task_dir),
-        }
-        debug_artifacts = {}
-        if bounds_path:
-            public_artifacts["selected_bounds"] = os.path.relpath(bounds_path, task_dir)
-        if pair_overlay_paths:
-            debug_artifacts["pair_dual_clusters"] = [os.path.relpath(p, task_dir) for p in pair_overlay_paths]
-        if doe_vs_optimum_plot_paths:
-            debug_artifacts["doe_vs_optimum_pairwise"] = [
-                os.path.relpath(p, task_dir) for p in doe_vs_optimum_plot_paths
-            ]
-
-        task_out = saver.save_task_v3(
-            run_root=self.run_context.run_root,
-            task="Explorer",
+        output_result = save_explorer_outputs(
+            run_context=self.run_context,
+            task_dir=task_dir,
             problem_name=doe_problem_name,
+            use_timestamp=bool(use_timestamp),
+            strategy_id=strategy_id,
+            safe_strategy_id=_normalize_strategy_id(strategy_id),
             df=df,
             inputs=inputs,
             resolved_params=resolved_params,
+            analysis_metadata=_explorer_analysis_meta,
             results=results_summary,
-            run_tag=strategy_id,
-            public_artifacts=public_artifacts,
-            meta_artifacts=meta_artifacts,
-            debug_artifacts=debug_artifacts,
+            selected_bounds_path=bounds_path,
+            pair_overlay_paths=pair_overlay_paths,
+            doe_vs_optimum_plot_paths=doe_vs_optimum_plot_paths,
         )
-        update_run_index(self.run_context, "Explorer", task_out["metadata"])
 
         return {
-            "csv": task_out["csv"],
-            "metadata": task_out["metadata"],
+            "csv": output_result.csv,
+            "metadata": output_result.metadata,
             "labels": None,
             "strategy_id": strategy_id,
-            "selected_bounds_path": bounds_path,
+            "selected_bounds_path": output_result.selected_bounds_path,
             "selected_bounds_volume_ratio": vol_ratio,
         }

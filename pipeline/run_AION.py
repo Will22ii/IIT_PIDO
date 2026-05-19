@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from CAE_tool_interface.config import CAEConfig, CAESystemConfig, CAEUserConfig
 from DOE.config import DOEConfig, DOESystemConfig, DOEUserConfig
 from Explorer.config import ExplorerConfig, ExplorerSystemConfig, ExplorerUserConfig
+from Explorer.strategy_presets import apply_explorer_strategy_preset
 from Modeler.config import ModelerConfig, ModelerSystemConfig, ModelerUserConfig
 from Optimizer.config import OptimizerConfig, OptimizerSystemConfig, OptimizerUserConfig
 from pipeline.config import PipelineConfig, PipelineReusePolicy, PipelineTasks
@@ -68,15 +69,20 @@ def build_aion_pipeline_config(*, config: AIONConfig) -> PipelineConfig:
         doe_metadata_path=None,
     )
 
-    explorer_cfg = ExplorerConfig(
-        user=ExplorerUserConfig(
-            known_optimum=config.known_optimum,
-        ),
-        system=ExplorerSystemConfig(
+    explorer_system = apply_explorer_strategy_preset(
+        ExplorerSystemConfig(
             strategy_id="S4_dual",
             debug_level=str(config.debug_level),
             save_plot=True,
         ),
+        "S4_dual",
+    )
+
+    explorer_cfg = ExplorerConfig(
+        user=ExplorerUserConfig(
+            known_optimum=config.known_optimum,
+        ),
+        system=explorer_system,
         cae=cae_cfg,
         doe_csv_path=None,
         doe_metadata_path=None,

@@ -143,8 +143,10 @@ class ExplorerConfig:
     cae: CAEConfig
     cae_metadata_path: str | None = None
     doe_csv_path: str | None = None
+    # Legacy compatibility only. Explorer runtime does not read DOE metadata.
     doe_metadata_path: str | None = None
     selected_features_csv_path: str | None = None
     model_pkl_path: str | None = None
+    # Legacy compatibility only. Use model_pkl_path/selected_features_csv_path instead.
     modeler_metadata_path: str | None = None
     fi_scores_path: str | None = None

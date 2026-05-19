@@ -188,8 +188,7 @@ def route_v2(
 
     # ─────────────────────────────────────────────────────────────
     # (A) acquisition mode
-    # 근거: shared_snapshot에서 EI(S4) vs LCB(S8)가 benchmark별로 ±2pt 수준.
-    #       단일 acq 선택은 risky → 확신 영역에서만 단독, 나머지는 union.
+    # 단일 dual strategy 내부에서 acquisition confidence에 따라 EI 사용 여부를 고른다.
     # ─────────────────────────────────────────────────────────────
     if (
         pc is not None

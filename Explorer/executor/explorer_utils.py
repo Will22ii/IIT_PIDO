@@ -90,8 +90,8 @@ def resolve_bounds(
 ) -> list[Tuple[float, float]]:
     bounds = []
     if not variables:
-        print("[Explorer] Variables not found in DOE metadata.")
-        raise RuntimeError("Cannot resolve bounds without DOE variables metadata.")
+        print("[Explorer] Variables not found in CAE metadata.")
+        raise RuntimeError("Cannot resolve bounds without CAE variable metadata.")
     for feature in selected_features:
         matched = next(
             (v for v in variables if v.get("name") == feature),
