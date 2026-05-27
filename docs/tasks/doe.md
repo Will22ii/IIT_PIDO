@@ -73,3 +73,8 @@ Explorer는 `doe_results.csv`를 input CSV로 사용할 수 있다. 단, column�
 
 Explorer는 feature schema나 constraints를 결정하기 위해 DOE metadata를 읽지 않는다.
 
+## Benchmark Role
+
+DOE와 additional DOE의 역할은 downstream task가 좋은 region을 찾을 수 있도록 objective/feasibility evidence를 충분히 제공하는 것이다.
+
+Benchmark에서 known optimum 주변 데이터가 충분한지는 DOE 품질 분석에 도움이 되지만, DOE runtime은 known optimum을 알거나 사용할 수 없다. Additional DOE는 Explorer가 selected bounds를 더 잘 잡도록 돕고, 그 결과 Optimizer가 더 좋은 goal을 달성할 가능성을 높이는 upstream task다.

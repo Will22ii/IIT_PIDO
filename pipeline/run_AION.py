@@ -21,7 +21,6 @@ class AIONConfig:
     seed: int = 42
     n_doe_samples: int = 100
     optimizer_n_samples: int = 30
-    known_optimum: dict | list | None = None
     variables: list[dict] | None = None
     run_root: str | None = None
     debug_level: str = "on"
@@ -81,9 +80,7 @@ def build_aion_pipeline_config(*, config: AIONConfig) -> PipelineConfig:
     )
 
     explorer_cfg = ExplorerConfig(
-        user=ExplorerUserConfig(
-            known_optimum=config.known_optimum,
-        ),
+        user=ExplorerUserConfig(),
         system=explorer_system,
         cae=cae_cfg,
         doe_csv_path=None,
@@ -182,20 +179,11 @@ def aion_config_from_dict(payload: dict[str, Any]) -> AIONConfig:
     if optimizer_n_samples is None:
         optimizer_n_samples = optimizer.pop("optimizer_n_samples", 30)
 
-    problem_known_optimum = problem.pop("known_optimum", None)
-    explorer_known_optimum = explorer.pop("known_optimum", None)
-    known_optimum = (
-        explorer_known_optimum
-        if explorer_known_optimum is not None
-        else problem_known_optimum
-    )
-
     cfg = AIONConfig(
         problem_name=str(problem_name),
         objective_sense=str(problem.pop("objective_sense", "min")),
         seed=int(problem.pop("seed", 42)),
         variables=problem.pop("variables", None),
-        known_optimum=known_optimum,
         run_root=run.pop("run_root", None),
         debug_level=str(run.pop("debug_level", "on")),
         use_timestamp=bool(run.pop("use_timestamp", False)),

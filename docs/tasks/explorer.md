@@ -79,6 +79,14 @@ Explorer/artifacts/public/<strategy>/selected_bounds.json
 
 `selected_bounds.json`은 downstream-facing public artifact이며 Optimizer가 사용할 수 있다.
 
+## Benchmark Diagnostic
+
+Explorer의 역할은 downstream Optimizer가 사용할 수 있는 좋은 selected bounds를 만드는 것이다.
+
+`run_pipelines.py` benchmark에서는 known optimum inclusion을 Explorer bounds 품질 진단값으로 볼 수 있다. 하지만 실제 `run_pipeline`/`run_AION` 서비스성 실행에서는 known optimum 개념이 없으므로, Explorer runtime contract가 아니다.
+
+Explorer가 좋은 bounds를 만들면 Optimizer가 더 강한 goal을 달성할 가능성이 높아진다. 반대로 Optimizer-only 실행에서는 Explorer bounds가 없으므로 known optimum inclusion이 Optimizer의 성공 조건이 아니다.
+
 ## Debug Outputs
 
 `debug_level == "on"`이고 `save_plot == True`일 때 Explorer는 아래 plot을 쓸 수 있다.

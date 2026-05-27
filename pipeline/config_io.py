@@ -94,7 +94,6 @@ def pipeline_config_from_dict(payload: dict[str, Any]) -> PipelineConfig:
     seed = int(_pop_known(problem, "seed", 42))
     objective_sense = str(_pop_known(problem, "objective_sense", "min"))
     variables = _pop_known(problem, "variables", None)
-    known_optimum = _pop_known(problem, "known_optimum", None)
     if problem:
         raise RuntimeError(f"Unknown config key(s) in problem: {sorted(problem.keys())}")
 
@@ -148,7 +147,6 @@ def pipeline_config_from_dict(payload: dict[str, Any]) -> PipelineConfig:
         debug_level=debug_level,
         enabled=run_explorer,
         inputs=inputs,
-        known_optimum=known_optimum,
     )
     optimizer_cfg = _build_optimizer_config(
         payload=payload,
@@ -294,7 +292,6 @@ def _build_explorer_config(
     debug_level: str,
     enabled: bool,
     inputs: dict[str, Any],
-    known_optimum: Any,
 ) -> ExplorerConfig | None:
     section, user_overrides, system_overrides = _split_user_system(
         _as_dict(payload.get("explorer"), name="explorer"),
@@ -303,12 +300,11 @@ def _build_explorer_config(
     if not enabled and not section and not user_overrides and not system_overrides:
         return None
 
-    user = ExplorerUserConfig(
-        known_optimum=section.pop(
-            "known_optimum",
-            user_overrides.pop("known_optimum", known_optimum),
-        )
-    )
+    # known_optimum is a run_pipelines benchmark/debug concept. The service-style
+    # run_pipeline config does not expose it.
+    section.pop("known_optimum", None)
+    user_overrides.pop("known_optimum", None)
+    user = ExplorerUserConfig()
     _apply_dataclass_overrides(user, user_overrides, section_name="explorer.user")
 
     strategy_id = str(section.pop("strategy_id", system_overrides.pop("strategy_id", "S4_obj")))
@@ -376,11 +372,19 @@ def _build_optimizer_config(
         doe_csv_path=doe_csv_path,
         explorer_bounds_path=explorer_bounds_path,
     )
+    # known_optimum markers are injected only by run_pipelines benchmark cases.
+    # Keep run_pipeline JSON free of benchmark-only fields.
+    section.pop("known_optimum", None)
+    user_overrides.pop("known_optimum", None)
     _apply_dataclass_overrides(user, user_overrides, section_name="optimizer.user")
 
     system = OptimizerSystemConfig(debug_level=debug_level)
+    section.pop("n_restarts", None)
     if "debug_level" in system_overrides:
         system_overrides.pop("debug_level")
+    # Removed compatibility key. Keep old JSON configs from failing while
+    # preventing it from becoming part of the active Optimizer schema again.
+    system_overrides.pop("n_restarts", None)
     _apply_dataclass_overrides(system, system_overrides, section_name="optimizer.system")
 
     if section:

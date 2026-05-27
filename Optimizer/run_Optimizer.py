@@ -7,8 +7,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from Optimizer.algorithms.registry import get_optimizer_algorithm
 from Optimizer.config import OptimizerConfig
-from Optimizer.executor.bo_engine import run_bo_engine
 from Optimizer.executor.input_workflow import resolve_optimizer_inputs
 from Optimizer.executor.output_workflow import save_optimizer_outputs
 from pipeline.run_context import RunContext, create_run_context, get_task_metadata_path, update_run_index
@@ -73,20 +73,9 @@ def run_optimizer(
     if resolved.modeler_metadata_path and get_task_metadata_path(run_context, "Modeler") is None:
         update_run_index(run_context, "Modeler", os.path.abspath(resolved.modeler_metadata_path))
 
-    bo_result = run_bo_engine(
-        problem_name=resolved.problem_name,
-        variables=resolved.variables,
-        doe_df=resolved.doe_df,
-        selected_features=resolved.selected_features,
-        selected_bounds=resolved.selected_bounds,
-        objective_col=str(config.system.objective_col),
-        objective_sense=str(resolved.objective_sense),
-        n_samples=int(config.user.n_samples),
-        system=config.system,
-        seed=int(resolved.seed),
-        constraint_defs=resolved.constraint_defs,
-        post_feasibility_payload=resolved.post_feasibility_payload,
-    )
+    algorithm_id = str(getattr(config.system, "algorithm_id", "focus_bo") or "focus_bo")
+    algorithm = get_optimizer_algorithm(algorithm_id)
+    bo_result = algorithm.run(config=config, resolved=resolved)
 
     task_out = save_optimizer_outputs(
         config=config,
@@ -96,6 +85,7 @@ def run_optimizer(
     )
 
     print(f"- Iterations completed: {bo_result.n_iterations}")
+    print(f"- Algorithm: {algorithm_id}")
     print(f"- Best objective: {bo_result.best_objective:.6f}")
     print(f"- Best objective (raw): {bo_result.best_objective_raw:.6f}")
     print(f"- Best point: {bo_result.best_point}")

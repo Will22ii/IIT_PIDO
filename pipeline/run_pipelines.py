@@ -31,7 +31,9 @@ from pipeline.run_pipeline import run_pipeline
 class ProblemCase:
     problem_name: str
     known_optimum: Any
+    # DOE budget. Optimizer budget is configured separately below.
     n_samples: int
+    optimizer_n_samples: int | None = None
     objective_sense: str = "min"
     repeats: int = 1
 
@@ -68,19 +70,22 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="rosenbrock_nodummy",
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
         n_samples=450,
-        repeats=10,
+        optimizer_n_samples=1500,
+        repeats=3,
     ),
     "cantilever_beam_nodummy": ProblemCase(
         problem_name="cantilever_beam_nodummy",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         n_samples=45,
-        repeats=25,
+        optimizer_n_samples=150,
+        repeats=3,
     ),
     "goldstein_price_nodummy": ProblemCase(
         problem_name="goldstein_price_nodummy",
         known_optimum={"x1": 0.0, "x2": -1.0},
         n_samples=150,
-        repeats=50,
+        optimizer_n_samples=500,
+        repeats=3,
     ),
     "six_hump_camel_nodummy": ProblemCase(
         problem_name="six_hump_camel_nodummy",
@@ -89,23 +94,50 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": -0.0898, "x2": 0.7126},
         ],
         n_samples=15,
-        repeats=25,
+        optimizer_n_samples=50,
+        repeats=3,
     ),
 }
 
 # Activate only the cases used in this run.
 ACTIVE_PROBLEM_CASES: list[str] = [
-    "cantilever_beam",
-    "rosenbrock",
-    "goldstein_price",
-    "six_hump_camel",
+    # "cantilever_beam",
+    # "rosenbrock",
+    # "goldstein_price",
+    # "six_hump_camel",
     # "cantilever_beam_nodummy",
-    # "rosenbrock_nodummy",
-    # "goldstein_price_nodummy",
-    # "six_hump_camel_nodummy",
+    "rosenbrock_nodummy",
+    "goldstein_price_nodummy",
+    "six_hump_camel_nodummy",
 ]
 
 PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIVE_PROBLEM_CASES]
+
+# Batch runner local config. This file is an analysis runner, so the default
+# execution policy lives here instead of requiring CLI flags.
+BATCH_TASKS: dict[str, bool] = {
+    "doe": False,
+    "modeler": False,
+    "explorer": False,
+    "optimizer": True,
+}
+BATCH_DEFAULT_OPTIMIZER_N_SAMPLES = 80
+BATCH_USE_ADDITIONAL = True
+BATCH_USE_HPO = False
+BATCH_USE_PRIMARY_SELECTION = True
+BATCH_USE_TIMESTAMP = True
+BATCH_DEBUG_LEVEL = "on"
+BATCH_CONTINUE_ON_ERROR = False
+
+# Keep the per-problem n_samples/repeats fixed for score experiments. These are
+# the target budgets, not a convenience runtime knob.
+BATCH_FAST_OPTIMIZER_MODE = False
+BATCH_FAST_REPEATS: int | None = None
+BATCH_FAST_OPTIMIZER_N_SAMPLES_BY_PROBLEM: dict[str, int] = {}
+BATCH_OPTIMIZER_SYSTEM_OVERRIDES: dict[str, Any] = {
+    # Score experiments should preserve optimizer defaults. Put temporary
+    # profiling-only overrides here only when explicitly testing runtime tradeoffs.
+}
 
 
 def _strategy_map() -> dict[str, ExplorerStrategy]:
@@ -113,7 +145,34 @@ def _strategy_map() -> dict[str, ExplorerStrategy]:
 
 
 def _resolve_case_repeats(case: ProblemCase) -> int:
+    if BATCH_FAST_OPTIMIZER_MODE and BATCH_FAST_REPEATS is not None:
+        return int(max(int(BATCH_FAST_REPEATS), 1))
     return int(max(int(case.repeats), 1))
+
+
+def _resolve_case_optimizer_samples(case: ProblemCase, default_value: int) -> int:
+    if BATCH_FAST_OPTIMIZER_MODE and case.problem_name in BATCH_FAST_OPTIMIZER_N_SAMPLES_BY_PROBLEM:
+        return int(max(int(BATCH_FAST_OPTIMIZER_N_SAMPLES_BY_PROBLEM[case.problem_name]), 0))
+    if case.optimizer_n_samples is not None:
+        return int(max(int(case.optimizer_n_samples), 0))
+    return int(max(int(default_value), 0))
+
+
+def _cli_option_present(name: str) -> bool:
+    token = str(name)
+    prefix = token + "="
+    return any(arg == token or arg.startswith(prefix) for arg in sys.argv[1:])
+
+
+def _build_optimizer_system_config(*, debug_level: str):
+    from Optimizer.config import OptimizerSystemConfig
+
+    system_cfg = OptimizerSystemConfig(debug_level=str(debug_level))
+    for key, value in BATCH_OPTIMIZER_SYSTEM_OVERRIDES.items():
+        if not hasattr(system_cfg, key):
+            raise RuntimeError(f"Unknown optimizer system override in run_pipelines.py: {key}")
+        setattr(system_cfg, key, value)
+    return system_cfg
 
 
 def _case_real_variables(case: ProblemCase) -> list[str]:
@@ -219,11 +278,14 @@ def _build_pipeline_config(
 
     optimizer_cfg = None
     if run_optimizer:
-        from Optimizer.config import OptimizerConfig, OptimizerSystemConfig, OptimizerUserConfig
+        from Optimizer.config import OptimizerConfig, OptimizerUserConfig
 
         optimizer_cfg = OptimizerConfig(
-            user=OptimizerUserConfig(n_samples=int(max(int(optimizer_n_samples), 0))),
-            system=OptimizerSystemConfig(debug_level=str(debug_level)),
+            user=OptimizerUserConfig(
+                n_samples=int(max(int(optimizer_n_samples), 0)),
+                known_optimum=case.known_optimum,
+            ),
+            system=_build_optimizer_system_config(debug_level=str(debug_level)),
             cae=cae_cfg,
             cae_metadata_path=None,
             doe_metadata_path=None,
@@ -920,18 +982,40 @@ def main() -> None:
 
     base_seed = int(args.base_seed)
     repeat_seed_step = int(args.repeat_seed_step)
-    continue_on_error = bool(args.continue_on_error)
+    continue_on_error = bool(BATCH_CONTINUE_ON_ERROR or args.continue_on_error)
 
-    run_doe = not bool(args.skip_doe)
-    run_modeler = not bool(args.skip_modeler)
-    run_explorer = not bool(args.skip_explorer)
-    run_optimizer = bool(args.run_optimizer)
-    optimizer_n_samples = int(max(int(args.optimizer_samples), 0))
-    use_additional = not bool(args.no_additional)
-    use_hpo = not bool(args.no_hpo)
-    use_primary_selection = not bool(args.no_primary_selection)
-    use_timestamp = not bool(args.no_timestamp)
-    debug_level = "off" if bool(args.no_debug) else "on"
+    run_doe = bool(BATCH_TASKS.get("doe", True))
+    run_modeler = bool(BATCH_TASKS.get("modeler", True))
+    run_explorer = bool(BATCH_TASKS.get("explorer", True))
+    run_optimizer = bool(BATCH_TASKS.get("optimizer", False))
+    if bool(args.skip_doe):
+        run_doe = False
+    if bool(args.skip_modeler):
+        run_modeler = False
+    if bool(args.skip_explorer):
+        run_explorer = False
+    if bool(args.run_optimizer):
+        run_optimizer = True
+
+    optimizer_n_samples_default = int(max(int(BATCH_DEFAULT_OPTIMIZER_N_SAMPLES), 0))
+    if _cli_option_present("--optimizer-samples"):
+        optimizer_n_samples_default = int(max(int(args.optimizer_samples), 0))
+
+    use_additional = bool(BATCH_USE_ADDITIONAL)
+    if bool(args.no_additional):
+        use_additional = False
+    use_hpo = bool(BATCH_USE_HPO)
+    if bool(args.no_hpo):
+        use_hpo = False
+    use_primary_selection = bool(BATCH_USE_PRIMARY_SELECTION)
+    if bool(args.no_primary_selection):
+        use_primary_selection = False
+    use_timestamp = bool(BATCH_USE_TIMESTAMP)
+    if bool(args.no_timestamp):
+        use_timestamp = False
+    debug_level = str(BATCH_DEBUG_LEVEL).strip().lower() or "on"
+    if bool(args.no_debug):
+        debug_level = "off"
     explorer_strategies = _resolve_requested_strategies(args.explorer_strategies)
 
     total_runs = sum(_resolve_case_repeats(case) for case in PROBLEM_SUITE)
@@ -953,12 +1037,14 @@ def main() -> None:
         f"debug={debug_level}"
     )
     if run_optimizer:
-        print(f"- optimizer_n_samples={optimizer_n_samples}")
+        print(f"- default_optimizer_n_samples={optimizer_n_samples_default}")
     print(
         "- problem_repeats="
         + ",".join(
             [
-                f"{case.problem_name}:{_resolve_case_repeats(case)}"
+                f"{case.problem_name}:repeat={_resolve_case_repeats(case)},"
+                f"doe_n={case.n_samples},"
+                f"opt_n={_resolve_case_optimizer_samples(case, optimizer_n_samples_default)}"
                 for case in PROBLEM_SUITE
             ]
         )
@@ -968,13 +1054,18 @@ def main() -> None:
 
     for idx, case in enumerate(PROBLEM_SUITE):
         case_repeats = _resolve_case_repeats(case)
+        case_optimizer_n_samples = _resolve_case_optimizer_samples(
+            case,
+            optimizer_n_samples_default,
+        )
         for rep in range(case_repeats):
             run_counter += 1
             seed = base_seed + rep * repeat_seed_step + idx
             print(
                 "[Batch] "
                 f"run={run_counter}/{total_runs} repeat={rep + 1}/{case_repeats} "
-                f"problem={case.problem_name} seed={seed} n_samples={case.n_samples}"
+                f"problem={case.problem_name} seed={seed} "
+                f"doe_n_samples={case.n_samples} optimizer_n_samples={case_optimizer_n_samples}"
             )
 
             cfg = _build_pipeline_config(
@@ -984,7 +1075,7 @@ def main() -> None:
                 run_modeler=run_modeler,
                 run_explorer=False,
                 run_optimizer=bool(run_optimizer and (not run_explorer)),
-                optimizer_n_samples=optimizer_n_samples,
+                optimizer_n_samples=case_optimizer_n_samples,
                 use_additional=use_additional,
                 use_hpo=use_hpo,
                 use_primary_selection=use_primary_selection,
@@ -1087,13 +1178,15 @@ def main() -> None:
                                     from Optimizer.run_Optimizer import run_optimizer as _run_optimizer
                                     from Optimizer.config import (
                                         OptimizerConfig,
-                                        OptimizerSystemConfig,
                                         OptimizerUserConfig,
                                     )
 
                                     opt_cfg = OptimizerConfig(
-                                        user=OptimizerUserConfig(n_samples=optimizer_n_samples),
-                                        system=OptimizerSystemConfig(),
+                                        user=OptimizerUserConfig(
+                                            n_samples=case_optimizer_n_samples,
+                                            known_optimum=case.known_optimum,
+                                        ),
+                                        system=_build_optimizer_system_config(debug_level=debug_level),
                                         cae=cfg.cae,
                                         cae_metadata_path=None,
                                         doe_metadata_path=None,

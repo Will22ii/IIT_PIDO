@@ -2718,6 +2718,61 @@ class ExplorerOrchestrator:
             if isinstance(selected_points, np.ndarray) and selected_points.ndim == 2 and selected_points.shape[0] > 0:
                 _center_hint_arr = np.median(selected_points, axis=0)
 
+            # #M: feasibility-aware floor expansion direction.
+            # has_pre + p_dim>=min + side_scores 존재 시, |rate_ub - rate_lb| >= diff_min
+            # 인 dim의 center_hint를 feasible side(g_lb + bias*(g_ub-g_lb))로 오버라이드.
+            # floor expansion이 feasibility 방향으로 우선 확장되어 optimum corner 누락
+            # 방지. state-based gate, benchmark 명 분기 아님.
+            _m_enabled = bool(getattr(self.config.system, "feasibility_floor_hint_enabled", True))
+            _m_p_dim_min = int(getattr(self.config.system, "feasibility_floor_hint_p_dim_min", 4))
+            _m_rate_diff_min = float(getattr(self.config.system, "feasibility_floor_hint_rate_diff_min", 0.5))
+            _m_bias = float(np.clip(
+                float(getattr(self.config.system, "feasibility_floor_hint_bias", 0.90)),
+                0.0, 1.0,
+            ))
+            if (
+                _m_enabled
+                and has_pre_constraints
+                and len(selected_features) >= _m_p_dim_min
+                and isinstance(constraint_aware_side_scores, list)
+                and len(constraint_aware_side_scores) == len(bounds)
+            ):
+                if _center_hint_arr is None:
+                    _center_hint_arr = np.array(
+                        [0.5 * (float(g_lb) + float(g_ub)) for (g_lb, g_ub) in bounds],
+                        dtype=float,
+                    )
+                else:
+                    _center_hint_arr = np.asarray(_center_hint_arr, dtype=float).copy()
+                _m_overridden_dims: list[tuple[int, str, float]] = []
+                for _s in constraint_aware_side_scores:
+                    if not isinstance(_s, dict):
+                        continue
+                    _j = int(_s.get("dim", -1))
+                    if _j < 0 or _j >= len(bounds):
+                        continue
+                    _r_lb = float(_s.get("rate_lb", 0.0))
+                    _r_ub = float(_s.get("rate_ub", 0.0))
+                    _diff = _r_ub - _r_lb
+                    if abs(_diff) < _m_rate_diff_min:
+                        continue
+                    _g_lb, _g_ub = bounds[_j]
+                    _gl = float(min(_g_lb, _g_ub))
+                    _gu = float(max(_g_lb, _g_ub))
+                    if _gu <= _gl:
+                        continue
+                    if _diff > 0:
+                        _center_hint_arr[_j] = float(_gl + _m_bias * (_gu - _gl))
+                        _m_overridden_dims.append((_j, "ub", round(_diff, 2)))
+                    else:
+                        _center_hint_arr[_j] = float(_gl + (1.0 - _m_bias) * (_gu - _gl))
+                        _m_overridden_dims.append((_j, "lb", round(-_diff, 2)))
+                if _m_overridden_dims:
+                    print(
+                        f"[Explorer] #M feasibility_floor_hint applied: "
+                        f"dims={_m_overridden_dims} (bias={_m_bias:.2f})"
+                    )
+
             # D4: confidence-adaptive margin — pred confidence가 낮으면 margin 확대
             _margin_ratio = float(self.config.system.bounds_margin_ratio)
             if pred_cluster_confidence is not None and pred_cluster_confidence < 0.4:

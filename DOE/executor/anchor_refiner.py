@@ -176,6 +176,8 @@ class AcquisitionOptimizer:
         post_feasible_prob_fn: Callable[[np.ndarray], float] | None = None,
         post_penalty_lambda: float = 0.0,
         pre_hard_penalty: float = 1e9,
+        maxiter: int | None = None,
+        maxfun: int | None = None,
     ) -> np.ndarray | None:
         lb = np.asarray(lb, dtype=float).reshape(-1)
         ub = np.asarray(ub, dtype=float).reshape(-1)
@@ -187,6 +189,12 @@ class AcquisitionOptimizer:
         best_x = None
         best_val = float("inf")
         acq = str(acq_type).strip().upper()
+
+        options: dict[str, int] = {}
+        if maxiter is not None and int(maxiter) > 0:
+            options["maxiter"] = int(maxiter)
+        if maxfun is not None and int(maxfun) > 0:
+            options["maxfun"] = int(maxfun)
 
         for x0 in starts:
             x0 = np.clip(np.asarray(x0, dtype=float).reshape(-1), lb, ub)
@@ -225,10 +233,11 @@ class AcquisitionOptimizer:
                     x0,
                     method="L-BFGS-B",
                     bounds=bounds,
+                    options=options if options else None,
                 )
             except Exception:
                 continue
-            if not result.success:
+            if not result.success and not np.isfinite(float(getattr(result, "fun", float("nan")))):
                 continue
             x_opt = np.asarray(result.x, dtype=float).reshape(-1)
             if pre_feasible_fn is not None and not bool(pre_feasible_fn(x_opt)):

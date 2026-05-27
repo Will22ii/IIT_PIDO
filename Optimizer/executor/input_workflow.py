@@ -26,6 +26,7 @@ class ResolvedOptimizerInputs:
     modeler_metadata_path: str | None
     selected_features: list[str]
     selected_bounds: dict[str, tuple[float, float]]
+    bounds_source: str
     bounds_path: str | None
     post_feasibility_payload: dict | None
     post_feasibility_model_path: str | None
@@ -214,7 +215,7 @@ def _resolve_explorer_bounds_optional(
     config: OptimizerConfig,
     run_context: RunContext | None,
     bounds_override: dict[str, tuple[float, float]] | None,
-) -> tuple[dict[str, tuple[float, float]], list[str], str | None, str | None]:
+) -> tuple[dict[str, tuple[float, float]], list[str], str | None, str | None, str]:
     if bounds_override:
         clean: dict[str, tuple[float, float]] = {}
         for key, (lb, ub) in bounds_override.items():
@@ -222,7 +223,7 @@ def _resolve_explorer_bounds_optional(
             lo = float(min(lb, ub))
             hi = float(max(lb, ub))
             clean[k] = (lo, hi)
-        return clean, list(clean.keys()), None, None
+        return clean, list(clean.keys()), None, None, "override"
 
     user_bounds = str(config.user.explorer_bounds_path or "").strip()
     cfg_bounds = str(config.explorer_bounds_path or "").strip()
@@ -230,13 +231,13 @@ def _resolve_explorer_bounds_optional(
     if bounds_path:
         payload = _read_json(bounds_path)
         bounds_map, order = _parse_selected_bounds_payload(payload)
-        return bounds_map, order, None, bounds_path
+        return bounds_map, order, None, bounds_path, "path"
 
     explorer_meta_path = str(config.explorer_metadata_path or "").strip()
     if not explorer_meta_path and run_context is not None:
         explorer_meta_path = str(get_task_metadata_path(run_context, "Explorer") or "").strip()
     if not explorer_meta_path:
-        return {}, [], None, None
+        return {}, [], None, None, "cae"
     if not os.path.exists(explorer_meta_path):
         raise FileNotFoundError(f"Explorer metadata not found: {explorer_meta_path}")
 
@@ -255,7 +256,7 @@ def _resolve_explorer_bounds_optional(
     if selected_bounds_ref is None and "selected_bounds" in public_artifacts:
         selected_bounds_ref = public_artifacts.get("selected_bounds")
     if not isinstance(selected_bounds_ref, str) or not selected_bounds_ref.strip():
-        return {}, [], explorer_meta_path, None
+        return {}, [], explorer_meta_path, None, "cae"
 
     bounds_path_abs = selected_bounds_ref
     if not os.path.isabs(bounds_path_abs):
@@ -272,7 +273,7 @@ def _resolve_explorer_bounds_optional(
     else:
         order = order_from_payload
 
-    return bounds_map, order, explorer_meta_path, bounds_path_abs
+    return bounds_map, order, explorer_meta_path, bounds_path_abs, "explorer"
 
 
 def _resolve_modeler_metadata_path_optional(
@@ -378,7 +379,7 @@ def resolve_optimizer_inputs(
         cae_problem_name=problem_name,
     )
 
-    explorer_bounds, explorer_order, explorer_meta_path, bounds_path = _resolve_explorer_bounds_optional(
+    explorer_bounds, explorer_order, explorer_meta_path, bounds_path, bounds_source = _resolve_explorer_bounds_optional(
         config=config,
         run_context=run_context,
         bounds_override=bounds_override,
@@ -408,6 +409,7 @@ def resolve_optimizer_inputs(
         if not selected_features:
             selected_features = list(selected_bounds.keys())
     else:
+        bounds_source = "cae"
         if modeler_selected_features:
             selected_features = [f for f in modeler_selected_features if f in cae_bounds]
             missing_from_cae = [f for f in modeler_selected_features if f not in cae_bounds]
@@ -473,6 +475,7 @@ def resolve_optimizer_inputs(
         modeler_metadata_path=modeler_meta_path,
         selected_features=selected_features,
         selected_bounds=selected_bounds,
+        bounds_source=str(bounds_source),
         bounds_path=bounds_path,
         post_feasibility_payload=feasibility_payload,
         post_feasibility_model_path=feasibility_model_path,

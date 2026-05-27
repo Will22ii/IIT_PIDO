@@ -28,9 +28,9 @@ Debug 산출물은 단순하게 `debug_level = "on" | "off"`로 제어한다. �
 <run_root>/<Task>/artifacts/debug/
 ```
 
-`public`은 downstream task가 읽거나 사용자가 직접 볼 수 있는 간단한 산출물이다. 다른 task가 의존해도 되는 파일은 public에 둔다.
+`public`은 사용자가 직접 보거나 downstream task가 공식 output으로 읽어도 되는 간단한 산출물이다. Public에는 compact result와 최종 user-facing artifact만 둔다.
 
-`meta`는 구조화된 요약, analysis JSON, 재현성 정보를 담는다. meta는 debug dump가 아니므로 debug off에서도 기본적으로 유지한다.
+`meta`는 resolved input, 내부 선택 결과, 구조화된 요약, analysis JSON, 재현성 정보를 담는다. meta는 debug dump가 아니므로 debug off에서도 기본적으로 유지한다. Backend는 필요하면 meta 중 일부를 선택적으로 UI에 보여줄 수 있지만, meta 자체가 user-facing public output은 아니다.
 
 `debug`는 내부 trace, raw diagnostic table, plot, full history처럼 검증과 분석용으로 무겁거나 자세한 산출물을 둔다. `debug_level == "on"`일 때만 파일을 쓰고 metadata에 등록한다.
 
@@ -76,10 +76,12 @@ run_aion_from_dict(payload)
 run_aion_from_json(config_path)
 ```
 
-서비스 화면과 backend가 주고받는 사용자 입력 config는 아래 top-level section을 사용한다.
+현재 backend/dev config contract 후보는 아래 top-level section을 사용한다.
+최종 서비스 UI schema로 확정된 것은 아니며, 실제 parser 기준 계약은
+`docs/pipeline_config_contract.md`에 별도로 정리한다.
 
 ```text
-problem   # 문제명, seed, objective_sense, variables, known_optimum
+problem   # 문제명, seed, objective_sense, variables
 run       # run_root, debug_level, use_timestamp
 tasks     # doe/modeler/explorer/optimizer on/off (run_pipeline only)
 reuse     # 기존 run artifact fallback 정책
@@ -233,6 +235,30 @@ Debug off일 때:
 - Modeler raw FI debug table과 FI plot을 유지하지 않는다.
 - Explorer plot을 쓰지 않는다.
 - Optimizer full history CSV를 쓰지 않는다.
+
+## Optimizer artifact 정책
+
+Optimizer의 public artifact는 최종 사용자/프론트가 바로 볼 수 있는 결과만 남긴다.
+
+```text
+OPT/artifacts/public/opt_results.csv
+OPT/artifacts/public/best_point.json
+```
+
+`opt_results.csv`는 Optimizer가 새로 CAE 평가한 점만 기록한다. 입력 DOE/CSV archive row는 포함하지 않는다.
+
+아래 파일은 실행 검증, 재현, backend audit용이므로 meta에 둔다.
+
+```text
+OPT/artifacts/meta/selected_features.csv
+OPT/artifacts/meta/optimizer_inputs.json
+OPT/artifacts/meta/focus_regions.json
+OPT/artifacts/meta/focus_bounds.json
+```
+
+`selected_features.csv`와 `optimizer_inputs.json`은 사용자가 넣은 값을 다시 보여주기 위한 public report가 아니라, Optimizer input resolve가 어떤 feature/bounds/path를 실제로 채택했는지 검증하는 metadata다.
+
+`focus_regions.json`과 `focus_bounds.json`은 Focus2 내부 selected-bounds generator와 region manager의 audit artifact다. Explorer/user selected bounds가 없어도 Focus2가 generated bounds를 만들면 `focus_bounds.json`에 기록되고, Focus3는 이 bounds를 in-memory로 사용한다. 이 파일은 필요 시 backend가 선택적으로 UI에 노출할 수 있지만 기본 public 결과는 아니다.
 
 ## Task별 문서
 

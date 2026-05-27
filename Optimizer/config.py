@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from CAE_tool_interface.config import CAEConfig
 
@@ -11,24 +12,104 @@ class OptimizerUserConfig:
     doe_csv_path: str | None = None
     # Standalone 입력: Explorer selected bounds JSON 경로 (옵션)
     explorer_bounds_path: str | None = None
+    # Debug/benchmark용 known optimum. 있으면 pair plot에 marker로 표시한다.
+    known_optimum: Any | None = None
 
 
 @dataclass
 class OptimizerSystemConfig:
-    # acquisition 정책: auto | LCB | EI
+    """Optimizer internal/system tuning.
+
+    Service-facing knobs should stay small: algorithm_id, focus_pipeline,
+    debug_level, and user.n_samples/direct input paths. Most fields below are
+    algorithm tuning values and should be changed through presets, not ordinary
+    UI controls.
+    """
+
+    # ------------------------------------------------------------------
+    # Compatibility/default BO controls
+    # ------------------------------------------------------------------
+    # Removal candidates:
+    # - acq_type/kappa_start/kappa_end are still used by the generic acquisition
+    #   scaffold and Focus3 fallback/recovery. Remove only after Focus3 owns all
+    #   acquisition scheduling through focus3_* fields.
+    # - starts_per_iter/random_starts_ratio are legacy default-BO start controls.
+    #   Focus3 primarily uses plan-pool/refine starts, but fallback paths still
+    #   read these values.
+    # Default acquisition 정책: auto | LCB | EI. Focus3는 focus3_acq_type을 우선 사용한다.
     acq_type: str = "auto"
-    # LCB kappa 스케줄 (auto/LCB에서 사용)
+    # LCB kappa 스케줄 (legacy/default path 및 Focus3 recovery base에서 사용)
     kappa_start: float = 2.5
     kappa_end: float = 0.6
     # EI 파라미터
     ei_xi: float = 0.01
     # acquisition 다중 시작점 최적화 파라미터
-    n_restarts: int = 8
     starts_per_iter: int = 32
     random_starts_ratio: float = 0.7
-    # DOE objective + bounds 케이스에서 source mixture 사용 여부
+    # Focus3 source mixture 사용 여부. False면 legacy source_topk/boundary/random 기본값을 사용한다.
     source_mixture_enabled: bool = True
-    # source mixture 기본 확률 (topk / boundary / random)
+
+    # ------------------------------------------------------------------
+    # Service-facing algorithm selection
+    # ------------------------------------------------------------------
+    # focus_bo is the built-in default algorithm. Other algorithms can be
+    # registered as long as they consume the common Optimizer inputs and return
+    # the common Optimizer result contract.
+    algorithm_id: str = "focus_bo"
+    algorithm_params: dict[str, object] = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # Focus BO orchestration
+    # ------------------------------------------------------------------
+    # auto | focus0,focus1,focus3 | list/tuple. 어떤 focus를 실행할지는 focus_pipeline이 결정한다.
+    focus_pipeline: str | list[str] | tuple[str, ...] = "auto"
+
+    # ------------------------------------------------------------------
+    # Focus0/Focus1: objective archive bootstrap/classification
+    # ------------------------------------------------------------------
+    # Focus0/1: active bounds 안에서 BO 시작 전 objective archive를 보강한다.
+    focus0_enabled: bool = True
+    focus0_min_np_ratio: float = 1.0
+    focus0_min_points: int = 3
+    focus1_enabled: bool = True
+    focus1_target_np_ratio: float = 10.0
+    focus1_max_budget_fraction: float = 0.50
+    focus1_min_gp_points: int = 3
+    focus1_batch_size: int = 10
+    focus1_candidate_pool_min: int = 2048
+    focus1_candidate_pool_per_dim: int = 100
+    focus1_candidate_pool_max: int = 20000
+    focus1_beta: float = 1.0
+    focus1_tau_quantile: float = 0.20
+    focus1_good_ratio: float = 0.20
+    focus1_uncertain_ratio: float = 0.60
+    focus1_bad_ratio: float = 0.20
+    focus1_min_rms_distance: float = 0.03
+    focus1_early_stop_enabled: bool = True
+    focus1_early_stop_uncertain_ratio: float = 0.25
+    focus1_early_stop_min_good_candidates: int = 10
+    # Focus1 조기 종료는 분류가 안정되어 보여도 최소 archive 밀도를 만족해야 허용한다.
+    # p=5이면 기본 50개 archive 전에는 Focus2/3로 넘기지 않는다.
+    focus1_early_stop_min_data_ratio: float = 10.0
+    focus0_initial_corner_ratio: float = 0.10
+    focus0_initial_corner_adaptive_enabled: bool = True
+    focus0_initial_corner_adaptive_np_ratio_max: float = 10.0
+    focus0_initial_corner_adaptive_low_dim_max: int = 6
+    focus0_initial_corner_adaptive_ratio_low_dim: float = 0.05
+    focus0_margin_ratio: float = 0.30
+    focus0_margin_subset_enabled: bool = True
+    focus0_margin_subset_random_k_count: int = 2
+    focus0_probe_multiplier: float = 2.0
+    focus0_filter_safety: float = 1.2
+    focus0_filter_r_floor: float = 0.02
+
+    # ------------------------------------------------------------------
+    # Focus3: final selected-bounds BO
+    # ------------------------------------------------------------------
+    # Legacy source mixture 기본 확률 (topk / boundary / random).
+    # Removal candidate: focus3_budget_policy_enabled=True가 고정되면
+    # focus3_*_source_* 확률만 남기고 이 fallback trio는 제거한다.
+    # focus3_budget_policy_enabled=False일 때 fallback으로 사용한다.
     source_topk_prob: float = 0.60
     source_boundary_prob: float = 0.25
     source_random_prob: float = 0.15
@@ -37,6 +118,8 @@ class OptimizerSystemConfig:
     focus3_budget_ultra_low_np: float = 3.0
     focus3_budget_low_np: float = 8.0
     focus3_budget_normal_np: float = 20.0
+    focus3_min_budget_np_ratio: float = 2.0
+    focus3_min_budget: int = 5
     focus3_ultra_low_source_topk_prob: float = 0.85
     focus3_ultra_low_source_boundary_prob: float = 0.10
     focus3_ultra_low_source_random_prob: float = 0.05
@@ -49,7 +132,173 @@ class OptimizerSystemConfig:
     focus3_rich_source_topk_prob: float = 0.45
     focus3_rich_source_boundary_prob: float = 0.35
     focus3_rich_source_random_prob: float = 0.20
-    # 정체(stagnation) 감지 시 탐색 강화
+    # Focus3 plan/refine: 큰 source별 X_plan을 GP로 scoring한 뒤 일부만 L-BFGS-B refine.
+    focus3_plan_pool_min_per_source: int = 1024
+    focus3_plan_pool_per_dim: int = 80
+    focus3_plan_pool_max_per_source: int = 4096
+    # Legacy hard override. Prefer min/per_dim/max policy above.
+    # Removal candidate once old configs no longer set this field.
+    focus3_plan_pool_per_source: int | None = None
+    focus3_refine_starts: int = 30
+    # Focus3는 매번 multi-start L-BFGS-B를 돌리지 않는다. 기본은
+    # 2번 discrete GP scoring 후 1번 refine.
+    focus3_discrete_enabled: bool = True
+    focus3_refine_every: int = 2
+    # L-BFGS-B acquisition refine이 runtime을 지배할 수 있으므로 start 수는 유지하되
+    # 각 local refine의 최대 반복/함수평가를 제한한다.
+    focus3_refine_maxiter: int = 35
+    focus3_refine_maxfun: int = 90
+    # Focus3 acquisition: auto는 신뢰 가능한 selected region이면 EI, 아니면 LCB로 fallback한다.
+    focus3_acq_type: str = "auto"
+    focus3_auto_ei_min_data_ratio: float = 15.0
+    focus3_auto_ei_max_volume_ratio: float = 0.25
+    focus3_auto_ei_max_mean_width_ratio: float = 0.75
+    # Focus3 source ratio = budget class + data reliability + GP/recent improvement 보정.
+    focus3_source_adaptive_enabled: bool = True
+    focus3_data_ratio_low: float = 5.0
+    focus3_data_ratio_good: float = 15.0
+    focus3_low_reliability_boundary_bonus: float = 0.05
+    focus3_low_reliability_random_bonus: float = 0.15
+    focus3_mid_reliability_random_bonus: float = 0.05
+    focus3_gp_fallback_boundary_bonus: float = 0.05
+    focus3_gp_fallback_random_bonus: float = 0.10
+    focus3_recent_improvement_topk_bonus: float = 0.10
+    # Random source는 pure random 대신 acquisition filter + archive coverage로 refine start를 고른다.
+    focus3_random_cover_enabled: bool = True
+    focus3_random_cover_acq_quantile: float = 0.70
+    focus3_random_cover_reference_max: int = 1000
+    # Focus3 최종 후보가 기존 archive와 너무 가까우면 다음 후보로 교체한다.
+    focus3_dedup_enabled: bool = True
+    focus3_min_candidate_rms_distance: float = 0.01
+    focus3_dedup_random_attempts: int = 64
+    # Focus3 정체 시 boundary/random 비율과 kappa를 일시적으로 올려 recovery 모드로 전환한다.
+    focus3_recover_enabled: bool = True
+    focus3_recover_window: int = 5
+    # 너무 이른 recovery 전환을 막는다. 충분한 Focus3 history가 쌓인 뒤에만
+    # stagnation 판정을 적용한다.
+    focus3_recover_min_history: int = 10
+    focus3_recover_tol: float = 1e-8
+    focus3_recover_boundary_bonus: float = 0.15
+    focus3_recover_random_bonus: float = 0.10
+    # Mild/strong 2단 recovery. 짧은 정체에서는 boundary 과투입을 막고,
+    # 긴 정체에서만 기존 수준에 가까운 탐색 강화로 전환한다.
+    focus3_recover_strong_no_improve: int = 20
+    focus3_recover_mild_boundary_scale: float = 0.35
+    focus3_recover_mild_random_scale: float = 0.50
+    focus3_recover_mild_kappa_multiplier: float = 1.15
+    focus3_recover_kappa_multiplier: float = 1.50
+    focus3_recover_max_kappa: float = 3.50
+
+    # ------------------------------------------------------------------
+    # Focus2: region manager / TuRBO-lite
+    # ------------------------------------------------------------------
+    # Focus2: Focus1 regions 안에서 region별 local GP 경쟁(TuRBO-lite)을 수행한다.
+    focus2_enabled: bool = True
+    focus2_min_total_budget: int = 10
+    focus2_budget_fraction: float = 0.30
+    focus2_kappa_min: float = 1.50
+    focus2_kappa_start: float = 2.50
+    focus2_kappa_end: float = 1.20
+    # Focus2 region output 정책: 실제 archive support가 있는 good regions만 다음 단계로 넘긴다.
+    focus2_region_min_archive_points: int = 5
+    focus2_region_min_good_candidates: int = 10
+    focus2_region_min_volume_ratio: float = 0.05
+    focus2_region_max_regions: int = 5
+    focus2_region_candidate_pool_min: int = 4096
+    focus2_region_candidate_pool_per_dim: int = 200
+    focus2_region_candidate_pool_max: int = 30000
+    focus2_region_uncertain_seed_fraction: float = 0.30
+    focus2_region_cluster_radius: float = 0.20
+    focus2_region_quantile_low: float = 0.10
+    focus2_region_quantile_high: float = 0.90
+    focus2_region_expand_ratio: float = 1.15
+    focus2_local_pool_size: int = 512
+    focus2_local_topk_ratio: float = 0.30
+    focus2_local_boundary_ratio: float = 0.35
+    focus2_local_random_ratio: float = 0.35
+    focus2_min_candidate_rms_distance: float = 0.02
+    focus2_region_no_improve_tolerance: int = 8
+    focus2_region_min_evals_before_drop: int = 5
+    focus2_early_stop_enabled: bool = True
+    focus2_early_stop_min_evals: int = 20
+    focus2_early_stop_min_evals_per_region: int = 3
+    focus2_early_stop_min_selected_region_evals: int = 3
+    focus2_early_stop_min_active_bounds_updates: int = 2
+    focus2_early_stop_require_all_active_sampled: bool = True
+    focus2_early_stop_max_active_regions: int = 1
+    focus2_early_stop_max_volume_ratio: float = 0.25
+    focus2_early_stop_score_gap: float = 0.35
+    focus2_early_stop_min_archive_points: int = 12
+    focus2_final_archive_weight: float = 0.70
+    focus2_final_support_weight: float = 0.15
+    focus2_final_success_weight: float = 0.10
+    focus2_final_no_improve_penalty: float = 0.08
+    focus2_final_dropped_penalty: float = 0.25
+    # Focus2가 generated bounds를 만들 때 단일 region을 과신하지 않도록
+    # survivor 상위 region들을 union하고, 너무 좁은 bounds는 보수적으로 확장한다.
+    focus2_final_union_enabled: bool = True
+    focus2_final_union_top_k: int = 2
+    # dropped region도 final_score penalty를 받은 상태로 union 경쟁에는 남긴다.
+    # 조기 drop이 과했을 때 좋은 basin을 완전히 잃지 않기 위한 안전장치다.
+    focus2_final_include_dropped_competitive: bool = True
+    focus2_final_union_use_parent_bounds: bool = False
+    # Final union bounds를 그대로 넘기기 전에 union 내부 archive 우수점으로 한 번 더 다듬는다.
+    # 이후 expand/min-volume을 다시 적용하므로 너무 좁아지는 위험은 아래 bounds policy가 흡수한다.
+    focus2_final_archive_trim_enabled: bool = True
+    focus2_final_archive_trim_top_fraction: float = 0.50
+    # Archive trim은 적은 점에 끌리면 위험하므로 충분한 support가 있을 때만 쓴다.
+    focus2_final_archive_trim_min_points: int = 20
+    focus2_final_archive_trim_min_per_dim: float = 4.0
+    focus2_final_archive_trim_keep_min_points: int = 10
+    focus2_final_archive_trim_keep_min_per_dim: float = 2.0
+    focus2_final_archive_trim_quantile_low: float = 0.10
+    focus2_final_archive_trim_quantile_high: float = 0.90
+    # 0이면 union bounds 유지, 1이면 archive top quantile bounds로 완전 대체.
+    # 기본은 center/width를 약하게만 보정한다.
+    focus2_final_archive_trim_blend: float = 0.30
+    focus2_final_bounds_expand_ratio: float = 1.20
+    focus2_final_bounds_min_volume_ratio: float = 0.25
+    focus2_final_bounds_max_volume_ratio: float = 1.0
+    focus2_merge_enabled: bool = True
+    focus2_merge_duplicate_pair_threshold: int = 2
+    focus2_merge_shared_pair_threshold: int = 2
+    focus2_merge_same_basin_min_score: float = 0.75
+    focus2_merge_best_point_rms: float = 0.05
+    focus2_merge_objective_gap_ratio: float = 0.10
+    focus2_merge_expand_ratio: float = 1.15
+    focus2_merge_top_fraction: float = 0.50
+    focus2_merge_max_volume_ratio: float = 0.25
+    focus2_active_bounds_enabled: bool = True
+    focus2_active_bounds_min_archive_points: int = 12
+    focus2_active_bounds_min_region_evals: int = 3
+    focus2_active_bounds_top_fraction: float = 0.50
+    focus2_active_bounds_min_top_points: int = 5
+    focus2_active_bounds_quantile_low: float = 0.10
+    focus2_active_bounds_quantile_high: float = 0.90
+    focus2_active_bounds_expand_ratio: float = 1.20
+    focus2_active_bounds_min_volume_ratio: float = 0.10
+    focus2_active_bounds_max_volume_ratio: float = 0.25
+    focus2_active_bounds_update_rate: float = 0.35
+    focus2_scheduler_enabled: bool = True
+    focus2_scheduler_initial_full_round: bool = True
+    focus2_scheduler_archive_weight: float = 0.50
+    focus2_scheduler_support_weight: float = 0.15
+    focus2_scheduler_success_weight: float = 0.15
+    focus2_scheduler_exploration_weight: float = 0.10
+    focus2_scheduler_active_bounds_weight: float = 0.10
+    focus2_scheduler_no_improve_penalty: float = 0.10
+    focus2_scheduler_duplicate_penalty: float = 0.03
+
+    # ------------------------------------------------------------------
+    # Shared source-pool and stagnation tuning
+    # ------------------------------------------------------------------
+    # Removal candidates:
+    # - source_stagnation_* overlaps conceptually with focus3_recover_*.
+    #   Merge into focus3_recover_* after benchmark validation.
+    # - source_pool_size/source_topk_fraction/source_topk_perturb_sigma/
+    #   source_boundary_near_ratio are Focus3-specific in practice. Rename to
+    #   focus3_source_* and keep aliases only for one compatibility window.
+    # 정체(stagnation) 감지 시 탐색 강화. Focus3 adaptive source policy에서 사용한다.
     source_stagnation_window: int = 8
     source_stagnation_tol: float = 1e-8
     source_stagnation_boundary_bonus: float = 0.10
@@ -59,21 +308,37 @@ class OptimizerSystemConfig:
     source_topk_fraction: float = 0.20
     source_topk_perturb_sigma: float = 0.08
     source_boundary_near_ratio: float = 0.03
-    # pre-constraint 후보 생성 정책 (focus3 / point_converge)
+    # pre-constraint 후보 생성 정책 (focus3)
     source_feasible_multiplier: int = 3
     source_feasible_retry: int = 3
     source_feasible_min_starts: int = 1
-    # DOE 데이터에서 초기 학습점으로 사용할 상위 개수
+
+    # ------------------------------------------------------------------
+    # Archive / GP train-set policy
+    # ------------------------------------------------------------------
+    # DOE 데이터에서 초기 학습점으로 반드시 보존할 상위 개수
     init_from_doe_topk: int = 20
-    # DOE objective warm-start 상한 (이보다 많으면 top+diversity로 선별)
-    init_max_points: int = 300
+    # DOE objective warm-start / GP train 상한: min(init_train_np_ratio * p, init_max_points)
+    init_train_np_ratio: float = 20.0
+    # 절대 상한. p가 커질 때 GP 학습 비용이 폭증하는 것을 막는다.
+    init_max_points: int = 500
+    # cap 초과 시 objective 우수점 비율. 나머지는 diversity로 채운다.
+    init_train_top_fraction: float = 0.70
+    # BO가 새로 평가한 최근 점을 GP train subset에 보존할 비율.
+    gp_train_recent_fraction: float = 0.25
     # DOE seed 사용 범위: in_bounds | all
     doe_seed_scope: str = "in_bounds"
     # GP 재학습 주기 (iteration 단위)
     gp_refit_every: int = 1
+
+    # ------------------------------------------------------------------
+    # Input/objective and constraint policy
+    # ------------------------------------------------------------------
     # DOE objective 컬럼명
     objective_col: str = "objective"
-    # None이면 CAE metadata objective_sense 사용
+    # None이면 CAE metadata objective_sense 사용.
+    # Removal candidate: CAE metadata should remain the objective-sense source
+    # of truth. Keep this only while benchmarking opposite-sense experiments.
     objective_sense_override: str | None = None
     # 현재는 기본 OFF (추후 pre/post 제약 로직 확장용)
     enforce_pre_constraints: bool = False
@@ -86,23 +351,20 @@ class OptimizerSystemConfig:
     post_p_feasible_hard_penalty: float = 0.0
     # post score 적용 방식: add_penalty(기본)
     post_score_mode: str = "add_penalty"
-    # Deprecated: 실제 CAE objective 평가로 전환되어 현재 미사용
-    surrogate_only_mode: bool = True
-    # DOE가 없을 때 bootstrap 랜덤 샘플 수
-    no_doe_bootstrap_size: int = 12
-    # DOE가 없을 때 2-focus/3-focus 분기 임계값
-    no_doe_mode_threshold: int = 200
-    # DOE 없음 + two-focus 비율
-    no_doe_stage1_ratio: float = 0.35
-    # DOE 없음 + three-focus 비율
-    no_doe_phase1_ratio: float = 0.25
-    no_doe_phase2_ratio: float = 0.45
-    # Deprecated: 실제 CAE objective 평가로 전환되어 현재 미사용
-    no_doe_objective_proxy: str = "center_distance"
+
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Output/debug
+    # ------------------------------------------------------------------
     # 중복 판정 반올림 자릿수
     dedup_decimals: int = 12
     # 디버그 산출물 생성 여부: off | on
     debug_level: str = "on"
+    # 긴 Optimizer run 진행 로그 주기. 0이면 progress 로그를 끈다.
+    optimizer_progress_log_every: int = 25
+    # Optimizer 병목 분석용 timing 로그. Public 결과에는 들어가지 않고
+    # debug full history와 console progress에만 기록한다.
+    optimizer_timing_log_enabled: bool = True
 
 
 @dataclass
@@ -110,11 +372,15 @@ class OptimizerConfig:
     user: OptimizerUserConfig
     system: OptimizerSystemConfig
     cae: CAEConfig
-    # sequential 연계용 metadata 경로들 (옵션)
+    # Sequential 연계용 metadata 경로들 (옵션).
+    # Removal candidate for service mode: prefer run_context + direct public/meta
+    # artifact paths. Keep while standalone/internal task resume still depends on it.
     cae_metadata_path: str | None = None
     doe_metadata_path: str | None = None
     explorer_metadata_path: str | None = None
     modeler_metadata_path: str | None = None
-    # 직접 경로 주입 (옵션)
+    # 직접 경로 주입 (옵션).
+    # Duplicate with OptimizerUserConfig paths. Long-term policy should keep one
+    # user/input-layer path source and remove the duplicate config-level aliases.
     doe_csv_path: str | None = None
     explorer_bounds_path: str | None = None

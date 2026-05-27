@@ -90,6 +90,16 @@ class ExplorerSystemConfig:
     bounds_pre_cap_expand_p_dim_min: int = 4
     bounds_pre_cap_expand_threshold: float = 0.10
     bounds_pre_cap_expand_target_ratio: float = 0.30
+    # #M: feasibility-aware floor expansion direction — has_pre==True AND p_dim>=min_dim
+    # AND side_scores 존재 시, |rate_ub - rate_lb| >= rate_diff_min 인 dim의
+    # apply_bounds_margin center_hint를 feasible side로 오버라이드. floor expansion이
+    # feasibility 방향으로 우선 확장되어 optimum corner 누락 방지.
+    # state-based gate, benchmark 명 분기 아님. (모든 dim의 UB가 saturated 인
+    # CB류 패턴에서 b1_ub 절단 회복 목적)
+    feasibility_floor_hint_enabled: bool = True
+    feasibility_floor_hint_p_dim_min: int = 4
+    feasibility_floor_hint_rate_diff_min: float = 0.5
+    feasibility_floor_hint_bias: float = 0.90
     # L4: 제약·저차원·저 feasibility 구조에서만 L2/L3 보수 분기를 강제
     constraint_aware_conservative_p_dim_max: int = 5
     constraint_aware_conservative_np_ratio_max: float = 25.0
