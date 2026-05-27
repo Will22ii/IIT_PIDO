@@ -71,21 +71,21 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
         n_samples=450,
         optimizer_n_samples=1500,
-        repeats=3,
+        repeats=30,
     ),
     "cantilever_beam_nodummy": ProblemCase(
         problem_name="cantilever_beam_nodummy",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         n_samples=45,
         optimizer_n_samples=150,
-        repeats=3,
+        repeats=30,
     ),
     "goldstein_price_nodummy": ProblemCase(
         problem_name="goldstein_price_nodummy",
         known_optimum={"x1": 0.0, "x2": -1.0},
         n_samples=150,
         optimizer_n_samples=500,
-        repeats=3,
+        repeats=30,
     ),
     "six_hump_camel_nodummy": ProblemCase(
         problem_name="six_hump_camel_nodummy",
@@ -95,7 +95,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         ],
         n_samples=15,
         optimizer_n_samples=50,
-        repeats=3,
+        repeats=30,
     ),
 }
 
