@@ -121,6 +121,28 @@ def _focus3_min_budget(*, system: OptimizerSystemConfig, p_dim: int, available: 
     return int(min(max(focus3_min, 0), max(int(available), 0)))
 
 
+def _adaptive_focus3_reserve(
+    *,
+    system: OptimizerSystemConfig,
+    n_samples: int,
+    p_dim: int,
+    available: int,
+    has_selected_bounds: bool,
+) -> int:
+    if int(available) <= 0:
+        return 0
+    base_min = _focus3_min_budget(system=system, p_dim=p_dim, available=available)
+    ratio = float(max(int(n_samples), 0)) / float(max(int(p_dim), 1))
+    if bool(has_selected_bounds):
+        frac = float(getattr(system, "focus_budget_selected_bounds_focus3_fraction", 0.70))
+    elif ratio < float(getattr(system, "focus3_budget_low_np", 8.0)):
+        frac = float(getattr(system, "focus_budget_low_np_focus3_fraction", 0.35))
+    else:
+        frac = float(getattr(system, "focus_budget_generated_bounds_focus3_fraction", 0.50))
+    reserve = int(math.ceil(float(max(int(n_samples), 0)) * max(frac, 0.0)))
+    return int(min(max(base_min, reserve), max(int(available), 0)))
+
+
 def _allocate_budgets(
     *,
     stages: tuple[str, ...],
@@ -129,6 +151,7 @@ def _allocate_budgets(
     p_dim: int,
     initial_objective_count: int,
     targets: dict[str, int],
+    has_selected_bounds: bool,
 ) -> tuple[dict[str, int], dict[str, str]]:
     budgets = {stage: 0 for stage in _VALID_FOCUS}
     reasons: dict[str, str] = {}
@@ -144,12 +167,30 @@ def _allocate_budgets(
 
     if "focus1" in stages and remaining > 0:
         need = int(max(int(targets.get("focus1_objective_count", 0)) - expected_archive, 0))
-        max_fraction = float(max(float(getattr(system, "focus1_max_budget_fraction", 0.50)), 0.0))
+        adaptive = bool(getattr(system, "focus_budget_adaptive_enabled", True))
+        if adaptive:
+            archive_ratio = float(max(int(initial_objective_count), 0)) / float(max(int(p_dim), 1))
+            if archive_ratio < float(getattr(system, "focus3_data_ratio_low", 5.0)):
+                max_fraction = float(max(float(getattr(system, "focus_budget_focus1_fraction_low_archive", 0.45)), 0.0))
+            else:
+                max_fraction = float(max(float(getattr(system, "focus_budget_focus1_fraction_normal", 0.30)), 0.0))
+        else:
+            max_fraction = float(max(float(getattr(system, "focus1_max_budget_fraction", 0.50)), 0.0))
         cap = int(math.floor(float(max(int(n_samples), 0)) * max_fraction))
         if "focus3" not in stages and "focus2" not in stages:
             cap = max(cap, remaining)
         cap = max(cap, 0)
-        focus3_reserve = _focus3_min_budget(system=system, p_dim=p_dim, available=remaining) if "focus3" in stages else 0
+        focus3_reserve = (
+            _adaptive_focus3_reserve(
+                system=system,
+                n_samples=n_samples,
+                p_dim=p_dim,
+                available=remaining,
+                has_selected_bounds=has_selected_bounds,
+            )
+            if "focus3" in stages and adaptive
+            else _focus3_min_budget(system=system, p_dim=p_dim, available=remaining) if "focus3" in stages else 0
+        )
         available = max(remaining - focus3_reserve, 0) if "focus3" in stages else remaining
         budgets["focus1"] = int(min(need, available, cap))
         expected_archive += budgets["focus1"]
@@ -163,20 +204,43 @@ def _allocate_budgets(
             reasons["focus1_budget"] = f"fill objective archive to {targets.get('focus1_objective_count', 0)}"
 
     focus3_reserve = 0
+    adaptive = bool(getattr(system, "focus_budget_adaptive_enabled", True))
     if "focus3" in stages:
-        focus3_reserve = _focus3_min_budget(system=system, p_dim=p_dim, available=remaining)
+        if adaptive:
+            focus3_reserve = _adaptive_focus3_reserve(
+                system=system,
+                n_samples=n_samples,
+                p_dim=p_dim,
+                available=remaining,
+                has_selected_bounds=has_selected_bounds,
+            )
+        else:
+            focus3_reserve = _focus3_min_budget(system=system, p_dim=p_dim, available=remaining)
 
     if "focus2" in stages and remaining > 0:
-        base = int(max(0, math.ceil(float(getattr(system, "focus2_budget_fraction", 0.30)) * int(n_samples))))
+        if adaptive:
+            frac = (
+                float(getattr(system, "focus_budget_focus2_fraction_selected_bounds", 0.15))
+                if has_selected_bounds
+                else float(getattr(system, "focus_budget_focus2_fraction_generated_bounds", 0.25))
+            )
+        else:
+            frac = float(getattr(system, "focus2_budget_fraction", 0.30))
+        base = int(max(0, math.ceil(float(frac) * int(n_samples))))
         available = max(remaining - focus3_reserve, 0) if "focus3" in stages else remaining
         budgets["focus2"] = int(min(base, available))
         remaining -= budgets["focus2"]
-        reasons["focus2_budget"] = "region validation budget fraction with focus3 reserve"
+        reasons["focus2_budget"] = (
+            "adaptive region validation budget with focus3 reserve"
+            if adaptive else "region validation budget fraction with focus3 reserve"
+        )
 
     if "focus3" in stages and remaining > 0:
         budgets["focus3"] = int(remaining)
         remaining = 0
         reasons["focus3_budget"] = "remaining budget after focus0/focus1/focus2"
+        if adaptive:
+            reasons["focus3_budget"] += " (adaptive reserve policy)"
 
     return budgets, reasons
 
@@ -267,6 +331,7 @@ def build_focus_pipeline_plan(
         p_dim=p,
         initial_objective_count=int(initial_objective_count),
         targets=targets,
+        has_selected_bounds=has_selected_bounds,
     )
     reasons.update(budget_reasons)
     if mode == "auto":
@@ -280,6 +345,7 @@ def build_focus_pipeline_plan(
                 p_dim=p,
                 initial_objective_count=int(initial_objective_count),
                 targets=targets,
+                has_selected_bounds=has_selected_bounds,
             )
             for key in list(reasons.keys()):
                 if key.endswith("_budget"):

@@ -160,6 +160,19 @@ class AcquisitionOptimizer:
         ei = imp * norm.cdf(z) + s * norm.pdf(z)
         return -float(ei)
 
+    @staticmethod
+    def acquisition_mean(
+        x: np.ndarray,
+        model: GaussianProcessRegressor,
+        *,
+        objective_sense: ObjectiveSense,
+    ) -> float:
+        mu = model.predict(np.asarray(x, dtype=float).reshape(1, -1))
+        m = float(np.asarray(mu, dtype=float).reshape(-1)[0])
+        if objective_sense == "max":
+            return -m
+        return m
+
     def optimize(
         self,
         *,
@@ -210,6 +223,12 @@ class AcquisitionOptimizer:
                         y_best=y_best,
                         objective_sense=objective_sense,
                         xi=xi,
+                    )
+                elif acq == "MEAN":
+                    base = self.acquisition_mean(
+                        x_arr,
+                        model,
+                        objective_sense=objective_sense,
                     )
                 else:
                     base = self.acquisition_lcb(

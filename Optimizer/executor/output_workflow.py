@@ -679,12 +679,41 @@ def _write_focus3_debug_plots(
         "focus3_plan_mode",
         "focus3_acq_effective",
         "focus3_acq_reason",
+        "focus3_acq_data_ratio",
+        "focus3_acq_mean_enabled",
+        "focus3_acq_mean_min_data_ratio",
+        "focus3_acq_mean_max_volume_ratio",
+        "focus3_acq_best_local_active",
+        "source_prob_topk",
+        "source_prob_best_local",
+        "source_prob_boundary",
+        "source_prob_random",
         "focus3_recover_active",
         "focus3_recover_reason",
         "focus3_recover_level",
         "focus3_recover_no_improve_count",
+        "focus3_recover_topk_bonus",
         "focus3_recover_boundary_bonus",
         "focus3_recover_random_bonus",
+        "focus3_source_cap_applied",
+        "focus3_source_cap_reason",
+        "focus3_source_cap_boundary_max",
+        "focus3_source_cap_topk_min",
+        "focus3_source_cap_random_min",
+        "focus3_boundary_gate_applied",
+        "focus3_boundary_gate_allowed",
+        "focus3_boundary_gate_reason",
+        "focus3_boundary_gate_margin",
+        "focus3_boundary_gate_boundary_score",
+        "focus3_boundary_gate_non_boundary_best",
+        "focus3_best_local_applied",
+        "focus3_best_local_reason",
+        "focus3_best_local_prob",
+        "focus3_best_local_data_ratio",
+        "focus3_best_local_min_focus3_evals",
+        "focus3_best_local_min_data_ratio",
+        "focus3_selected_best_local",
+        "focus3_best_score_best_local",
         "focus3_dedup_applied",
         "focus3_dedup_fallback",
         "focus3_archive_distance_after_dedup",
@@ -889,6 +918,85 @@ def _write_focus3_debug_plots(
     return {"trajectory_csv": trajectory_path, "trajectory_pair_plots": plot_paths}
 
 
+def _write_optimizer_debug_tables(
+    *,
+    debug_dir: str,
+    history_df: pd.DataFrame,
+    bo_result: OptimizerAlgorithmResult,
+    final_bounds: dict,
+    resolved: ResolvedOptimizerInputs,
+) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if history_df.empty:
+        return out
+
+    summary_rows: list[dict[str, object]] = []
+    if "segment" in history_df.columns:
+        for segment, g in history_df.groupby(history_df["segment"].astype(str), dropna=False):
+            y = pd.to_numeric(g.get("objective_raw", pd.Series(dtype=float)), errors="coerce")
+            improved = g.get("raw_improved", pd.Series(False, index=g.index))
+            summary_rows.append(
+                {
+                    "segment": str(segment),
+                    "count": int(len(g)),
+                    "objective_raw_min": float(y.min()) if y.notna().any() else float("nan"),
+                    "objective_raw_median": float(y.median()) if y.notna().any() else float("nan"),
+                    "objective_raw_max": float(y.max()) if y.notna().any() else float("nan"),
+                    "improved_count": int(pd.Series(improved).fillna(False).astype(bool).sum()),
+                    "first_iter": int(pd.to_numeric(g.get("iter", pd.Series(dtype=float)), errors="coerce").min()) if "iter" in g.columns else 0,
+                    "last_iter": int(pd.to_numeric(g.get("iter", pd.Series(dtype=float)), errors="coerce").max()) if "iter" in g.columns else 0,
+                }
+            )
+    focus_summary_path = os.path.join(debug_dir, "optimizer_focus_summary.csv")
+    pd.DataFrame(summary_rows).to_csv(focus_summary_path, index=False)
+    out["focus_summary_csv"] = focus_summary_path
+
+    source_rows: list[dict[str, object]] = []
+    if {"segment", "source_mode"}.issubset(history_df.columns):
+        for (segment, source), g in history_df.groupby(
+            [history_df["segment"].astype(str), history_df["source_mode"].astype(str)],
+            dropna=False,
+        ):
+            y = pd.to_numeric(g.get("objective_raw", pd.Series(dtype=float)), errors="coerce")
+            improved = g.get("raw_improved", pd.Series(False, index=g.index))
+            source_rows.append(
+                {
+                    "segment": str(segment),
+                    "source_mode": str(source),
+                    "count": int(len(g)),
+                    "objective_raw_min": float(y.min()) if y.notna().any() else float("nan"),
+                    "objective_raw_median": float(y.median()) if y.notna().any() else float("nan"),
+                    "improved_count": int(pd.Series(improved).fillna(False).astype(bool).sum()),
+                }
+            )
+    source_summary_path = os.path.join(debug_dir, "optimizer_source_summary.csv")
+    pd.DataFrame(source_rows).to_csv(source_summary_path, index=False)
+    out["source_summary_csv"] = source_summary_path
+
+    debug_plan_path = os.path.join(debug_dir, "optimizer_debug_plan.json")
+    with open(debug_plan_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "problem_name": str(resolved.problem_name),
+                "objective_sense": str(resolved.objective_sense),
+                "selected_features": list(resolved.selected_features),
+                "bounds_source": str(resolved.bounds_source),
+                "final_bounds": final_bounds,
+                "focus_pipeline_summary": bo_result.focus_pipeline_summary,
+                "algorithm_summary": bo_result.algorithm_summary,
+                "focus2_summary_keys": sorted(list(bo_result.focus2_summary.keys())) if isinstance(bo_result.focus2_summary, dict) else [],
+                "history_columns": list(history_df.columns),
+                "n_history_rows": int(len(history_df)),
+                "n_archive_rows": int(len(bo_result.archive_df)),
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+    out["debug_plan_json"] = debug_plan_path
+    return out
+
+
 def save_optimizer_outputs(
     *,
     config: OptimizerConfig,
@@ -947,6 +1055,11 @@ def save_optimizer_outputs(
         "objective",
         "objective_raw",
         "p_feasible",
+        "pre_feasible",
+        "pre_margin",
+        "pre_violation",
+        "pre_constraint_worst_id",
+        "pre_constraint_worst_margin",
     ] + list(resolved.selected_features)
     if "success" not in history_df.columns:
         history_df["success"] = True
@@ -1067,6 +1180,7 @@ def save_optimizer_outputs(
     history_full_path = None
     focus2_debug_artifacts: dict[str, str | list[str]] = {}
     focus3_debug_artifacts: dict[str, str | list[str]] = {}
+    optimizer_debug_tables: dict[str, str] = {}
     debug_write_sec = 0.0
     focus2_plot_sec = 0.0
     focus3_plot_sec = 0.0
@@ -1074,6 +1188,15 @@ def save_optimizer_outputs(
         t0 = time.perf_counter()
         history_full_path = os.path.join(debug_dir, "optimizer_history_full.csv")
         history_df.to_csv(history_full_path, index=False)
+        debug_write_sec += float(time.perf_counter() - t0)
+        t0 = time.perf_counter()
+        optimizer_debug_tables = _write_optimizer_debug_tables(
+            debug_dir=debug_dir,
+            history_df=history_df,
+            bo_result=bo_result,
+            final_bounds=final_bounds,
+            resolved=resolved,
+        )
         debug_write_sec += float(time.perf_counter() - t0)
         t0 = time.perf_counter()
         focus2_debug_artifacts = _write_focus2_debug_plots(
@@ -1206,6 +1329,7 @@ def save_optimizer_outputs(
         },
         debug_artifacts={
             **({"history_full": history_full_path} if history_full_path else {}),
+            **optimizer_debug_tables,
             **(
                 {
                     "focus2_bounds_evolution_csv": focus2_debug_artifacts.get("bounds_evolution_csv"),

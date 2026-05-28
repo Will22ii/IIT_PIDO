@@ -74,16 +74,65 @@
   - 이후 margin/min-volume 정책을 다시 적용한다.
 - Focus3 recovery는 최소 history가 쌓인 뒤에만 켜지도록 한다.
 - Focus3 recovery는 mild/strong 2단으로 나누고, 짧은 정체에서는 boundary/random/kappa 증가를 약하게 적용한다.
+- 30회 batch 분석 결과 RB/GP에서 boundary source 개선 기여가 낮고 recovery strong이 과도하게 켜지는 것으로 확인했다.
+- Constraint가 없는 Focus3 run에서는 final source mixture에 boundary cap/topk floor/random floor를 적용한다.
+  - 기본값: boundary <= 0.18, topk >= 0.55, random >= 0.10
+- Constraint가 없는 Focus3 run에서는 boundary 후보가 topk/random/best_local보다 충분히 acquisition 우위일 때만 최종 선택 후보로 허용한다.
+- Focus3 strong recovery 기준을 `20` no-improve step에서 `50` no-improve step으로 늦춘다.
+- Mild recovery의 boundary/kappa 증가는 더 약하게 조정한다.
+- Constraint가 없는 recovery에서는 boundary bonus를 제거하고, random/topk 중심으로 회복하도록 조정한다.
+- Focus3에 `best_local` source를 추가한다.
+  - 현재 best 상위 소수 점 주변을 더 작은 sigma로 샘플링한다.
+  - 기본적으로 Focus3 history와 archive 밀도가 어느 정도 쌓인 뒤 topk quota 일부를 가져온다.
+- Focus2 fallback region은 evidence가 약하므로 final bounds를 더 보수적으로 유지한다.
+  - archive trim을 끄거나 약하게 적용하고, expand/min-volume을 더 크게 둔다.
+- Focus budget scheduler를 adaptive로 전환한다.
+  - Focus3 최소 budget을 먼저 보장하고, selected/generated bounds 여부에 따라 Focus1/2 비중을 조정한다.
+  - Focus0/1/2가 조기 종료하면 기존처럼 남은 budget은 Focus3로 넘어간다.
+- Focus3 acquisition auto policy에 `MEAN` exploitation 상태를 추가한다.
+  - 충분한 archive 밀도, 작은 bounds, `best_local` 활성 조건을 만족할 때만 평균 예측값 기준 exploitation을 쓴다.
+  - recovery가 켜지면 `EI/MEAN` 모두 `LCB`로 되돌린다.
+- Focus2 region generation은 fallback 전에 relaxed retry를 한 번 수행한다.
+  - uncertain seed 비율, cluster radius, expand ratio를 키우고 good 후보 최소 조건을 낮춰 classifier 기반 region 생성을 한 번 더 시도한다.
 
 지금 바로:
 
 - `gp_refit_every = 1` 유지
 - `focus3_refine_every = 2` 실험
+- 다음 batch 결과에서 `best_local`이 RB goal hit rate를 올리는지 확인
+- 다음 batch 결과에서 boundary gate가 RB/GP boundary 최종 선택률을 충분히 낮추는지 확인
+- 다음 batch 결과에서 fallback bounds run의 boundary 선택률과 GP 실패 run을 분리해서 확인
+- 다음 batch 결과에서 `focus3_refine_filter_skipped` 비율과 runtime 감소량을 확인
+- 다음 batch 결과에서 `focus3_refine_filter_best_plan_source`가 boundary일 때 refine 생략이 goal hit를 해치지 않는지 확인
+- 다음 batch 결과에서 `focus3_boundary_score_penalty_applied` 이후 RB/GP의 boundary best_plan 비중이 낮아졌는지 확인
+- 다음 batch 결과에서 `focus3_recover_level=strong` 비율이 RB/GP에서 낮아졌는지 확인
 - 다음 batch 결과에서 goal hit iteration과 이후 개선 횟수 분석
+
+추가 반영:
+
+- 무제약 Focus3 boundary cap/gate를 더 강하게 조정했다.
+  - boundary cap 기본값을 `0.18`에서 `0.10`으로 낮췄다.
+  - boundary gate margin을 `0.02`에서 `0.08`로 올렸다.
+- `best_local` source를 강화했다.
+  - 기본 quota를 `0.15`에서 `0.25`로 올리고 max를 `0.35`로 확장했다.
+  - sigma를 `0.025`에서 `0.015`로 줄여 best 주변을 더 촘촘히 탐색한다.
+- Focus2 fallback bounds일 때 Focus3 source policy를 별도로 적용한다.
+  - boundary를 최대 `0.05`로 제한하고 topk/best_local/random floor를 둔다.
+- Focus3 refine source filter를 추가했다.
+  - 무제약 문제에서 best plan source가 `boundary`이면 L-BFGS-B refine을 생략하고 discrete GP scoring 후보를 사용한다.
+  - `random`은 좋은 basin 근처의 시작점 역할을 할 수 있어 refine 대상으로 되돌렸다.
+  - 목적은 RB/GP runtime의 가장 큰 병목인 Focus3 refine 시간을 줄이는 것이다.
+- Recovery를 더 늦고 약하게 조정했다.
+  - strong recovery 기준을 `50`에서 `120` no-improve step으로 늦췄다.
+  - 무제약 recovery는 topk 중심으로 더 기울이고 random scale은 낮췄다.
+- Recovery 판정 window를 `20`으로 늘리고 objective scale 기반 relative tolerance를 추가했다.
+  - 너무 작은 수치 변화까지 정체로 보던 문제를 줄이기 위한 변경이다.
+- 무제약 boundary best_plan 과다 선택을 줄이기 위해 boundary acquisition score penalty를 추가했다.
+  - constraint가 없는 Focus3에서만 boundary score에 penalty를 더한다.
+  - constraint 문제의 boundary 탐색에는 적용하지 않는다.
 
 보류:
 
-- Boundary ratio 변경
 - Dedup distance 변경
 - Focus2 merge trigger 변경
 - Early stop 적용

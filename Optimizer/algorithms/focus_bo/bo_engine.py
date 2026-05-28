@@ -33,6 +33,64 @@ def _round_key(x: np.ndarray, decimals: int) -> tuple[float, ...]:
     return tuple(np.round(np.asarray(x, dtype=float).reshape(-1), decimals=decimals).tolist())
 
 
+def _safe_constraint_token(raw: str) -> str:
+    token = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(raw).strip())
+    token = "_".join(part for part in token.split("_") if part)
+    return token or "constraint"
+
+
+def _pre_constraint_debug_fields(
+    *,
+    x: np.ndarray,
+    var_names: list[str],
+    constraint_defs: list[dict],
+    enforce_pre_constraints: bool,
+) -> dict[str, object]:
+    if not enforce_pre_constraints or not constraint_defs:
+        return {
+            "pre_constraint_active": False,
+            "pre_constraint_count": 0,
+            "pre_constraint_failed_count": 0,
+            "pre_constraint_worst_id": "",
+            "pre_constraint_worst_margin": float("inf"),
+        }
+    payload, feasible, margin = evaluate_constraints_point(
+        x=np.asarray(x, dtype=float).reshape(-1),
+        var_names=var_names,
+        constraint_defs=constraint_defs,
+        scope="pre",
+        fail_fast_output_missing=False,
+    )
+    fields: dict[str, object] = {
+        "pre_constraint_active": True,
+        "pre_constraint_count": int(len(payload)),
+        "pre_constraint_failed_count": int(sum(1 for c in payload.values() if isinstance(c, dict) and not bool(c.get("ok", False)))),
+        "pre_constraint_worst_id": "",
+        "pre_constraint_worst_margin": float(margin),
+        "pre_constraint_all_feasible": bool(feasible),
+    }
+    worst_id = ""
+    worst_margin = float("inf")
+    for raw_id, cinfo in payload.items():
+        if not isinstance(cinfo, dict):
+            continue
+        cid = str(cinfo.get("id", raw_id)).strip() or str(raw_id)
+        token = _safe_constraint_token(cid)
+        value = float(cinfo.get("value", float("nan")))
+        c_margin = float(cinfo.get("margin", float("nan")))
+        c_g = float(cinfo.get("g", float("nan")))
+        fields[f"pre_constraint_{token}_value"] = value
+        fields[f"pre_constraint_{token}_margin"] = c_margin
+        fields[f"pre_constraint_{token}_g"] = c_g
+        fields[f"pre_constraint_{token}_ok"] = bool(cinfo.get("ok", False))
+        if math.isfinite(c_margin) and c_margin < worst_margin:
+            worst_margin = c_margin
+            worst_id = cid
+    fields["pre_constraint_worst_id"] = worst_id
+    fields["pre_constraint_worst_margin"] = float(worst_margin if math.isfinite(worst_margin) else margin)
+    return fields
+
+
 def _resolve_acq_policy(
     *,
     system: OptimizerSystemConfig,
@@ -98,6 +156,23 @@ def _normalize_source_probs(*, topk: float, boundary: float, random_p: float) ->
     return float(out[0]), float(out[1]), float(out[2])
 
 
+def _normalize_focus3_source_probs4(
+    *,
+    topk: float,
+    boundary: float,
+    random_p: float,
+    best_local: float,
+) -> tuple[float, float, float, float]:
+    vals = np.asarray([topk, boundary, random_p, best_local], dtype=float)
+    vals = np.where(np.isfinite(vals), vals, 0.0)
+    vals = np.clip(vals, 0.0, None)
+    total = float(np.sum(vals))
+    if total <= 0.0:
+        return 1.0, 0.0, 0.0, 0.0
+    out = vals / total
+    return float(out[0]), float(out[1]), float(out[2]), float(out[3])
+
+
 def _resolve_focus3_budget_class(
     *,
     n_samples: int,
@@ -145,7 +220,7 @@ def _resolve_focus3_source_probs(
 
 def _normalize_focus3_acq_type(value: str | None) -> str:
     acq = str(value or "auto").strip().upper()
-    if acq not in {"AUTO", "LCB", "EI"}:
+    if acq not in {"AUTO", "LCB", "EI", "MEAN"}:
         return "AUTO"
     return acq
 
@@ -199,6 +274,7 @@ def _resolve_focus3_effective_acq_type(
     ub: np.ndarray,
     full_lb: np.ndarray,
     full_ub: np.ndarray,
+    best_local_active: bool = False,
 ) -> tuple[str, dict[str, object]]:
     req = _normalize_focus3_acq_type(requested)
     data_ratio = float(max(int(n_train), 0)) / float(max(int(p_dim), 1))
@@ -206,8 +282,12 @@ def _resolve_focus3_effective_acq_type(
     min_data_ratio = float(max(float(getattr(system, "focus3_auto_ei_min_data_ratio", 15.0)), 0.0))
     max_volume_ratio = float(np.clip(float(getattr(system, "focus3_auto_ei_max_volume_ratio", 0.25)), 0.0, 1.0))
     max_mean_width_ratio = float(np.clip(float(getattr(system, "focus3_auto_ei_max_mean_width_ratio", 0.75)), 0.0, 1.0))
+    mean_enabled = bool(getattr(system, "focus3_auto_mean_enabled", True))
+    mean_min_data_ratio = float(max(float(getattr(system, "focus3_auto_mean_min_data_ratio", 20.0)), 0.0))
+    mean_max_volume_ratio = float(np.clip(float(getattr(system, "focus3_auto_mean_max_volume_ratio", 0.20)), 0.0, 1.0))
+    mean_requires_best_local = bool(getattr(system, "focus3_auto_mean_best_local_required", True))
 
-    if req in {"LCB", "EI"}:
+    if req in {"LCB", "EI", "MEAN"}:
         return req, {
             "requested": req,
             "effective": req,
@@ -229,6 +309,15 @@ def _resolve_focus3_effective_acq_type(
     elif math.isfinite(mean_width_ratio) and mean_width_ratio > max_mean_width_ratio:
         reason = "wide_mean_width"
         effective = "LCB"
+    elif (
+        mean_enabled
+        and data_ratio >= mean_min_data_ratio
+        and (not mean_requires_best_local or bool(best_local_active))
+        and math.isfinite(volume_ratio)
+        and volume_ratio <= mean_max_volume_ratio
+    ):
+        reason = "best_local_reliable_exploitation"
+        effective = "MEAN"
     else:
         reason = "reliable_focus_region"
         effective = "EI"
@@ -243,6 +332,10 @@ def _resolve_focus3_effective_acq_type(
         "min_data_ratio": min_data_ratio,
         "max_volume_ratio": max_volume_ratio,
         "max_mean_width_ratio": max_mean_width_ratio,
+        "mean_enabled": bool(mean_enabled),
+        "mean_min_data_ratio": float(mean_min_data_ratio),
+        "mean_max_volume_ratio": float(mean_max_volume_ratio),
+        "best_local_active": bool(best_local_active),
     }
 
 
@@ -290,7 +383,8 @@ def _adapt_focus3_source_probs(
         p_random += float(max(float(getattr(system, "focus3_gp_fallback_random_bonus", 0.10)), 0.0))
 
     win = int(max(int(getattr(system, "source_stagnation_window", 8)), 2))
-    tol = float(max(float(getattr(system, "source_stagnation_tol", 1e-8)), 0.0))
+    tol_abs = float(max(float(getattr(system, "source_stagnation_tol", 1e-8)), 0.0))
+    tol_effective = float(tol_abs)
     recent_improvement = float("nan")
     recent_state = "insufficient"
     if len(best_raw_history) >= win:
@@ -299,6 +393,12 @@ def _adapt_focus3_source_probs(
             recent_improvement = float(best_raw_history[-1] - best_raw_history[ref_idx])
         else:
             recent_improvement = float(best_raw_history[ref_idx] - best_raw_history[-1])
+        scale = float(max(abs(float(best_raw_history[ref_idx])), abs(float(best_raw_history[-1])), 1.0))
+        tol = float(max(
+            tol_abs,
+            float(max(float(getattr(system, "focus3_recover_relative_tol", 0.0)), 0.0)) * scale,
+        ))
+        tol_effective = float(tol)
         if recent_improvement > tol:
             recent_state = "improving"
             p_topk += float(max(float(getattr(system, "focus3_recent_improvement_topk_bonus", 0.10)), 0.0))
@@ -319,6 +419,7 @@ def _adapt_focus3_source_probs(
         "gp_fallback_used": bool(gp_fallback_used),
         "recent_state": str(recent_state),
         "recent_improvement": float(recent_improvement),
+        "recent_improvement_tol": float(tol_effective),
     }
 
 
@@ -331,6 +432,7 @@ def _apply_focus3_recover_policy(
     kappa: float,
     best_raw_history: list[float],
     objective_sense: str,
+    has_constraints: bool,
 ) -> tuple[float, float, float, float, dict[str, object]]:
     info: dict[str, object] = {
         "enabled": bool(getattr(system, "focus3_recover_enabled", True)),
@@ -360,7 +462,13 @@ def _apply_focus3_recover_policy(
         recent_improvement = float(best_raw_history[ref_idx] - best_raw_history[-1])
     info["recent_improvement"] = float(recent_improvement)
 
-    tol = float(max(float(getattr(system, "focus3_recover_tol", 1e-8)), 0.0))
+    tol_abs = float(max(float(getattr(system, "focus3_recover_tol", 1e-8)), 0.0))
+    tol_rel = float(max(float(getattr(system, "focus3_recover_relative_tol", 0.0)), 0.0))
+    ref_scale = float(max(abs(float(best_raw_history[ref_idx])), abs(float(best_raw_history[-1])), 1.0))
+    tol = float(max(tol_abs, tol_rel * ref_scale))
+    info["tol_abs"] = float(tol_abs)
+    info["tol_rel"] = float(tol_rel)
+    info["tol_effective"] = float(tol)
     if recent_improvement > tol:
         info["reason"] = "improving"
         return p_topk, p_boundary, p_random, float(kappa), info
@@ -385,6 +493,15 @@ def _apply_focus3_recover_policy(
         random_bonus *= float(np.clip(float(getattr(system, "focus3_recover_mild_random_scale", 0.50)), 0.0, 1.0))
         mult = float(max(float(getattr(system, "focus3_recover_mild_kappa_multiplier", 1.15)), 1.0))
 
+    topk_bonus = 0.0
+    if not bool(has_constraints):
+        boundary_scale = float(np.clip(float(getattr(system, "focus3_no_constraint_recover_boundary_scale", 0.0)), 0.0, 1.0))
+        random_scale = float(max(float(getattr(system, "focus3_no_constraint_recover_random_scale", 1.20)), 0.0))
+        topk_bonus = float(max(float(getattr(system, "focus3_no_constraint_recover_topk_bonus", 0.05)), 0.0))
+        boundary_bonus *= boundary_scale
+        random_bonus *= random_scale
+
+    p_topk += topk_bonus
     p_boundary += boundary_bonus
     p_random += random_bonus
     p_topk, p_boundary, p_random = _normalize_source_probs(
@@ -401,11 +518,360 @@ def _apply_focus3_recover_policy(
         "reason": "stagnated",
         "level": str(level),
         "no_improve_count": int(no_improve_count),
+        "has_constraints": bool(has_constraints),
+        "topk_bonus": float(topk_bonus),
         "boundary_bonus": float(boundary_bonus),
         "random_bonus": float(random_bonus),
         "kappa_after": float(kappa_after),
     })
     return p_topk, p_boundary, p_random, float(kappa_after), info
+
+
+def _apply_focus3_no_constraint_source_cap(
+    *,
+    system: OptimizerSystemConfig,
+    p_topk: float,
+    p_boundary: float,
+    p_random: float,
+    constraint_defs: list[dict],
+) -> tuple[float, float, float, dict[str, object]]:
+    enabled = bool(getattr(system, "focus3_no_constraint_source_cap_enabled", True))
+    has_constraints = bool(constraint_defs)
+    p_topk, p_boundary, p_random = _normalize_source_probs(
+        topk=p_topk,
+        boundary=p_boundary,
+        random_p=p_random,
+    )
+    info: dict[str, object] = {
+        "enabled": bool(enabled),
+        "applied": False,
+        "reason": "disabled" if not enabled else "",
+        "has_constraints": bool(has_constraints),
+        "before": {
+            "topk": float(p_topk),
+            "boundary": float(p_boundary),
+            "random": float(p_random),
+        },
+    }
+    if not enabled:
+        info["after"] = dict(info["before"])
+        return p_topk, p_boundary, p_random, info
+    if has_constraints:
+        info["reason"] = "constraints_present"
+        info["after"] = dict(info["before"])
+        return p_topk, p_boundary, p_random, info
+
+    boundary_max = float(np.clip(float(getattr(system, "focus3_no_constraint_boundary_max", 0.18)), 0.0, 1.0))
+    topk_min = float(np.clip(float(getattr(system, "focus3_no_constraint_topk_min", 0.55)), 0.0, 1.0))
+    random_min = float(np.clip(float(getattr(system, "focus3_no_constraint_random_min", 0.10)), 0.0, 1.0))
+    if topk_min + random_min > 1.0:
+        scale = 1.0 / max(topk_min + random_min, 1e-12)
+        topk_min *= scale
+        random_min *= scale
+
+    old = (float(p_topk), float(p_boundary), float(p_random))
+    p_boundary = min(float(p_boundary), boundary_max)
+    remaining = max(1.0 - p_boundary, 0.0)
+    non_boundary = max(float(old[0] + old[2]), 1e-12)
+    topk_share = float(old[0]) / non_boundary
+    p_topk = remaining * topk_share
+    p_random = remaining - p_topk
+
+    if p_topk < topk_min:
+        need = topk_min - p_topk
+        take = min(need, p_boundary)
+        p_boundary -= take
+        p_topk += take
+        need -= take
+        if need > 0.0:
+            take = min(need, max(p_random - random_min, 0.0))
+            p_random -= take
+            p_topk += take
+
+    if p_random < random_min:
+        need = random_min - p_random
+        take = min(need, p_boundary)
+        p_boundary -= take
+        p_random += take
+        need -= take
+        if need > 0.0:
+            take = min(need, max(p_topk - topk_min, 0.0))
+            p_topk -= take
+            p_random += take
+
+    p_topk, p_boundary, p_random = _normalize_source_probs(
+        topk=p_topk,
+        boundary=p_boundary,
+        random_p=p_random,
+    )
+    after = {
+        "topk": float(p_topk),
+        "boundary": float(p_boundary),
+        "random": float(p_random),
+    }
+    applied = any(abs(after[k] - float(info["before"][k])) > 1e-12 for k in after)
+    info.update({
+        "applied": bool(applied),
+        "reason": "no_constraint_cap" if applied else "already_within_policy",
+        "boundary_max": float(boundary_max),
+        "topk_min": float(topk_min),
+        "random_min": float(random_min),
+        "after": after,
+    })
+    return p_topk, p_boundary, p_random, info
+
+
+def _apply_focus3_best_local_policy(
+    *,
+    system: OptimizerSystemConfig,
+    p_topk: float,
+    p_boundary: float,
+    p_random: float,
+    p_dim: int,
+    n_train: int,
+    focus3_eval_count: int,
+    has_constraints: bool,
+) -> tuple[float, float, float, float, dict[str, object]]:
+    enabled = bool(getattr(system, "focus3_best_local_enabled", True))
+    p_topk, p_boundary, p_random = _normalize_source_probs(
+        topk=p_topk,
+        boundary=p_boundary,
+        random_p=p_random,
+    )
+    info: dict[str, object] = {
+        "enabled": bool(enabled),
+        "applied": False,
+        "reason": "disabled" if not enabled else "",
+        "best_local_prob": 0.0,
+        "has_constraints": bool(has_constraints),
+        "focus3_eval_count": int(focus3_eval_count),
+        "data_ratio": float(max(int(n_train), 0)) / float(max(int(p_dim), 1)),
+    }
+    if not enabled:
+        return p_topk, p_boundary, p_random, 0.0, info
+    if bool(has_constraints):
+        info["reason"] = "constraints_present"
+        return p_topk, p_boundary, p_random, 0.0, info
+
+    min_evals = int(max(int(getattr(system, "focus3_best_local_min_focus3_evals", 5)), 0))
+    if int(focus3_eval_count) < min_evals:
+        info["reason"] = "insufficient_focus3_history"
+        return p_topk, p_boundary, p_random, 0.0, info
+
+    data_ratio = float(info["data_ratio"])
+    min_data_ratio = float(max(float(getattr(system, "focus3_best_local_min_data_ratio", 5.0)), 0.0))
+    if data_ratio < min_data_ratio:
+        info["reason"] = "insufficient_data_ratio"
+        return p_topk, p_boundary, p_random, 0.0, info
+
+    requested = float(np.clip(float(getattr(system, "focus3_best_local_prob", 0.15)), 0.0, 1.0))
+    max_prob = float(np.clip(float(getattr(system, "focus3_best_local_max_prob", 0.25)), 0.0, 1.0))
+    p_best = float(min(requested, max_prob, p_topk))
+    if p_best <= 0.0:
+        info["reason"] = "no_topk_quota_available"
+        return p_topk, p_boundary, p_random, 0.0, info
+    p_topk -= p_best
+    p_topk, p_boundary, p_random, p_best = _normalize_focus3_source_probs4(
+        topk=p_topk,
+        boundary=p_boundary,
+        random_p=p_random,
+        best_local=p_best,
+    )
+    info.update({
+        "applied": True,
+        "reason": "best_local_from_topk",
+        "best_local_prob": float(p_best),
+        "requested_prob": float(requested),
+        "max_prob": float(max_prob),
+        "min_focus3_evals": int(min_evals),
+        "min_data_ratio": float(min_data_ratio),
+    })
+    return p_topk, p_boundary, p_random, p_best, info
+
+
+def _apply_focus3_fallback_bounds_source_policy(
+    *,
+    system: OptimizerSystemConfig,
+    p_topk: float,
+    p_boundary: float,
+    p_random: float,
+    p_best_local: float,
+    fallback_bounds: bool,
+) -> tuple[float, float, float, float, dict[str, object]]:
+    enabled = bool(getattr(system, "focus3_fallback_bounds_source_policy_enabled", True))
+    p_topk, p_boundary, p_random, p_best_local = _normalize_focus3_source_probs4(
+        topk=p_topk,
+        boundary=p_boundary,
+        random_p=p_random,
+        best_local=p_best_local,
+    )
+    info: dict[str, object] = {
+        "enabled": bool(enabled),
+        "applied": False,
+        "reason": "disabled" if not enabled else "",
+        "fallback_bounds": bool(fallback_bounds),
+        "before": {
+            "topk": float(p_topk),
+            "boundary": float(p_boundary),
+            "random": float(p_random),
+            "best_local": float(p_best_local),
+        },
+    }
+    if not enabled:
+        info["after"] = dict(info["before"])
+        return p_topk, p_boundary, p_random, p_best_local, info
+    if not bool(fallback_bounds):
+        info["reason"] = "not_fallback_bounds"
+        info["after"] = dict(info["before"])
+        return p_topk, p_boundary, p_random, p_best_local, info
+
+    limits = {
+        "boundary": float(np.clip(float(getattr(system, "focus3_fallback_bounds_boundary_max", 0.05)), 0.0, 1.0)),
+        "topk": float(np.clip(float(getattr(system, "focus3_fallback_bounds_topk_min", 0.45)), 0.0, 1.0)),
+        "best_local": float(np.clip(float(getattr(system, "focus3_fallback_bounds_best_local_min", 0.20)), 0.0, 1.0)),
+        "random": float(np.clip(float(getattr(system, "focus3_fallback_bounds_random_min", 0.20)), 0.0, 1.0)),
+    }
+    min_sum = limits["topk"] + limits["best_local"] + limits["random"]
+    if min_sum + limits["boundary"] > 1.0:
+        scale = max((1.0 - limits["boundary"]) / max(min_sum, 1e-12), 0.0)
+        limits["topk"] *= scale
+        limits["best_local"] *= scale
+        limits["random"] *= scale
+
+    probs = {
+        "topk": float(p_topk),
+        "boundary": float(min(p_boundary, limits["boundary"])),
+        "random": float(p_random),
+        "best_local": float(p_best_local),
+    }
+    # Boundary에서 덜어낸 quota를 우선 부족한 topk/best_local/random floor에 채운다.
+    leftover = max(0.0, 1.0 - sum(probs.values()))
+    for key in ("topk", "best_local", "random"):
+        need = max(0.0, limits[key] - probs[key])
+        take = min(need, leftover)
+        probs[key] += take
+        leftover -= take
+    if leftover > 0.0:
+        weights = np.asarray([0.45, 0.25, 0.30], dtype=float)
+        weights = weights / float(np.sum(weights))
+        for key, w in zip(("topk", "best_local", "random"), weights):
+            probs[key] += leftover * float(w)
+
+    p_topk, p_boundary, p_random, p_best_local = _normalize_focus3_source_probs4(
+        topk=probs["topk"],
+        boundary=probs["boundary"],
+        random_p=probs["random"],
+        best_local=probs["best_local"],
+    )
+    after = {
+        "topk": float(p_topk),
+        "boundary": float(p_boundary),
+        "random": float(p_random),
+        "best_local": float(p_best_local),
+    }
+    applied = any(abs(after[k] - float(info["before"][k])) > 1e-12 for k in after)
+    info.update({
+        "applied": bool(applied),
+        "reason": "fallback_bounds_policy" if applied else "already_within_policy",
+        "limits": limits,
+        "after": after,
+    })
+    return p_topk, p_boundary, p_random, p_best_local, info
+
+
+def _focus3_no_constraint_boundary_gate(
+    *,
+    system: OptimizerSystemConfig,
+    best_scores: dict[str, float],
+    has_constraints: bool,
+) -> dict[str, object]:
+    enabled = bool(getattr(system, "focus3_no_constraint_boundary_gate_enabled", True))
+    info: dict[str, object] = {
+        "enabled": bool(enabled),
+        "applied": False,
+        "allowed": True,
+        "reason": "disabled" if not enabled else "",
+        "margin": float("nan"),
+        "boundary_score": float(best_scores.get("boundary", float("nan"))),
+        "non_boundary_best": float("nan"),
+    }
+    if not enabled:
+        return info
+    if has_constraints:
+        info["reason"] = "constraints_present"
+        return info
+    b_score = float(best_scores.get("boundary", float("nan")))
+    non_boundary = [
+        float(best_scores.get(src, float("nan")))
+        for src in ("topk", "random", "best_local")
+        if math.isfinite(float(best_scores.get(src, float("nan"))))
+    ]
+    if not math.isfinite(b_score):
+        info.update({"allowed": False, "applied": True, "reason": "boundary_score_nan"})
+        return info
+    if not non_boundary:
+        info["reason"] = "no_non_boundary_candidate"
+        return info
+    nb_best = float(min(non_boundary))
+    margin_ratio = float(max(float(getattr(system, "focus3_no_constraint_boundary_gate_margin_ratio", 0.02)), 0.0))
+    margin = float(max(abs(nb_best), abs(b_score), 1.0) * margin_ratio)
+    allowed = bool(b_score <= nb_best - margin)
+    info.update({
+        "allowed": bool(allowed),
+        "applied": bool(not allowed),
+        "reason": "boundary_not_sufficiently_better" if not allowed else "boundary_sufficiently_better",
+        "margin": float(margin),
+        "boundary_score": float(b_score),
+        "non_boundary_best": float(nb_best),
+    })
+    return info
+
+
+def _apply_focus3_boundary_score_penalty(
+    *,
+    system: OptimizerSystemConfig,
+    source: str,
+    scores: np.ndarray,
+    has_constraints: bool,
+) -> tuple[np.ndarray, dict[str, object]]:
+    enabled = bool(getattr(system, "focus3_no_constraint_boundary_score_penalty_enabled", True))
+    arr = np.asarray(scores, dtype=float).copy()
+    info: dict[str, object] = {
+        "enabled": bool(enabled),
+        "applied": False,
+        "reason": "disabled" if not enabled else "",
+        "source": str(source),
+        "penalty": 0.0,
+        "ratio": float(getattr(system, "focus3_no_constraint_boundary_score_penalty_ratio", 0.0)),
+        "scale": float("nan"),
+    }
+    if not enabled:
+        return arr, info
+    if bool(has_constraints):
+        info["reason"] = "constraints_present"
+        return arr, info
+    if str(source) != "boundary":
+        info["reason"] = "not_boundary"
+        return arr, info
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        info["reason"] = "no_finite_scores"
+        return arr, info
+    ratio = float(max(float(getattr(system, "focus3_no_constraint_boundary_score_penalty_ratio", 0.25)), 0.0))
+    scale = float(max(abs(float(np.nanmedian(finite))), abs(float(np.nanmin(finite))), 1.0))
+    penalty = float(ratio * scale)
+    if penalty <= 0.0:
+        info["reason"] = "zero_penalty"
+        return arr, info
+    arr[np.isfinite(arr)] = arr[np.isfinite(arr)] + penalty
+    info.update({
+        "applied": True,
+        "reason": "no_constraint_boundary_penalty",
+        "penalty": float(penalty),
+        "ratio": float(ratio),
+        "scale": float(scale),
+    })
+    return arr, info
 
 
 def _select_focus3_dedup_fallback(
@@ -775,132 +1241,142 @@ def _build_focus2_regions_from_archive(
         quality_score = lower
         straddle_score = beta * sigma - np.abs(mu - tau)
 
-    good_idx = np.where(good_mask)[0]
-    uncertain_idx = np.where(uncertain_mask)[0]
-    uncertain_seed_fraction = float(np.clip(float(getattr(system, "focus2_region_uncertain_seed_fraction", 0.30)), 0.0, 1.0))
-    n_uncertain_seed = int(round(float(uncertain_idx.size) * uncertain_seed_fraction))
-    if n_uncertain_seed > 0 and uncertain_idx.size > 0:
-        uncertain_order = uncertain_idx[np.argsort(-straddle_score[uncertain_idx])]
-        uncertain_seed_idx = uncertain_order[:n_uncertain_seed]
-    else:
-        uncertain_seed_idx = np.empty((0,), dtype=int)
-    seed_idx = np.unique(np.concatenate([good_idx, uncertain_seed_idx])).astype(int)
-    if seed_idx.size == 0:
-        return {
-            "enabled": True,
-            "status": "skipped",
-            "reason": "no_good_or_uncertain_seed",
-            "tau": float(tau),
-            "candidate_counts": {
-                "good": int(np.sum(good_mask)),
-                "uncertain": int(np.sum(uncertain_mask)),
-                "bad": int(np.sum(bad_mask)),
-            },
-            "regions": [],
-            "archive_count": int(X_archive.shape[0]),
-            "min_archive_points": int(min_archive),
-            "min_volume_ratio": float(min_volume),
-        }
-
     span = np.maximum(ub - lb, 1e-12)
     pool_n = (pool - lb.reshape(1, -1)) / span.reshape(1, -1)
-    archive_n = (X_archive - lb.reshape(1, -1)) / span.reshape(1, -1)
-    seed_score = quality_score[seed_idx]
-    seed_order = seed_idx[np.argsort(seed_score)]
-    radius = float(max(float(getattr(system, "focus2_region_cluster_radius", 0.20)), 1e-6))
-    expand_ratio = float(max(float(getattr(system, "focus2_region_expand_ratio", 1.15)), 1.0))
     max_regions = int(max(int(getattr(system, "focus2_region_max_regions", 5)), 1))
     qlo = float(np.clip(float(getattr(system, "focus2_region_quantile_low", 0.10)), 0.0, 0.49))
     qhi = float(np.clip(float(getattr(system, "focus2_region_quantile_high", 0.90)), qlo + 0.01, 1.0))
 
-    assigned = np.zeros((pool.shape[0],), dtype=bool)
-    regions: list[dict[str, object]] = []
-    for center_idx in seed_order.tolist():
-        if len(regions) >= max_regions:
-            break
-        if assigned[int(center_idx)]:
-            continue
-        d_seed = np.linalg.norm(pool_n[seed_idx] - pool_n[int(center_idx)].reshape(1, -1), axis=1) / math.sqrt(float(p))
-        cluster_seed_idx = seed_idx[d_seed <= radius]
-        if cluster_seed_idx.size < min_good_candidates:
-            continue
-
-        raw_lb = np.quantile(pool[cluster_seed_idx], qlo, axis=0)
-        raw_ub = np.quantile(pool[cluster_seed_idx], qhi, axis=0)
-        center = 0.5 * (raw_lb + raw_ub)
-        width = np.maximum(raw_ub - raw_lb, 1e-12) * expand_ratio
-        region_lb, region_ub = _centered_bounds_from_width(
-            center=center,
-            width=width,
-            full_lb=lb,
-            full_ub=ub,
-        )
-        region_lb, region_ub, volume_ratio = _enforce_min_volume_ratio(
-            focus_lb=region_lb,
-            focus_ub=region_ub,
-            full_lb=lb,
-            full_ub=ub,
-            min_volume_ratio=min_volume,
-        )
-
-        cand_inside = np.all((pool >= region_lb.reshape(1, -1)) & (pool <= region_ub.reshape(1, -1)), axis=1)
-        archive_inside = np.all((X_archive >= region_lb.reshape(1, -1)) & (X_archive <= region_ub.reshape(1, -1)), axis=1)
-        archive_count = int(np.sum(archive_inside))
-        good_count = int(np.sum(cand_inside & good_mask))
-        uncertain_count = int(np.sum(cand_inside & uncertain_mask))
-        bad_count = int(np.sum(cand_inside & bad_mask))
-        if archive_count < min_archive:
-            assigned[cluster_seed_idx] = True
-            continue
-        if good_count < min_good_candidates:
-            assigned[cluster_seed_idx] = True
-            continue
-        if volume_ratio < min_volume:
-            assigned[cluster_seed_idx] = True
-            continue
-
-        y_inside = y_archive[archive_inside]
-        if y_inside.size:
-            archive_best = float(np.max(y_inside) if objective_sense == "max" else np.min(y_inside))
+    def _collect_regions(
+        *,
+        uncertain_seed_fraction: float,
+        radius: float,
+        min_good: int,
+        expand_ratio: float,
+        pass_name: str,
+    ) -> list[dict[str, object]]:
+        good_idx = np.where(good_mask)[0]
+        uncertain_idx = np.where(uncertain_mask)[0]
+        n_uncertain_seed = int(round(float(uncertain_idx.size) * float(np.clip(uncertain_seed_fraction, 0.0, 1.0))))
+        if n_uncertain_seed > 0 and uncertain_idx.size > 0:
+            uncertain_order = uncertain_idx[np.argsort(-straddle_score[uncertain_idx])]
+            uncertain_seed_idx = uncertain_order[:n_uncertain_seed]
         else:
-            archive_best = float("nan")
-        total_cand = max(int(np.sum(cand_inside)), 1)
-        good_density = float(good_count) / float(total_cand)
-        bad_density = float(bad_count) / float(total_cand)
-        archive_support = min(float(archive_count) / float(max(min_archive * 2, 1)), 1.0)
-        score = float(good_density + 0.25 * archive_support - 0.5 * bad_density)
-        confidence = float(np.clip(0.5 * good_density + 0.3 * archive_support + 0.2 * (1.0 - bad_density), 0.0, 1.0))
+            uncertain_seed_idx = np.empty((0,), dtype=int)
+        seed_idx = np.unique(np.concatenate([good_idx, uncertain_seed_idx])).astype(int)
+        if seed_idx.size == 0:
+            return []
 
-        region_id = f"region_{len(regions) + 1:03d}"
-        regions.append(
-            {
-                "region_id": region_id,
-                "rank": 0,
-                "bounds": {
-                    str(name): [float(lo), float(hi)]
-                    for name, lo, hi in zip(selected_features, region_lb, region_ub)
-                },
-                "center": {
-                    str(name): float(v)
-                    for name, v in zip(selected_features, 0.5 * (region_lb + region_ub))
-                },
-                "score": float(score),
-                "confidence": float(confidence),
-                "size_ratio": float(volume_ratio),
-                "candidate_counts": {
-                    "good": int(good_count),
-                    "uncertain": int(uncertain_count),
-                    "bad": int(bad_count),
-                    "total": int(np.sum(cand_inside)),
-                },
-                "archive_counts": {
-                    "total": int(archive_count),
-                    "min_required": int(min_archive),
-                },
-                "archive_best_objective": float(archive_best),
-            }
+        seed_score = quality_score[seed_idx]
+        seed_order = seed_idx[np.argsort(seed_score)]
+        assigned = np.zeros((pool.shape[0],), dtype=bool)
+        out: list[dict[str, object]] = []
+        for center_idx in seed_order.tolist():
+            if len(out) >= max_regions:
+                break
+            if assigned[int(center_idx)]:
+                continue
+            d_seed = np.linalg.norm(pool_n[seed_idx] - pool_n[int(center_idx)].reshape(1, -1), axis=1) / math.sqrt(float(p))
+            cluster_seed_idx = seed_idx[d_seed <= radius]
+            if cluster_seed_idx.size < min_good:
+                continue
+
+            raw_lb = np.quantile(pool[cluster_seed_idx], qlo, axis=0)
+            raw_ub = np.quantile(pool[cluster_seed_idx], qhi, axis=0)
+            center = 0.5 * (raw_lb + raw_ub)
+            width = np.maximum(raw_ub - raw_lb, 1e-12) * expand_ratio
+            region_lb, region_ub = _centered_bounds_from_width(
+                center=center,
+                width=width,
+                full_lb=lb,
+                full_ub=ub,
+            )
+            region_lb, region_ub, volume_ratio = _enforce_min_volume_ratio(
+                focus_lb=region_lb,
+                focus_ub=region_ub,
+                full_lb=lb,
+                full_ub=ub,
+                min_volume_ratio=min_volume,
+            )
+
+            cand_inside = np.all((pool >= region_lb.reshape(1, -1)) & (pool <= region_ub.reshape(1, -1)), axis=1)
+            archive_inside = np.all((X_archive >= region_lb.reshape(1, -1)) & (X_archive <= region_ub.reshape(1, -1)), axis=1)
+            archive_count = int(np.sum(archive_inside))
+            good_count = int(np.sum(cand_inside & good_mask))
+            uncertain_count = int(np.sum(cand_inside & uncertain_mask))
+            bad_count = int(np.sum(cand_inside & bad_mask))
+            if archive_count < min_archive:
+                assigned[cluster_seed_idx] = True
+                continue
+            if good_count < min_good:
+                assigned[cluster_seed_idx] = True
+                continue
+            if volume_ratio < min_volume:
+                assigned[cluster_seed_idx] = True
+                continue
+
+            y_inside = y_archive[archive_inside]
+            archive_best = float(np.max(y_inside) if objective_sense == "max" else np.min(y_inside)) if y_inside.size else float("nan")
+            total_cand = max(int(np.sum(cand_inside)), 1)
+            good_density = float(good_count) / float(total_cand)
+            bad_density = float(bad_count) / float(total_cand)
+            archive_support = min(float(archive_count) / float(max(min_archive * 2, 1)), 1.0)
+            score = float(good_density + 0.25 * archive_support - 0.5 * bad_density)
+            confidence = float(np.clip(0.5 * good_density + 0.3 * archive_support + 0.2 * (1.0 - bad_density), 0.0, 1.0))
+
+            region_id = f"region_{len(out) + 1:03d}"
+            out.append(
+                {
+                    "region_id": region_id,
+                    "rank": 0,
+                    "generation_pass": str(pass_name),
+                    "bounds": {
+                        str(name): [float(lo), float(hi)]
+                        for name, lo, hi in zip(selected_features, region_lb, region_ub)
+                    },
+                    "center": {
+                        str(name): float(v)
+                        for name, v in zip(selected_features, 0.5 * (region_lb + region_ub))
+                    },
+                    "score": float(score),
+                    "confidence": float(confidence),
+                    "size_ratio": float(volume_ratio),
+                    "candidate_counts": {
+                        "good": int(good_count),
+                        "uncertain": int(uncertain_count),
+                        "bad": int(bad_count),
+                        "total": int(np.sum(cand_inside)),
+                    },
+                    "archive_counts": {
+                        "total": int(archive_count),
+                        "min_required": int(min_archive),
+                    },
+                    "archive_best_objective": float(archive_best),
+                }
+            )
+            assigned[cand_inside] = True
+        return out
+
+    base_uncertain = float(np.clip(float(getattr(system, "focus2_region_uncertain_seed_fraction", 0.30)), 0.0, 1.0))
+    base_radius = float(max(float(getattr(system, "focus2_region_cluster_radius", 0.20)), 1e-6))
+    base_expand = float(max(float(getattr(system, "focus2_region_expand_ratio", 1.15)), 1.0))
+    regions = _collect_regions(
+        uncertain_seed_fraction=base_uncertain,
+        radius=base_radius,
+        min_good=min_good_candidates,
+        expand_ratio=base_expand,
+        pass_name="primary",
+    )
+    retry_used = False
+    if not regions and bool(getattr(system, "focus2_region_retry_enabled", True)):
+        retry_used = True
+        regions = _collect_regions(
+            uncertain_seed_fraction=float(getattr(system, "focus2_region_retry_uncertain_seed_fraction", 0.60)),
+            radius=base_radius * float(max(float(getattr(system, "focus2_region_retry_radius_scale", 1.50)), 1.0)),
+            min_good=max(1, int(math.ceil(float(min_good_candidates) * float(np.clip(float(getattr(system, "focus2_region_retry_min_good_scale", 0.50)), 0.1, 1.0))))),
+            expand_ratio=float(max(float(getattr(system, "focus2_region_retry_expand_ratio", 1.30)), base_expand)),
+            pass_name="retry_relaxed",
         )
-        assigned[cand_inside] = True
 
     regions.sort(key=lambda r: (float(r.get("score", 0.0)), float(r.get("confidence", 0.0))), reverse=True)
     for rank, region in enumerate(regions, start=1):
@@ -911,6 +1387,7 @@ def _build_focus2_regions_from_archive(
         "source_focus": "focus1",
         "status": "ok" if regions else "empty",
         "reason": "" if regions else "no_region_passed_filters",
+        "retry_used": bool(retry_used),
         "tau": float(tau),
         "beta": float(beta),
         "candidate_pool_count": int(pool.shape[0]),
@@ -1348,6 +1825,9 @@ def _build_focus2_lite_batch(
     post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
     post_penalty_lambda: float,
     max_candidates: int,
+    var_names: list[str],
+    constraint_defs: list[dict],
+    enforce_pre_constraints: bool,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     active = [s for s in region_states if str(s.get("status", "active")) == "active"]
     if not active:
@@ -1385,6 +1865,9 @@ def _build_focus2_lite_batch(
     candidates: list[tuple[int, float, np.ndarray, dict[str, object], int, str]] = []
     skipped: list[dict[str, object]] = []
     plan_pool_count = 0
+    pre_raw_count = 0
+    pre_feasible_count = 0
+    pre_margin_values: list[float] = []
     for state in scheduled_active:
         rlb = np.asarray(state.get("bounds_lb"), dtype=float)
         rub = np.asarray(state.get("bounds_ub"), dtype=float)
@@ -1433,6 +1916,24 @@ def _build_focus2_lite_batch(
             pool = rng.uniform(rlb, rub, size=(pool_size, len(selected_features)))
             pool_labels = ["random"] * int(pool.shape[0])
         plan_pool_count += int(pool.shape[0])
+        pool, pool_labels, pool_margins, pool_constraint_stats = _filter_pool_by_pre_constraints(
+            pool=pool,
+            labels=pool_labels,
+            var_names=var_names,
+            constraint_defs=constraint_defs,
+            enforce_pre_constraints=enforce_pre_constraints,
+        )
+        pre_raw_count += int(pool_constraint_stats.get("raw_count", 0))
+        pre_feasible_count += int(pool_constraint_stats.get("feasible_count", 0))
+        if pool_margins.size:
+            pre_margin_values.extend(float(v) for v in pool_margins[np.isfinite(pool_margins)].tolist())
+        if pool.shape[0] == 0:
+            skipped.append({
+                "region_id": str(state.get("region_id")),
+                "reason": "no_pre_feasible_candidate",
+                "count": int(idx.size),
+            })
+            continue
         scores = _acquisition_scores_for_pool(
             pool=pool,
             model=local_model,
@@ -1449,7 +1950,29 @@ def _build_focus2_lite_batch(
             skipped.append({"region_id": str(state.get("region_id")), "reason": "no_finite_score", "count": int(idx.size)})
             continue
         best_i = int(finite[np.argmin(scores[finite])])
+        if (
+            enforce_pre_constraints
+            and constraint_defs
+            and bool(getattr(system, "constraint_boundary_source_enabled", True))
+            and pool_margins.size == scores.size
+            and rng.uniform(0.0, 1.0) < float(np.clip(float(getattr(system, "focus2_constraint_boundary_select_prob", 0.25)), 0.0, 1.0))
+        ):
+            boundary_i = _select_constraint_boundary_index(
+                scores=scores,
+                margins=pool_margins,
+                acq_quantile=float(getattr(system, "constraint_boundary_acq_quantile", 0.75)),
+            )
+            if boundary_i is not None:
+                best_i = int(boundary_i)
         best_source = str(pool_labels[best_i]) if best_i < len(pool_labels) else "unknown"
+        if enforce_pre_constraints and constraint_defs and pool_margins.size == scores.size:
+            boundary_i = _select_constraint_boundary_index(
+                scores=scores,
+                margins=pool_margins,
+                acq_quantile=float(getattr(system, "constraint_boundary_acq_quantile", 0.75)),
+            )
+            if boundary_i is not None and int(boundary_i) == int(best_i):
+                best_source = "constraint_boundary"
         candidates.append((
             int(state.get("rank", 999999)),
             float(scores[best_i]),
@@ -1464,6 +1987,12 @@ def _build_focus2_lite_batch(
             "reason": "no_region_candidate",
             "candidate_count": 0,
             "plan_pool_count": int(plan_pool_count),
+            "pre_raw_count": int(pre_raw_count),
+            "pre_feasible_count": int(pre_feasible_count),
+            "pre_feasible_ratio": float(pre_feasible_count) / float(max(pre_raw_count, 1)) if enforce_pre_constraints and constraint_defs else 1.0,
+            "pre_margin_min": float(np.min(pre_margin_values)) if pre_margin_values else float("nan"),
+            "pre_margin_median": float(np.median(pre_margin_values)) if pre_margin_values else float("nan"),
+            "pre_margin_max": float(np.max(pre_margin_values)) if pre_margin_values else float("nan"),
             "skipped": skipped,
         }
     candidates.sort(key=lambda item: item[1])
@@ -1531,6 +2060,12 @@ def _build_focus2_lite_batch(
         "candidate_count": int(len(batch)),
         "available_candidate_count": int(len(candidates)),
         "plan_pool_count": int(plan_pool_count),
+        "pre_raw_count": int(pre_raw_count),
+        "pre_feasible_count": int(pre_feasible_count),
+        "pre_feasible_ratio": float(pre_feasible_count) / float(max(pre_raw_count, 1)) if enforce_pre_constraints and constraint_defs else 1.0,
+        "pre_margin_min": float(np.min(pre_margin_values)) if pre_margin_values else float("nan"),
+        "pre_margin_median": float(np.median(pre_margin_values)) if pre_margin_values else float("nan"),
+        "pre_margin_max": float(np.max(pre_margin_values)) if pre_margin_values else float("nan"),
         "local_pool_size": int(pool_size),
         "local_pool_quotas": {k: int(v) for k, v in pool_quotas.items()},
         "min_candidate_rms_distance": float(min_rms),
@@ -2218,6 +2753,26 @@ def _build_focus2_final_bounds(
     if not states:
         states = [selected]
 
+    fallback_selected = any(
+        str(s.get("status", "")).lower() == "fallback"
+        or str(s.get("region_id", "")).startswith("region_fallback")
+        for s in states
+        if isinstance(s, dict)
+    )
+    if bool(fallback_selected):
+        trim_blend = float(min(
+            trim_blend,
+            np.clip(float(getattr(system, "focus2_final_fallback_archive_trim_blend", 0.0)), 0.0, 1.0),
+        ))
+        expand_ratio = float(max(
+            expand_ratio,
+            float(getattr(system, "focus2_final_fallback_bounds_expand_ratio", 1.35)),
+        ))
+        min_volume = float(max(
+            min_volume,
+            np.clip(float(getattr(system, "focus2_final_fallback_min_volume_ratio", 0.40)), 0.0, 1.0),
+        ))
+
     lb_key = "parent_lb" if use_parent else "bounds_lb"
     ub_key = "parent_ub" if use_parent else "bounds_ub"
     lbs = [np.asarray(s.get(lb_key, s.get("bounds_lb")), dtype=float).reshape(-1) for s in states]
@@ -2253,6 +2808,7 @@ def _build_focus2_final_bounds(
         "quantile_low": float(trim_qlo),
         "quantile_high": float(trim_qhi),
         "blend": float(trim_blend),
+        "fallback_selected": bool(fallback_selected),
     }
     if archive_trim_enabled:
         X_arr = np.asarray(X_archive, dtype=float) if X_archive is not None else np.empty((0, full_lb.shape[0]), dtype=float)
@@ -2353,6 +2909,7 @@ def _build_focus2_final_bounds(
         "expand_ratio": float(expand_ratio),
         "min_volume_ratio": float(min_volume),
         "max_volume_ratio": float(max_volume),
+        "fallback_selected": bool(fallback_selected),
         "selected_region_ids": [str(s.get("region_id", "")) for s in states],
     }
     selection["selected_region_ids"] = [str(s.get("region_id", "")) for s in states]
@@ -2538,6 +3095,11 @@ def _acquisition_scores_for_pool(
             from scipy.stats import norm
 
             scores = -(imp * norm.cdf(z) + safe_sigma * norm.pdf(z))
+        elif acq == "MEAN":
+            if objective_sense == "max":
+                scores = -mu
+            else:
+                scores = mu
         else:
             if objective_sense == "max":
                 scores = -(mu + float(kappa) * sigma)
@@ -2565,11 +3127,14 @@ def _allocate_source_quotas(
     total: int,
     probs: dict[str, float],
 ) -> dict[str, int]:
-    sources = ["topk", "boundary", "random"]
+    sources = [str(s) for s in probs.keys() if str(s)]
+    if not sources:
+        sources = ["topk"]
     n_total = int(max(total, 1))
     vals = np.asarray([max(float(probs.get(s, 0.0)), 0.0) for s in sources], dtype=float)
     if float(np.sum(vals)) <= 0.0:
-        vals = np.asarray([1.0, 0.0, 0.0], dtype=float)
+        vals = np.zeros((len(sources),), dtype=float)
+        vals[0] = 1.0
     vals = vals / float(np.sum(vals))
 
     quotas = {s: int(math.floor(float(p) * n_total)) for s, p in zip(sources, vals)}
@@ -2900,6 +3465,97 @@ def _build_focus0_candidate_pool(
     return np.asarray(pool, dtype=float)
 
 
+def _filter_pool_by_pre_constraints(
+    *,
+    pool: np.ndarray,
+    labels: list[str] | None,
+    var_names: list[str],
+    constraint_defs: list[dict],
+    enforce_pre_constraints: bool,
+) -> tuple[np.ndarray, list[str], np.ndarray, dict[str, object]]:
+    pool = np.asarray(pool, dtype=float)
+    n_raw = int(pool.shape[0]) if pool.ndim == 2 else 0
+    if pool.ndim != 2 or n_raw == 0:
+        return (
+            np.empty((0, 0), dtype=float) if pool.ndim != 2 else pool,
+            [],
+            np.empty((0,), dtype=float),
+            {
+                "active": bool(enforce_pre_constraints and constraint_defs),
+                "raw_count": 0,
+                "feasible_count": 0,
+                "feasible_ratio": float("nan"),
+                "margin_min": float("nan"),
+                "margin_median": float("nan"),
+                "margin_max": float("nan"),
+            },
+        )
+    label_list = list(labels or ["unknown"] * n_raw)
+    if len(label_list) < n_raw:
+        label_list.extend(["unknown"] * (n_raw - len(label_list)))
+    label_list = label_list[:n_raw]
+    if not enforce_pre_constraints or not constraint_defs:
+        return (
+            pool,
+            label_list,
+            np.full((n_raw,), float("inf"), dtype=float),
+            {
+                "active": False,
+                "raw_count": n_raw,
+                "feasible_count": n_raw,
+                "feasible_ratio": 1.0,
+                "margin_min": float("inf"),
+                "margin_median": float("inf"),
+                "margin_max": float("inf"),
+            },
+        )
+
+    mask, _payloads, margins = evaluate_constraints_batch(
+        X=pool,
+        var_names=var_names,
+        constraint_defs=constraint_defs,
+        scope="pre",
+    )
+    keep_idx = np.where(mask)[0]
+    finite_margins = margins[np.isfinite(margins)]
+    stats = {
+        "active": True,
+        "raw_count": n_raw,
+        "feasible_count": int(keep_idx.size),
+        "feasible_ratio": float(keep_idx.size) / float(max(n_raw, 1)),
+        "margin_min": float(np.min(finite_margins)) if finite_margins.size else float("nan"),
+        "margin_median": float(np.median(finite_margins)) if finite_margins.size else float("nan"),
+        "margin_max": float(np.max(finite_margins)) if finite_margins.size else float("nan"),
+    }
+    return (
+        pool[keep_idx],
+        [label_list[int(i)] for i in keep_idx.tolist()],
+        margins[keep_idx],
+        stats,
+    )
+
+
+def _select_constraint_boundary_index(
+    *,
+    scores: np.ndarray,
+    margins: np.ndarray,
+    acq_quantile: float,
+) -> int | None:
+    scores = np.asarray(scores, dtype=float).reshape(-1)
+    margins = np.asarray(margins, dtype=float).reshape(-1)
+    if scores.size == 0 or margins.size != scores.size:
+        return None
+    finite = np.where(np.isfinite(scores) & np.isfinite(margins) & (margins >= 0.0))[0]
+    if finite.size == 0:
+        return None
+    q = float(np.clip(acq_quantile, 0.0, 1.0))
+    threshold = float(np.quantile(scores[finite], q))
+    eligible = finite[scores[finite] <= threshold]
+    if eligible.size == 0:
+        eligible = finite
+    return int(eligible[np.argmin(margins[eligible])])
+
+
 def _build_focus0_batch(
     *,
     rng: np.random.Generator,
@@ -3043,10 +3699,17 @@ def _build_focus1_batch(
         system=system,
         var_names=var_names,
         constraint_defs=constraint_defs,
+        enforce_pre_constraints=False,
+    )
+    pool, _pool_labels, pool_margins, constraint_stats = _filter_pool_by_pre_constraints(
+        pool=raw_pool,
+        labels=None,
+        var_names=var_names,
+        constraint_defs=constraint_defs,
         enforce_pre_constraints=enforce_pre_constraints,
     )
     pool = _dedup_pool_against_reference(
-        pool=raw_pool,
+        pool=pool,
         X_ref=X_archive,
         lb=lb,
         ub=ub,
@@ -3163,6 +3826,12 @@ def _build_focus1_batch(
         "mode": "classification",
         "tau": float(tau),
         "pool_count": int(pool.shape[0]),
+        "raw_pool_count": int(constraint_stats.get("raw_count", pool.shape[0])),
+        "pre_feasible_count": int(constraint_stats.get("feasible_count", pool.shape[0])),
+        "pre_feasible_ratio": float(constraint_stats.get("feasible_ratio", 1.0)),
+        "pre_margin_min": float(constraint_stats.get("margin_min", float("nan"))),
+        "pre_margin_median": float(constraint_stats.get("margin_median", float("nan"))),
+        "pre_margin_max": float(constraint_stats.get("margin_max", float("nan"))),
         "good_count": int(np.sum(good_mask)),
         "uncertain_count": int(np.sum(uncertain_mask)),
         "bad_count": int(np.sum(bad_mask)),
@@ -3205,27 +3874,39 @@ def _build_focus3_plan_refine_starts(
     p_topk: float,
     p_boundary: float,
     p_random: float,
+    p_best_local: float,
     plan_pool_per_source: int,
     refine_starts: int,
     topk_fraction: float,
     topk_sigma: float,
     boundary_near_ratio: float,
+    best_local_sigma: float,
+    best_local_top_count: int,
     acq_type: str,
     kappa: float,
     xi: float,
     post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
     post_penalty_lambda: float,
+    has_constraints: bool,
 ) -> tuple[np.ndarray, dict[str, int], dict[str, int], dict[str, object]]:
     n_pool = int(max(plan_pool_per_source, 1))
     n_refine = int(max(refine_starts, 1))
-    source_probs = {"topk": float(p_topk), "boundary": float(p_boundary), "random": float(p_random)}
+    source_probs = {
+        "topk": float(p_topk),
+        "best_local": float(p_best_local),
+        "boundary": float(p_boundary),
+        "random": float(p_random),
+    }
     quotas = _allocate_source_quotas(total=n_refine, probs=source_probs)
 
     selected_parts: list[np.ndarray] = []
     selected_labels: list[str] = []
+    candidate_parts: dict[str, np.ndarray] = {}
+    candidate_scores: dict[str, np.ndarray] = {}
     pool_counts: dict[str, int] = {}
     selected_counts: dict[str, int] = {}
     best_scores: dict[str, float] = {}
+    boundary_score_penalty_info: dict[str, object] = {}
     random_cover_info: dict[str, object] = {
         "enabled": False,
         "candidate_count": 0,
@@ -3234,7 +3915,11 @@ def _build_focus3_plan_refine_starts(
         "min_distance": float("nan"),
     }
     plan_acq = _normalize_focus3_acq_type(acq_type)
-    for source in ("topk", "boundary", "random"):
+    source_order = ("topk", "best_local", "boundary", "random") if float(p_best_local) > 0.0 else ("topk", "boundary", "random")
+    for source in source_order:
+        source_pool_size = n_pool
+        if source == "best_local":
+            source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_best_local_pool_ratio", 0.50)), 0.05, 1.0)))))
         pool = _build_source_pool_starts(
             rng=rng,
             source=source,
@@ -3243,10 +3928,12 @@ def _build_focus3_plan_refine_starts(
             objective_sense=objective_sense,
             lb=lb,
             ub=ub,
-            pool_size=n_pool,
+            pool_size=source_pool_size,
             topk_fraction=topk_fraction,
             topk_sigma=topk_sigma,
             boundary_near_ratio=boundary_near_ratio,
+            best_local_sigma=best_local_sigma,
+            best_local_top_count=best_local_top_count,
         )
         pool_counts[source] = int(pool.shape[0])
         scores = _acquisition_scores_for_pool(
@@ -3260,8 +3947,44 @@ def _build_focus3_plan_refine_starts(
             post_feasible_prob_fn=post_feasible_prob_fn,
             post_penalty_lambda=post_penalty_lambda,
         )
+        scores, penalty_info = _apply_focus3_boundary_score_penalty(
+            system=system,
+            source=source,
+            scores=scores,
+            has_constraints=bool(has_constraints),
+        )
+        if str(source) == "boundary":
+            boundary_score_penalty_info = dict(penalty_info)
         finite_scores = scores[np.isfinite(scores)]
         best_scores[source] = float(np.min(finite_scores)) if finite_scores.size else float("nan")
+        candidate_parts[source] = pool
+        candidate_scores[source] = scores
+    boundary_gate_info = _focus3_no_constraint_boundary_gate(
+        system=system,
+        best_scores=best_scores,
+        has_constraints=bool(has_constraints),
+    )
+    if bool(boundary_gate_info.get("applied", False)):
+        boundary_quota = int(quotas.get("boundary", 0))
+        quotas["boundary"] = 0
+        if boundary_quota > 0:
+            # Boundary가 충분히 우수하지 않으면 exploitation/coverage 쪽으로 재분배한다.
+            if float(p_best_local) > 0.0:
+                n_best = int(math.floor(boundary_quota * 0.4))
+                n_topk = int(math.floor(boundary_quota * 0.4))
+                if boundary_quota > 0 and n_best == 0:
+                    n_best = 1
+                n_topk = int(min(n_topk, max(boundary_quota - n_best, 0)))
+                quotas["best_local"] = int(quotas.get("best_local", 0)) + n_best
+                quotas["topk"] = int(quotas.get("topk", 0)) + n_topk
+                quotas["random"] = int(quotas.get("random", 0)) + int(max(boundary_quota - n_best - n_topk, 0))
+            else:
+                quotas["topk"] = int(quotas.get("topk", 0)) + int(math.ceil(boundary_quota * 0.7))
+                quotas["random"] = int(quotas.get("random", 0)) + int(boundary_quota - math.ceil(boundary_quota * 0.7))
+
+    for source in source_order:
+        pool = candidate_parts.get(source, np.empty((0, lb.shape[0]), dtype=float))
+        scores = candidate_scores.get(source, np.empty((0,), dtype=float))
         if source == "random" and bool(getattr(system, "focus3_random_cover_enabled", True)):
             part, random_cover_info = _select_cover_scored_rows(
                 rng=rng,
@@ -3295,11 +4018,13 @@ def _build_focus3_plan_refine_starts(
         "selected_labels": list(selected_labels),
         "acq_type": str(plan_acq),
         "random_cover": dict(random_cover_info),
+        "boundary_gate": dict(boundary_gate_info),
+        "boundary_score_penalty": dict(boundary_score_penalty_info),
         "best_plan_source": min(
-            best_scores.keys(),
+            [s for s in best_scores.keys() if not (s == "boundary" and bool(boundary_gate_info.get("applied", False)))],
             key=lambda s: best_scores[s] if math.isfinite(float(best_scores[s])) else float("inf"),
         )
-        if best_scores
+        if best_scores and [s for s in best_scores.keys() if not (s == "boundary" and bool(boundary_gate_info.get("applied", False)))]
         else "",
     }
     return np.asarray(starts, dtype=float), pool_counts, selected_counts, diag
@@ -3317,24 +4042,33 @@ def _build_focus3_plan_discrete_candidate(
     lb: np.ndarray,
     ub: np.ndarray,
     y_best: float,
+    p_best_local: float,
     plan_pool_per_source: int,
     topk_fraction: float,
     topk_sigma: float,
     boundary_near_ratio: float,
+    best_local_sigma: float,
+    best_local_top_count: int,
     acq_type: str,
     kappa: float,
     xi: float,
     post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
     post_penalty_lambda: float,
+    has_constraints: bool,
 ) -> tuple[np.ndarray | None, dict[str, int], dict[str, int], dict[str, object]]:
     n_pool = int(max(plan_pool_per_source, 1))
     pool_counts: dict[str, int] = {}
-    selected_counts: dict[str, int] = {"topk": 0, "boundary": 0, "random": 0}
+    selected_counts: dict[str, int] = {"topk": 0, "best_local": 0, "boundary": 0, "random": 0}
     best_scores: dict[str, float] = {}
     best_rows: list[tuple[str, np.ndarray, float]] = []
+    boundary_score_penalty_info: dict[str, object] = {}
     plan_acq = _normalize_focus3_acq_type(acq_type)
 
-    for source in ("topk", "boundary", "random"):
+    source_order = ("topk", "best_local", "boundary", "random") if float(p_best_local) > 0.0 else ("topk", "boundary", "random")
+    for source in source_order:
+        source_pool_size = n_pool
+        if source == "best_local":
+            source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_best_local_pool_ratio", 0.50)), 0.05, 1.0)))))
         pool = _build_source_pool_starts(
             rng=rng,
             source=source,
@@ -3343,10 +4077,12 @@ def _build_focus3_plan_discrete_candidate(
             objective_sense=objective_sense,
             lb=lb,
             ub=ub,
-            pool_size=n_pool,
+            pool_size=source_pool_size,
             topk_fraction=topk_fraction,
             topk_sigma=topk_sigma,
             boundary_near_ratio=boundary_near_ratio,
+            best_local_sigma=best_local_sigma,
+            best_local_top_count=best_local_top_count,
         )
         pool_counts[source] = int(pool.shape[0])
         scores = _acquisition_scores_for_pool(
@@ -3360,6 +4096,14 @@ def _build_focus3_plan_discrete_candidate(
             post_feasible_prob_fn=post_feasible_prob_fn,
             post_penalty_lambda=post_penalty_lambda,
         )
+        scores, penalty_info = _apply_focus3_boundary_score_penalty(
+            system=system,
+            source=source,
+            scores=scores,
+            has_constraints=bool(has_constraints),
+        )
+        if str(source) == "boundary":
+            boundary_score_penalty_info = dict(penalty_info)
         finite = np.where(np.isfinite(scores))[0]
         if finite.size == 0:
             best_scores[source] = float("nan")
@@ -3369,6 +4113,14 @@ def _build_focus3_plan_discrete_candidate(
         best_scores[source] = float(local_score)
         best_rows.append((source, np.asarray(pool[local_pos], dtype=float).reshape(-1), local_score))
 
+    boundary_gate_info = _focus3_no_constraint_boundary_gate(
+        system=system,
+        best_scores=best_scores,
+        has_constraints=bool(has_constraints),
+    )
+    if bool(boundary_gate_info.get("applied", False)):
+        best_rows = [row for row in best_rows if str(row[0]) != "boundary"]
+
     if not best_rows:
         return None, pool_counts, selected_counts, {
             "mode": "discrete",
@@ -3376,6 +4128,8 @@ def _build_focus3_plan_discrete_candidate(
             "best_scores": best_scores,
             "selected_labels": [],
             "best_plan_source": "",
+            "boundary_gate": dict(boundary_gate_info),
+            "boundary_score_penalty": dict(boundary_score_penalty_info),
             "random_cover": {
                 "enabled": False,
                 "candidate_count": 0,
@@ -3407,6 +4161,8 @@ def _build_focus3_plan_discrete_candidate(
         "selected_labels": [str(source)],
         "best_plan_source": str(source),
         "best_plan_score": float(score_best),
+        "boundary_gate": dict(boundary_gate_info),
+        "boundary_score_penalty": dict(boundary_score_penalty_info),
         "random_cover": random_cover_info,
     }
 
@@ -3430,6 +4186,39 @@ def _nearest_start_source(
     return str(labels[idx])
 
 
+def _select_best_scored_candidate(
+    *,
+    pool: np.ndarray,
+    model: object | None,
+    y_best: float,
+    objective_sense: str,
+    acq_type: str,
+    kappa: float,
+    xi: float,
+    post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
+    post_penalty_lambda: float,
+) -> np.ndarray | None:
+    arr = np.asarray(pool, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return None
+    scores = _acquisition_scores_for_pool(
+        pool=arr,
+        model=model,
+        y_best=y_best,
+        objective_sense=objective_sense,
+        acq_type=acq_type,
+        kappa=kappa,
+        xi=xi,
+        post_feasible_prob_fn=post_feasible_prob_fn,
+        post_penalty_lambda=post_penalty_lambda,
+    )
+    finite = np.where(np.isfinite(scores))[0]
+    if finite.size == 0:
+        return arr[0].copy()
+    idx = int(finite[np.argmin(scores[finite])])
+    return arr[idx].copy()
+
+
 def _build_source_pool_starts(
     *,
     rng: np.random.Generator,
@@ -3443,20 +4232,26 @@ def _build_source_pool_starts(
     topk_fraction: float,
     topk_sigma: float,
     boundary_near_ratio: float,
+    best_local_sigma: float = 0.025,
+    best_local_top_count: int = 3,
 ) -> np.ndarray:
     n_dim = int(lb.shape[0])
     n = int(max(pool_size, 1))
     span = np.maximum(ub - lb, 1e-12)
     starts: list[np.ndarray] = []
 
-    if source == "topk" and X_train.shape[0] > 0:
+    if source in {"topk", "best_local"} and X_train.shape[0] > 0:
         if objective_sense == "max":
             order = np.argsort(-y_train)
         else:
             order = np.argsort(y_train)
-        n_top = int(max(1, round(float(X_train.shape[0]) * float(np.clip(topk_fraction, 0.01, 1.0)))))
+        if source == "best_local":
+            n_top = int(max(1, min(int(best_local_top_count), X_train.shape[0])))
+            sigma = float(max(best_local_sigma, 1e-5))
+        else:
+            n_top = int(max(1, round(float(X_train.shape[0]) * float(np.clip(topk_fraction, 0.01, 1.0)))))
+            sigma = float(max(topk_sigma, 1e-4))
         top_idx = order[:n_top]
-        sigma = float(max(topk_sigma, 1e-4))
         for _ in range(n):
             base = X_train[int(rng.choice(top_idx))].reshape(-1)
             noise = rng.normal(0.0, sigma, size=n_dim) * span
@@ -3487,12 +4282,15 @@ def _sample_feasible_candidate(
     var_names: list[str],
     constraint_defs: list[dict],
     enforce_pre_constraints: bool,
+    max_attempts: int = 128,
 ) -> np.ndarray:
     if not enforce_pre_constraints or not constraint_defs:
         return x
 
     x_cur = np.clip(np.asarray(x, dtype=float).reshape(-1), lb, ub)
-    for _ in range(24):
+    best_x = x_cur.copy()
+    best_margin = float("-inf")
+    for _ in range(max(int(max_attempts), 1)):
         _payload, feasible, _margin = evaluate_constraints_point(
             x=x_cur,
             var_names=var_names,
@@ -3502,8 +4300,11 @@ def _sample_feasible_candidate(
         )
         if bool(feasible):
             return x_cur
+        if float(_margin) > float(best_margin):
+            best_margin = float(_margin)
+            best_x = x_cur.copy()
         x_cur = rng.uniform(lb, ub, size=(lb.shape[0],))
-    return x_cur
+    return best_x
 
 
 def _evaluate_pre_constraint(
@@ -3576,19 +4377,51 @@ def _build_preconstrained_source_starts(
 
     for retry_idx in range(max_retry + 1):
         retry_used = int(retry_idx)
-        starts = _build_source_pool_starts(
-            rng=rng,
-            source=source,
-            X_train=X_train,
-            y_train=y_train,
-            objective_sense=objective_sense,
-            lb=lb,
-            ub=ub,
-            pool_size=n_generate,
-            topk_fraction=topk_fraction,
-            topk_sigma=topk_sigma,
-            boundary_near_ratio=boundary_near_ratio,
-        )
+        if str(source) == "constraint_boundary":
+            n_a = int(max(n_generate // 2, 1))
+            n_b = int(max(n_generate - n_a, 1))
+            starts = np.vstack([
+                _build_source_pool_starts(
+                    rng=rng,
+                    source="random",
+                    X_train=X_train,
+                    y_train=y_train,
+                    objective_sense=objective_sense,
+                    lb=lb,
+                    ub=ub,
+                    pool_size=n_a,
+                    topk_fraction=topk_fraction,
+                    topk_sigma=topk_sigma,
+                    boundary_near_ratio=boundary_near_ratio,
+                ),
+                _build_source_pool_starts(
+                    rng=rng,
+                    source="boundary",
+                    X_train=X_train,
+                    y_train=y_train,
+                    objective_sense=objective_sense,
+                    lb=lb,
+                    ub=ub,
+                    pool_size=n_b,
+                    topk_fraction=topk_fraction,
+                    topk_sigma=topk_sigma,
+                    boundary_near_ratio=boundary_near_ratio,
+                ),
+            ])
+        else:
+            starts = _build_source_pool_starts(
+                rng=rng,
+                source=source,
+                X_train=X_train,
+                y_train=y_train,
+                objective_sense=objective_sense,
+                lb=lb,
+                ub=ub,
+                pool_size=n_generate,
+                topk_fraction=topk_fraction,
+                topk_sigma=topk_sigma,
+                boundary_near_ratio=boundary_near_ratio,
+            )
         generated_total += int(starts.shape[0])
         mask, _payloads, margins = evaluate_constraints_batch(
             X=starts,
@@ -3602,7 +4435,10 @@ def _build_preconstrained_source_starts(
                 fallback_margin = float(margins[best_i])
                 fallback_x = starts[best_i].reshape(-1).copy()
 
-        feasible_rows = starts[mask] if starts.shape[0] > 0 else np.empty((0, lb.shape[0]), dtype=float)
+        feasible_idx = np.where(mask)[0]
+        if str(source) == "constraint_boundary" and feasible_idx.size > 0:
+            feasible_idx = feasible_idx[np.argsort(margins[feasible_idx])]
+        feasible_rows = starts[feasible_idx] if starts.shape[0] > 0 else np.empty((0, lb.shape[0]), dtype=float)
         for row in feasible_rows:
             key = _round_key(row, decimals=12)
             if key in feasible_keys:
@@ -4174,20 +5010,24 @@ def run_bo_engine(
         pre_retry_used = 0
         pre_generated_count = 0
         pre_fallback_used = False
+        pre_constraint_debug_fields: dict[str, object] = {}
         source_prob_topk = float("nan")
         source_prob_boundary = float("nan")
         source_prob_random = float("nan")
+        source_prob_best_local = float("nan")
         focus3_source_adapt_info: dict[str, object] = {}
         focus3_acq_policy_info: dict[str, object] = {}
         focus3_plan_pool_count = 0
         focus3_refine_start_count = 0
         focus3_selected_topk = 0
+        focus3_selected_best_local = 0
         focus3_selected_boundary = 0
         focus3_selected_random = 0
         focus3_best_plan_source = ""
         focus3_nearest_refine_source = ""
         focus3_plan_mode = ""
         focus3_best_score_topk = float("nan")
+        focus3_best_score_best_local = float("nan")
         focus3_best_score_boundary = float("nan")
         focus3_best_score_random = float("nan")
         focus3_random_cover_info: dict[str, object] = {
@@ -4197,7 +5037,18 @@ def run_bo_engine(
             "mean_distance": float("nan"),
             "min_distance": float("nan"),
         }
+        focus3_boundary_gate_info: dict[str, object] = {}
+        focus3_boundary_score_penalty_info: dict[str, object] = {}
         focus3_recover_info: dict[str, object] = {}
+        focus3_source_cap_info: dict[str, object] = {}
+        focus3_best_local_info: dict[str, object] = {}
+        focus3_fallback_bounds_source_info: dict[str, object] = {}
+        focus3_refine_filter_info: dict[str, object] = {
+            "enabled": bool(getattr(system, "focus3_refine_source_filter_enabled", True)),
+            "skipped": False,
+            "reason": "",
+            "allowed_sources": str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local")),
+        }
         focus3_dedup_info: dict[str, object] = {
             "enabled": bool(getattr(system, "focus3_dedup_enabled", True)),
             "applied": False,
@@ -4221,6 +5072,12 @@ def run_bo_engine(
         focus1_batch_remaining = 0
         focus1_tau = float("nan")
         focus1_pool_count = 0
+        focus1_raw_pool_count = 0
+        focus1_pre_feasible_count = 0
+        focus1_pre_feasible_ratio = float("nan")
+        focus1_pre_margin_min = float("nan")
+        focus1_pre_margin_median = float("nan")
+        focus1_pre_margin_max = float("nan")
         focus1_good_count = 0
         focus1_uncertain_count = 0
         focus1_bad_count = 0
@@ -4375,6 +5232,12 @@ def run_bo_engine(
                         item["batch_mode"] = str(batch_info.get("mode", ""))
                         item["tau"] = float(batch_info.get("tau", float("nan")))
                         item["pool_count"] = int(batch_info.get("pool_count", 0))
+                        item["raw_pool_count"] = int(batch_info.get("raw_pool_count", batch_info.get("pool_count", 0)))
+                        item["pre_feasible_count"] = int(batch_info.get("pre_feasible_count", batch_info.get("pool_count", 0)))
+                        item["pre_feasible_ratio"] = float(batch_info.get("pre_feasible_ratio", 1.0))
+                        item["pre_margin_min"] = float(batch_info.get("pre_margin_min", float("nan")))
+                        item["pre_margin_median"] = float(batch_info.get("pre_margin_median", float("nan")))
+                        item["pre_margin_max"] = float(batch_info.get("pre_margin_max", float("nan")))
                         item["good_count"] = int(batch_info.get("good_count", 0))
                         item["uncertain_count"] = int(batch_info.get("uncertain_count", 0))
                         item["bad_count"] = int(batch_info.get("bad_count", 0))
@@ -4392,6 +5255,12 @@ def run_bo_engine(
                 focus1_batch_remaining = int(len(focus1_pending))
                 focus1_tau = float(item.get("tau", float("nan")))
                 focus1_pool_count = int(item.get("pool_count", 0))
+                focus1_raw_pool_count = int(item.get("raw_pool_count", focus1_pool_count))
+                focus1_pre_feasible_count = int(item.get("pre_feasible_count", focus1_pool_count))
+                focus1_pre_feasible_ratio = float(item.get("pre_feasible_ratio", float("nan")))
+                focus1_pre_margin_min = float(item.get("pre_margin_min", float("nan")))
+                focus1_pre_margin_median = float(item.get("pre_margin_median", float("nan")))
+                focus1_pre_margin_max = float(item.get("pre_margin_max", float("nan")))
                 focus1_good_count = int(item.get("good_count", 0))
                 focus1_uncertain_count = int(item.get("uncertain_count", 0))
                 focus1_bad_count = int(item.get("bad_count", 0))
@@ -4447,6 +5316,24 @@ def run_bo_engine(
                     "region_count": int(len(focus2_region_states)),
                     "status": str(focus2_regions_payload.get("status", "")),
                     "reason": str(focus2_regions_payload.get("reason", "")),
+                    "retry_used": bool(focus2_regions_payload.get("retry_used", False)),
+                    "source_focus": str(focus2_regions_payload.get("source_focus", "")),
+                    "candidate_pool_count": int(focus2_regions_payload.get("candidate_pool_count", 0)),
+                    "candidate_good_count": int((focus2_regions_payload.get("candidate_counts", {}) or {}).get("good", 0))
+                    if isinstance(focus2_regions_payload.get("candidate_counts", {}), dict) else 0,
+                    "candidate_uncertain_count": int((focus2_regions_payload.get("candidate_counts", {}) or {}).get("uncertain", 0))
+                    if isinstance(focus2_regions_payload.get("candidate_counts", {}), dict) else 0,
+                    "candidate_bad_count": int((focus2_regions_payload.get("candidate_counts", {}) or {}).get("bad", 0))
+                    if isinstance(focus2_regions_payload.get("candidate_counts", {}), dict) else 0,
+                    "primary_status": str(
+                        (focus2_regions_payload.get("primary_region_output", {}) or {}).get("status", "")
+                    )
+                    if isinstance(focus2_regions_payload.get("primary_region_output", {}), dict) else "",
+                    "primary_reason": str(
+                        (focus2_regions_payload.get("primary_region_output", {}) or {}).get("reason", "")
+                    )
+                    if isinstance(focus2_regions_payload.get("primary_region_output", {}), dict) else "",
+                    "used_fallback": bool(str(focus2_regions_payload.get("status", "")).lower() == "fallback"),
                 }
                 focus2_regions_initialized = True
                 print(
@@ -4491,6 +5378,9 @@ def run_bo_engine(
                         post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                         post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
                         max_candidates=remaining_budget,
+                        var_names=var_names,
+                        constraint_defs=constraint_defs,
+                        enforce_pre_constraints=bool(system.enforce_pre_constraints),
                     )
                     _timer_add("focus2_batch", t0)
                     if focus2_batch:
@@ -4560,6 +5450,24 @@ def run_bo_engine(
                         ),
                         "plan_pool_count": int(
                             (item.get("batch_info") if isinstance(item.get("batch_info"), dict) else {}).get("plan_pool_count", 0)
+                        ),
+                        "pre_raw_count": int(
+                            (item.get("batch_info") if isinstance(item.get("batch_info"), dict) else {}).get("pre_raw_count", 0)
+                        ),
+                        "pre_feasible_count": int(
+                            (item.get("batch_info") if isinstance(item.get("batch_info"), dict) else {}).get("pre_feasible_count", 0)
+                        ),
+                        "pre_feasible_ratio": float(
+                            (item.get("batch_info") if isinstance(item.get("batch_info"), dict) else {}).get("pre_feasible_ratio", float("nan"))
+                        ),
+                        "pre_margin_min": float(
+                            (item.get("batch_info") if isinstance(item.get("batch_info"), dict) else {}).get("pre_margin_min", float("nan"))
+                        ),
+                        "pre_margin_median": float(
+                            (item.get("batch_info") if isinstance(item.get("batch_info"), dict) else {}).get("pre_margin_median", float("nan"))
+                        ),
+                        "pre_margin_max": float(
+                            (item.get("batch_info") if isinstance(item.get("batch_info"), dict) else {}).get("pre_margin_max", float("nan"))
                         ),
                         "duplicate_skip_count": int(
                             (item.get("batch_info") if isinstance(item.get("batch_info"), dict) else {}).get("duplicate_skip_count", 0)
@@ -4647,10 +5555,42 @@ def run_bo_engine(
                     kappa=float(kappa),
                     best_raw_history=best_raw_history,
                     objective_sense=objective_sense,
+                    has_constraints=bool(constraint_defs),
+                )
+                p_topk, p_bnd, p_rand, focus3_source_cap_info = _apply_focus3_no_constraint_source_cap(
+                    system=system,
+                    p_topk=p_topk,
+                    p_boundary=p_bnd,
+                    p_random=p_rand,
+                    constraint_defs=constraint_defs,
+                )
+                p_topk, p_bnd, p_rand, p_best_local, focus3_best_local_info = _apply_focus3_best_local_policy(
+                    system=system,
+                    p_topk=p_topk,
+                    p_boundary=p_bnd,
+                    p_random=p_rand,
+                    p_dim=p_dim,
+                    n_train=int(X_train.shape[0]),
+                    focus3_eval_count=int(focus3_eval_count),
+                    has_constraints=bool(constraint_defs),
+                )
+                focus3_fallback_bounds = bool(
+                    focus2_final_info.get("bounds_policy", {}).get("fallback_selected", False)
+                    if isinstance(focus2_final_info.get("bounds_policy", {}), dict)
+                    else False
+                ) or bool(focus2_initial_info.get("used_fallback", False))
+                p_topk, p_bnd, p_rand, p_best_local, focus3_fallback_bounds_source_info = _apply_focus3_fallback_bounds_source_policy(
+                    system=system,
+                    p_topk=p_topk,
+                    p_boundary=p_bnd,
+                    p_random=p_rand,
+                    p_best_local=p_best_local,
+                    fallback_bounds=bool(focus3_fallback_bounds),
                 )
                 source_prob_topk = float(p_topk)
                 source_prob_boundary = float(p_bnd)
                 source_prob_random = float(p_rand)
+                source_prob_best_local = float(p_best_local)
                 pre_active = bool(system.enforce_pre_constraints) and bool(constraint_defs)
                 segment = "focus3"
                 focus3_requested_acq_type = _normalize_focus3_acq_type(getattr(system, "focus3_acq_type", "auto"))
@@ -4664,18 +5604,33 @@ def run_bo_engine(
                     ub=ub,
                     full_lb=full_lb,
                     full_ub=full_ub,
+                    best_local_active=bool(focus3_best_local_info.get("applied", False)),
                 )
                 if (
                     bool(focus3_recover_info.get("active", False))
                     and focus3_requested_acq_type == "AUTO"
-                    and str(focus3_acq_type).upper() == "EI"
+                    and str(focus3_acq_type).upper() in {"EI", "MEAN"}
                 ):
                     focus3_acq_type = "LCB"
                     focus3_acq_policy_info["effective"] = "LCB"
                     focus3_acq_policy_info["reason"] = str(focus3_acq_policy_info.get("reason", "")) + "+recover"
                 focus3_dedup_acq_type = str(focus3_acq_type)
                 if pre_active:
-                    source = str(rng.choice(np.asarray(["topk", "boundary", "random"]), p=[p_topk, p_bnd, p_rand]))
+                    if bool(getattr(system, "constraint_boundary_source_enabled", True)):
+                        p_constraint = float(np.clip(float(getattr(system, "focus3_constraint_boundary_prob", 0.20)), 0.0, 0.8))
+                        scaled = float(max(1.0 - p_constraint, 0.0))
+                        source_names = np.asarray(["topk", "boundary", "random", "constraint_boundary"])
+                        source_probs = np.asarray([
+                            float(p_topk) * scaled,
+                            float(p_bnd) * scaled,
+                            float(p_rand) * scaled,
+                            p_constraint,
+                        ], dtype=float)
+                        source_probs = source_probs / float(np.sum(source_probs))
+                    else:
+                        source_names = np.asarray(["topk", "boundary", "random"])
+                        source_probs = np.asarray([p_topk, p_bnd, p_rand], dtype=float)
+                    source = str(rng.choice(source_names, p=source_probs))
                     source_mode = str(source)
                     pool_starts, pre_fallback_x, pre_fallback_margin, pre_retry_used, pre_generated_count = _build_preconstrained_source_starts(
                         rng=rng,
@@ -4728,10 +5683,10 @@ def run_bo_engine(
                         _timer_add("focus3_refine", t0)
                     if x_next is None and pool_starts.shape[0] > 0:
                         x_next = pool_starts[int(rng.integers(0, pool_starts.shape[0]))]
-                    if x_next is None and pre_fallback_x is not None:
+                    if x_next is None and pre_fallback_x is not None and float(pre_fallback_margin) >= 0.0:
                         x_next = pre_fallback_x.copy()
                         pre_fallback_used = True
-                        pre_feasible_next = False
+                        pre_feasible_next = True
                         pre_margin_next = float(pre_fallback_margin)
                         pre_violation_next = float(max(0.0, -pre_margin_next))
                     acq_type = acq_type_source
@@ -4756,6 +5711,7 @@ def run_bo_engine(
                             p_topk=p_topk,
                             p_boundary=p_bnd,
                             p_random=p_rand,
+                            p_best_local=p_best_local,
                             plan_pool_per_source=_resolve_focus3_plan_pool_per_source(
                                 system=system,
                                 p_dim=p_dim,
@@ -4764,11 +5720,14 @@ def run_bo_engine(
                             topk_fraction=float(getattr(system, "source_topk_fraction", 0.20)),
                             topk_sigma=float(getattr(system, "source_topk_perturb_sigma", 0.08)),
                             boundary_near_ratio=float(getattr(system, "source_boundary_near_ratio", 0.03)),
+                            best_local_sigma=float(getattr(system, "focus3_best_local_sigma", 0.025)),
+                            best_local_top_count=int(getattr(system, "focus3_best_local_top_count", 3)),
                             acq_type=focus3_acq_type,
                             kappa=float(focus3_effective_kappa),
                             xi=float(system.ei_xi),
                             post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                             post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+                            has_constraints=bool(constraint_defs),
                         )
                         focus3_plan_mode = "refine"
                     else:
@@ -4783,6 +5742,7 @@ def run_bo_engine(
                             lb=lb,
                             ub=ub,
                             y_best=best_y_raw,
+                            p_best_local=p_best_local,
                             plan_pool_per_source=_resolve_focus3_plan_pool_per_source(
                                 system=system,
                                 p_dim=p_dim,
@@ -4790,11 +5750,14 @@ def run_bo_engine(
                             topk_fraction=float(getattr(system, "source_topk_fraction", 0.20)),
                             topk_sigma=float(getattr(system, "source_topk_perturb_sigma", 0.08)),
                             boundary_near_ratio=float(getattr(system, "source_boundary_near_ratio", 0.03)),
+                            best_local_sigma=float(getattr(system, "focus3_best_local_sigma", 0.025)),
+                            best_local_top_count=int(getattr(system, "focus3_best_local_top_count", 3)),
                             acq_type=focus3_acq_type,
                             kappa=float(focus3_effective_kappa),
                             xi=float(system.ei_xi),
                             post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                             post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+                            has_constraints=bool(constraint_defs),
                         )
                         refine_starts = x_discrete.reshape(1, -1) if x_discrete is not None else np.empty((0, p_dim), dtype=float)
                         focus3_plan_mode = "discrete"
@@ -4802,22 +5765,72 @@ def run_bo_engine(
                     focus3_plan_pool_count = int(sum(pool_counts.values()))
                     focus3_refine_start_count = 0 if focus3_plan_mode == "discrete" else int(refine_starts.shape[0])
                     focus3_selected_topk = int(selected_counts.get("topk", 0))
+                    focus3_selected_best_local = int(selected_counts.get("best_local", 0))
                     focus3_selected_boundary = int(selected_counts.get("boundary", 0))
                     focus3_selected_random = int(selected_counts.get("random", 0))
                     focus3_best_plan_source = str(focus3_plan_diag.get("best_plan_source", ""))
                     best_scores = focus3_plan_diag.get("best_scores", {})
                     if isinstance(best_scores, dict):
                         focus3_best_score_topk = float(best_scores.get("topk", float("nan")))
+                        focus3_best_score_best_local = float(best_scores.get("best_local", float("nan")))
                         focus3_best_score_boundary = float(best_scores.get("boundary", float("nan")))
                         focus3_best_score_random = float(best_scores.get("random", float("nan")))
                     random_cover = focus3_plan_diag.get("random_cover", {})
                     if isinstance(random_cover, dict):
                         focus3_random_cover_info = dict(random_cover)
+                    boundary_gate = focus3_plan_diag.get("boundary_gate", {})
+                    if isinstance(boundary_gate, dict):
+                        focus3_boundary_gate_info = dict(boundary_gate)
+                    boundary_score_penalty = focus3_plan_diag.get("boundary_score_penalty", {})
+                    if isinstance(boundary_score_penalty, dict):
+                        focus3_boundary_score_penalty_info = dict(boundary_score_penalty)
                     pre_generated_count = int(focus3_plan_pool_count)
                     source_mode = "plan_" + str(focus3_plan_mode or "refine")
                     focus3_dedup_pool = refine_starts.copy()
+                    labels = focus3_plan_diag.get("selected_labels", [])
+                    best_plan_source_for_filter = str(focus3_plan_diag.get("best_plan_source", ""))
+                    refine_allowed = True
+                    if (
+                        focus3_plan_mode == "refine"
+                        and bool(getattr(system, "focus3_refine_source_filter_enabled", True))
+                        and not bool(constraint_defs)
+                    ):
+                        allowed_sources = {
+                            item.strip()
+                            for item in str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local")).split(",")
+                            if item.strip()
+                        }
+                        refine_allowed = best_plan_source_for_filter in allowed_sources
+                        focus3_refine_filter_info = {
+                            "enabled": True,
+                            "skipped": bool(not refine_allowed),
+                            "reason": "source_not_allowed" if not refine_allowed else "source_allowed",
+                            "best_plan_source": str(best_plan_source_for_filter),
+                            "allowed_sources": ",".join(sorted(allowed_sources)),
+                        }
+                    else:
+                        focus3_refine_filter_info = {
+                            "enabled": bool(getattr(system, "focus3_refine_source_filter_enabled", True)),
+                            "skipped": False,
+                            "reason": "not_applicable",
+                            "best_plan_source": str(best_plan_source_for_filter),
+                            "allowed_sources": str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local")),
+                        }
                     if focus3_plan_mode == "discrete" and refine_starts.shape[0] > 0:
                         x_next = refine_starts[0].copy()
+                    elif focus3_plan_mode == "refine" and not refine_allowed and refine_starts.shape[0] > 0:
+                        x_next = _select_best_scored_candidate(
+                            pool=refine_starts,
+                            model=gp_model,
+                            y_best=best_y_raw,
+                            objective_sense=objective_sense,
+                            acq_type=focus3_acq_type,
+                            kappa=float(focus3_effective_kappa),
+                            xi=float(system.ei_xi),
+                            post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
+                            post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+                        )
+                        focus3_plan_mode = "refine_skipped"
                     elif gp_model is not None and refine_starts.shape[0] > 0:
                         t0 = _timer_start()
                         x_next = acq.optimize(
@@ -4838,7 +5851,6 @@ def run_bo_engine(
                         _timer_add("focus3_refine", t0)
                     if x_next is None and refine_starts.shape[0] > 0:
                         x_next = refine_starts[int(rng.integers(0, refine_starts.shape[0]))]
-                    labels = focus3_plan_diag.get("selected_labels", [])
                     if isinstance(labels, list) and x_next is not None:
                         focus3_nearest_refine_source = _nearest_start_source(
                             x=np.asarray(x_next, dtype=float),
@@ -4922,6 +5934,7 @@ def run_bo_engine(
                 var_names=var_names,
                 constraint_defs=constraint_defs,
                 enforce_pre_constraints=bool(system.enforce_pre_constraints),
+                max_attempts=int(getattr(system, "pre_final_feasible_attempts", 256)),
             )
 
         pre_feasible_next, pre_margin_next = _evaluate_pre_constraint(
@@ -4941,6 +5954,36 @@ def run_bo_engine(
                     x_next = trial
                     key = tkey
                     break
+        if bool(system.enforce_pre_constraints) and bool(constraint_defs):
+            x_next = _sample_feasible_candidate(
+                x=x_next,
+                rng=rng,
+                lb=lb,
+                ub=ub,
+                var_names=var_names,
+                constraint_defs=constraint_defs,
+                enforce_pre_constraints=True,
+                max_attempts=int(getattr(system, "pre_final_feasible_attempts", 256)),
+            )
+            pre_feasible_next, pre_margin_next = _evaluate_pre_constraint(
+                x=x_next,
+                var_names=var_names,
+                constraint_defs=constraint_defs,
+                enforce_pre_constraints=True,
+            )
+            pre_violation_next = float(max(0.0, -float(pre_margin_next)))
+            if not pre_feasible_next:
+                raise RuntimeError(
+                    "Pre-constraint hard filter could not find a feasible optimizer candidate. "
+                    f"segment={segment} margin={pre_margin_next:.6g}"
+                )
+            key = _round_key(x_next, decimals=int(system.dedup_decimals))
+        pre_constraint_debug_fields = _pre_constraint_debug_fields(
+            x=x_next,
+            var_names=var_names,
+            constraint_defs=constraint_defs,
+            enforce_pre_constraints=bool(system.enforce_pre_constraints),
+        )
         seen.add(key)
 
         if gp_model is not None:
@@ -5137,10 +6180,18 @@ def run_bo_engine(
             "init_source": str(init_source),
             "segment": str(segment),
             "opt_focus_level": int(opt_focus_level),
+            "focus_pipeline_mode": str(focus_pipeline_plan.mode),
+            "focus_pipeline_stages": ",".join([str(s) for s in focus_pipeline_plan.stages]),
+            "focus_pipeline_bounds_source": str(focus_pipeline_plan.bounds_source),
+            "focus_budget_adaptive_enabled": bool(getattr(system, "focus_budget_adaptive_enabled", True)),
             "focus0_budget": int(focus0_budget),
             "focus1_budget": int(focus1_budget),
             "focus2_budget": int(focus2_budget),
             "focus3_budget": int(focus3_budget),
+            "focus0_budget_fraction": float(focus0_budget) / float(max(int(n_samples), 1)),
+            "focus1_budget_fraction": float(focus1_budget) / float(max(int(n_samples), 1)),
+            "focus2_budget_fraction": float(focus2_budget) / float(max(int(n_samples), 1)),
+            "focus3_budget_fraction": float(focus3_budget) / float(max(int(n_samples), 1)),
             "focus3_available_budget": int(focus3_available_budget),
             "focus0_eval_count": int(focus0_eval_count),
             "focus1_eval_count": int(focus1_eval_count),
@@ -5160,6 +6211,12 @@ def run_bo_engine(
             "focus1_batch_remaining": int(focus1_batch_remaining),
             "focus1_tau": float(focus1_tau),
             "focus1_pool_count": int(focus1_pool_count),
+            "focus1_raw_pool_count": int(focus1_raw_pool_count),
+            "focus1_pre_feasible_count": int(focus1_pre_feasible_count),
+            "focus1_pre_feasible_ratio": float(focus1_pre_feasible_ratio),
+            "focus1_pre_margin_min": float(focus1_pre_margin_min),
+            "focus1_pre_margin_median": float(focus1_pre_margin_median),
+            "focus1_pre_margin_max": float(focus1_pre_margin_max),
             "focus1_good_count": int(focus1_good_count),
             "focus1_uncertain_count": int(focus1_uncertain_count),
             "focus1_bad_count": int(focus1_bad_count),
@@ -5172,10 +6229,26 @@ def run_bo_engine(
             "focus2_counts_local": int(focus2_counts.get("local", 0)),
             "focus2_counts_dropped": int(focus2_counts.get("dropped", 0)),
             "focus2_selected_region_id": str(focus2_selected_region_id),
+            "focus2_region_init_status": str(focus2_initial_info.get("status", "")) if focus2_initial_info else "",
+            "focus2_region_init_reason": str(focus2_initial_info.get("reason", "")) if focus2_initial_info else "",
+            "focus2_region_init_retry_used": bool(focus2_initial_info.get("retry_used", False)) if focus2_initial_info else False,
+            "focus2_region_init_used_fallback": bool(focus2_initial_info.get("used_fallback", False)) if focus2_initial_info else False,
+            "focus2_region_init_primary_status": str(focus2_initial_info.get("primary_status", "")) if focus2_initial_info else "",
+            "focus2_region_init_primary_reason": str(focus2_initial_info.get("primary_reason", "")) if focus2_initial_info else "",
+            "focus2_region_init_candidate_pool_count": int(focus2_initial_info.get("candidate_pool_count", 0)) if focus2_initial_info else 0,
+            "focus2_region_init_good_count": int(focus2_initial_info.get("candidate_good_count", 0)) if focus2_initial_info else 0,
+            "focus2_region_init_uncertain_count": int(focus2_initial_info.get("candidate_uncertain_count", 0)) if focus2_initial_info else 0,
+            "focus2_region_init_bad_count": int(focus2_initial_info.get("candidate_bad_count", 0)) if focus2_initial_info else 0,
             "focus2_batch_id": int(focus2_candidate_info.get("batch_id", 0)) if focus2_candidate_info else 0,
             "focus2_batch_size": int(focus2_candidate_info.get("batch_size", 0)) if focus2_candidate_info else 0,
             "focus2_batch_remaining": int(focus2_candidate_info.get("batch_remaining", 0)) if focus2_candidate_info else 0,
             "focus2_local_candidate_count": int(focus2_candidate_info.get("candidate_count", 0)) if focus2_candidate_info else 0,
+            "focus2_pre_raw_count": int(focus2_candidate_info.get("pre_raw_count", 0)) if focus2_candidate_info else 0,
+            "focus2_pre_feasible_count": int(focus2_candidate_info.get("pre_feasible_count", 0)) if focus2_candidate_info else 0,
+            "focus2_pre_feasible_ratio": float(focus2_candidate_info.get("pre_feasible_ratio", float("nan"))) if focus2_candidate_info else float("nan"),
+            "focus2_pre_margin_min": float(focus2_candidate_info.get("pre_margin_min", float("nan"))) if focus2_candidate_info else float("nan"),
+            "focus2_pre_margin_median": float(focus2_candidate_info.get("pre_margin_median", float("nan"))) if focus2_candidate_info else float("nan"),
+            "focus2_pre_margin_max": float(focus2_candidate_info.get("pre_margin_max", float("nan"))) if focus2_candidate_info else float("nan"),
             "focus2_duplicate_skip_count": int(focus2_candidate_info.get("duplicate_skip_count", 0)) if focus2_candidate_info else 0,
             "focus2_budget_skip_count": int(focus2_candidate_info.get("budget_skip_count", 0)) if focus2_candidate_info else 0,
             "focus2_min_candidate_rms_distance": float(focus2_candidate_info.get("min_candidate_rms_distance", float("nan"))) if focus2_candidate_info else float("nan"),
@@ -5192,11 +6265,13 @@ def run_bo_engine(
             "focus3_refine_start_count": int(focus3_refine_start_count),
             "focus3_plan_mode": str(focus3_plan_mode),
             "focus3_selected_topk": int(focus3_selected_topk),
+            "focus3_selected_best_local": int(focus3_selected_best_local),
             "focus3_selected_boundary": int(focus3_selected_boundary),
             "focus3_selected_random": int(focus3_selected_random),
             "focus3_best_plan_source": str(focus3_best_plan_source),
             "focus3_nearest_refine_source": str(focus3_nearest_refine_source),
             "focus3_best_score_topk": float(focus3_best_score_topk),
+            "focus3_best_score_best_local": float(focus3_best_score_best_local),
             "focus3_best_score_boundary": float(focus3_best_score_boundary),
             "focus3_best_score_random": float(focus3_best_score_random),
             "focus3_random_cover_enabled": bool(focus3_random_cover_info.get("enabled", False)),
@@ -5204,6 +6279,18 @@ def run_bo_engine(
             "focus3_random_cover_acq_threshold": float(focus3_random_cover_info.get("acq_threshold", float("nan"))),
             "focus3_random_cover_mean_distance": float(focus3_random_cover_info.get("mean_distance", float("nan"))),
             "focus3_random_cover_min_distance": float(focus3_random_cover_info.get("min_distance", float("nan"))),
+            "focus3_boundary_gate_enabled": bool(focus3_boundary_gate_info.get("enabled", False)) if focus3_boundary_gate_info else False,
+            "focus3_boundary_gate_applied": bool(focus3_boundary_gate_info.get("applied", False)) if focus3_boundary_gate_info else False,
+            "focus3_boundary_gate_allowed": bool(focus3_boundary_gate_info.get("allowed", True)) if focus3_boundary_gate_info else True,
+            "focus3_boundary_gate_reason": str(focus3_boundary_gate_info.get("reason", "")) if focus3_boundary_gate_info else "",
+            "focus3_boundary_gate_margin": float(focus3_boundary_gate_info.get("margin", float("nan"))) if focus3_boundary_gate_info else float("nan"),
+            "focus3_boundary_gate_boundary_score": float(focus3_boundary_gate_info.get("boundary_score", float("nan"))) if focus3_boundary_gate_info else float("nan"),
+            "focus3_boundary_gate_non_boundary_best": float(focus3_boundary_gate_info.get("non_boundary_best", float("nan"))) if focus3_boundary_gate_info else float("nan"),
+            "focus3_boundary_score_penalty_enabled": bool(focus3_boundary_score_penalty_info.get("enabled", False)) if focus3_boundary_score_penalty_info else False,
+            "focus3_boundary_score_penalty_applied": bool(focus3_boundary_score_penalty_info.get("applied", False)) if focus3_boundary_score_penalty_info else False,
+            "focus3_boundary_score_penalty_reason": str(focus3_boundary_score_penalty_info.get("reason", "")) if focus3_boundary_score_penalty_info else "",
+            "focus3_boundary_score_penalty_value": float(focus3_boundary_score_penalty_info.get("penalty", 0.0)) if focus3_boundary_score_penalty_info else 0.0,
+            "focus3_boundary_score_penalty_scale": float(focus3_boundary_score_penalty_info.get("scale", float("nan"))) if focus3_boundary_score_penalty_info else float("nan"),
             "focus3_source_adaptive_enabled": bool(focus3_source_adapt_info.get("enabled", False)) if focus3_source_adapt_info else False,
             "focus3_data_ratio": float(focus3_source_adapt_info.get("data_ratio", float("nan"))) if focus3_source_adapt_info else float("nan"),
             "focus3_data_reliability": str(focus3_source_adapt_info.get("reliability", "")) if focus3_source_adapt_info else "",
@@ -5212,18 +6299,46 @@ def run_bo_engine(
             "focus3_acq_requested": str(focus3_acq_policy_info.get("requested", "")) if focus3_acq_policy_info else "",
             "focus3_acq_effective": str(focus3_acq_policy_info.get("effective", "")) if focus3_acq_policy_info else "",
             "focus3_acq_reason": str(focus3_acq_policy_info.get("reason", "")) if focus3_acq_policy_info else "",
+            "focus3_acq_data_ratio": float(focus3_acq_policy_info.get("data_ratio", float("nan"))) if focus3_acq_policy_info else float("nan"),
             "focus3_bounds_volume_ratio": float(focus3_acq_policy_info.get("volume_ratio", float("nan"))) if focus3_acq_policy_info else float("nan"),
             "focus3_bounds_mean_width_ratio": float(focus3_acq_policy_info.get("mean_width_ratio", float("nan"))) if focus3_acq_policy_info else float("nan"),
+            "focus3_acq_mean_enabled": bool(focus3_acq_policy_info.get("mean_enabled", False)) if focus3_acq_policy_info else False,
+            "focus3_acq_mean_min_data_ratio": float(focus3_acq_policy_info.get("mean_min_data_ratio", float("nan"))) if focus3_acq_policy_info else float("nan"),
+            "focus3_acq_mean_max_volume_ratio": float(focus3_acq_policy_info.get("mean_max_volume_ratio", float("nan"))) if focus3_acq_policy_info else float("nan"),
+            "focus3_acq_best_local_active": bool(focus3_acq_policy_info.get("best_local_active", False)) if focus3_acq_policy_info else False,
             "focus3_recover_enabled": bool(focus3_recover_info.get("enabled", False)) if focus3_recover_info else False,
             "focus3_recover_active": bool(focus3_recover_info.get("active", False)) if focus3_recover_info else False,
             "focus3_recover_reason": str(focus3_recover_info.get("reason", "")) if focus3_recover_info else "",
             "focus3_recover_level": str(focus3_recover_info.get("level", "")) if focus3_recover_info else "",
             "focus3_recover_no_improve_count": int(focus3_recover_info.get("no_improve_count", 0)) if focus3_recover_info else 0,
             "focus3_recover_recent_improvement": float(focus3_recover_info.get("recent_improvement", float("nan"))) if focus3_recover_info else float("nan"),
+            "focus3_recover_topk_bonus": float(focus3_recover_info.get("topk_bonus", 0.0)) if focus3_recover_info else 0.0,
             "focus3_recover_boundary_bonus": float(focus3_recover_info.get("boundary_bonus", 0.0)) if focus3_recover_info else 0.0,
             "focus3_recover_random_bonus": float(focus3_recover_info.get("random_bonus", 0.0)) if focus3_recover_info else 0.0,
             "focus3_kappa_before_recover": float(focus3_recover_info.get("kappa_before", float("nan"))) if focus3_recover_info else float("nan"),
             "focus3_kappa_after_recover": float(focus3_recover_info.get("kappa_after", float("nan"))) if focus3_recover_info else float("nan"),
+            "focus3_source_cap_enabled": bool(focus3_source_cap_info.get("enabled", False)) if focus3_source_cap_info else False,
+            "focus3_source_cap_applied": bool(focus3_source_cap_info.get("applied", False)) if focus3_source_cap_info else False,
+            "focus3_source_cap_reason": str(focus3_source_cap_info.get("reason", "")) if focus3_source_cap_info else "",
+            "focus3_source_cap_boundary_max": float(focus3_source_cap_info.get("boundary_max", float("nan"))) if focus3_source_cap_info else float("nan"),
+            "focus3_source_cap_topk_min": float(focus3_source_cap_info.get("topk_min", float("nan"))) if focus3_source_cap_info else float("nan"),
+            "focus3_source_cap_random_min": float(focus3_source_cap_info.get("random_min", float("nan"))) if focus3_source_cap_info else float("nan"),
+            "focus3_best_local_enabled": bool(focus3_best_local_info.get("enabled", False)) if focus3_best_local_info else False,
+            "focus3_best_local_applied": bool(focus3_best_local_info.get("applied", False)) if focus3_best_local_info else False,
+            "focus3_best_local_reason": str(focus3_best_local_info.get("reason", "")) if focus3_best_local_info else "",
+            "focus3_best_local_prob": float(focus3_best_local_info.get("best_local_prob", 0.0)) if focus3_best_local_info else 0.0,
+            "focus3_best_local_data_ratio": float(focus3_best_local_info.get("data_ratio", float("nan"))) if focus3_best_local_info else float("nan"),
+            "focus3_best_local_min_focus3_evals": int(focus3_best_local_info.get("min_focus3_evals", 0)) if focus3_best_local_info else 0,
+            "focus3_best_local_min_data_ratio": float(focus3_best_local_info.get("min_data_ratio", float("nan"))) if focus3_best_local_info else float("nan"),
+            "focus3_fallback_bounds_source_enabled": bool(focus3_fallback_bounds_source_info.get("enabled", False)) if focus3_fallback_bounds_source_info else False,
+            "focus3_fallback_bounds_source_applied": bool(focus3_fallback_bounds_source_info.get("applied", False)) if focus3_fallback_bounds_source_info else False,
+            "focus3_fallback_bounds_source_reason": str(focus3_fallback_bounds_source_info.get("reason", "")) if focus3_fallback_bounds_source_info else "",
+            "focus3_fallback_bounds_source_flag": bool(focus3_fallback_bounds_source_info.get("fallback_bounds", False)) if focus3_fallback_bounds_source_info else False,
+            "focus3_refine_filter_enabled": bool(focus3_refine_filter_info.get("enabled", False)) if focus3_refine_filter_info else False,
+            "focus3_refine_filter_skipped": bool(focus3_refine_filter_info.get("skipped", False)) if focus3_refine_filter_info else False,
+            "focus3_refine_filter_reason": str(focus3_refine_filter_info.get("reason", "")) if focus3_refine_filter_info else "",
+            "focus3_refine_filter_best_plan_source": str(focus3_refine_filter_info.get("best_plan_source", "")) if focus3_refine_filter_info else "",
+            "focus3_refine_filter_allowed_sources": str(focus3_refine_filter_info.get("allowed_sources", "")) if focus3_refine_filter_info else "",
             "focus3_dedup_enabled": bool(focus3_dedup_info.get("enabled", False)),
             "focus3_dedup_applied": bool(focus3_dedup_info.get("applied", False)),
             "focus3_dedup_fallback": str(focus3_dedup_info.get("fallback", "")),
@@ -5231,6 +6346,7 @@ def run_bo_engine(
             "focus3_archive_distance_before_dedup": float(focus3_dedup_info.get("archive_distance_before", float("nan"))),
             "focus3_archive_distance_after_dedup": float(focus3_dedup_info.get("archive_distance_after", float("nan"))),
             "source_prob_topk": float(source_prob_topk),
+            "source_prob_best_local": float(source_prob_best_local),
             "source_prob_boundary": float(source_prob_boundary),
             "source_prob_random": float(source_prob_random),
             "source_mode": str(source_mode),
@@ -5249,6 +6365,7 @@ def run_bo_engine(
             "pre_retry_used": int(pre_retry_used),
             "pre_generated_count": int(pre_generated_count),
             "pre_fallback_used": bool(pre_fallback_used),
+            **pre_constraint_debug_fields,
             "timing_iter_sec": float(timing_iter.get("iteration", 0.0)),
             "timing_gp_fit_sec": float(timing_iter.get("gp_fit", 0.0)),
             "timing_starts_build_sec": float(timing_iter.get("starts_build", 0.0)),

@@ -63,6 +63,15 @@ class OptimizerSystemConfig:
     # ------------------------------------------------------------------
     # auto | focus0,focus1,focus3 | list/tuple. 어떤 focus를 실행할지는 focus_pipeline이 결정한다.
     focus_pipeline: str | list[str] | tuple[str, ...] = "auto"
+    # Focus budget은 고정 fraction보다 archive/bounds/budget 상태를 보고 동적으로 배분한다.
+    focus_budget_adaptive_enabled: bool = True
+    focus_budget_selected_bounds_focus3_fraction: float = 0.70
+    focus_budget_generated_bounds_focus3_fraction: float = 0.50
+    focus_budget_low_np_focus3_fraction: float = 0.35
+    focus_budget_focus2_fraction_selected_bounds: float = 0.15
+    focus_budget_focus2_fraction_generated_bounds: float = 0.25
+    focus_budget_focus1_fraction_low_archive: float = 0.45
+    focus_budget_focus1_fraction_normal: float = 0.30
 
     # ------------------------------------------------------------------
     # Focus0/Focus1: objective archive bootstrap/classification
@@ -144,15 +153,23 @@ class OptimizerSystemConfig:
     # 2번 discrete GP scoring 후 1번 refine.
     focus3_discrete_enabled: bool = True
     focus3_refine_every: int = 2
+    # Refine 후보가 boundary/random 중심이면 비싼 L-BFGS-B를 생략하고 GP scoring 결과를
+    # 그대로 사용한다. RB/GP처럼 budget이 큰 무제약 run에서 runtime을 크게 줄이기 위한 장치다.
+    focus3_refine_source_filter_enabled: bool = True
+    focus3_refine_allowed_sources: str = "topk,best_local,random"
     # L-BFGS-B acquisition refine이 runtime을 지배할 수 있으므로 start 수는 유지하되
     # 각 local refine의 최대 반복/함수평가를 제한한다.
     focus3_refine_maxiter: int = 35
     focus3_refine_maxfun: int = 90
-    # Focus3 acquisition: auto는 신뢰 가능한 selected region이면 EI, 아니면 LCB로 fallback한다.
+    # Focus3 acquisition: auto는 상태에 따라 LCB/EI/MEAN으로 전환한다.
     focus3_acq_type: str = "auto"
     focus3_auto_ei_min_data_ratio: float = 15.0
     focus3_auto_ei_max_volume_ratio: float = 0.25
     focus3_auto_ei_max_mean_width_ratio: float = 0.75
+    focus3_auto_mean_enabled: bool = True
+    focus3_auto_mean_min_data_ratio: float = 20.0
+    focus3_auto_mean_max_volume_ratio: float = 0.20
+    focus3_auto_mean_best_local_required: bool = True
     # Focus3 source ratio = budget class + data reliability + GP/recent improvement 보정.
     focus3_source_adaptive_enabled: bool = True
     focus3_data_ratio_low: float = 5.0
@@ -160,9 +177,39 @@ class OptimizerSystemConfig:
     focus3_low_reliability_boundary_bonus: float = 0.05
     focus3_low_reliability_random_bonus: float = 0.15
     focus3_mid_reliability_random_bonus: float = 0.05
-    focus3_gp_fallback_boundary_bonus: float = 0.05
-    focus3_gp_fallback_random_bonus: float = 0.10
+    focus3_gp_fallback_boundary_bonus: float = 0.00
+    focus3_gp_fallback_random_bonus: float = 0.15
     focus3_recent_improvement_topk_bonus: float = 0.10
+    # Constraint가 없는 문제에서는 boundary source가 개선 효율이 낮을 수 있으므로
+    # 최종 source mixture에 cap/floor를 적용한다. Constraint 문제에서는 적용하지 않는다.
+    focus3_no_constraint_source_cap_enabled: bool = True
+    focus3_no_constraint_boundary_max: float = 0.10
+    focus3_no_constraint_topk_min: float = 0.62
+    focus3_no_constraint_random_min: float = 0.12
+    # 무제약 문제에서는 boundary source가 acquisition상 약간 좋아 보이는 정도로
+    # 최종 후보를 이기지 못하게 한다. topk/random보다 이 margin 이상 좋을 때만 허용.
+    focus3_no_constraint_boundary_gate_enabled: bool = True
+    focus3_no_constraint_boundary_gate_margin_ratio: float = 0.08
+    # 무제약 문제에서는 boundary score에 직접 penalty를 더해 GP uncertainty만으로
+    # boundary가 best_plan을 과도하게 이기지 못하게 한다. 낮은 acquisition score가 우수하다.
+    focus3_no_constraint_boundary_score_penalty_enabled: bool = True
+    focus3_no_constraint_boundary_score_penalty_ratio: float = 0.25
+    # RB처럼 narrow valley를 가진 문제에서는 top-k 전체보다 현재 best 주변을 더 촘촘히
+    # 파는 source가 필요하다. best_local은 topk quota 일부를 가져와 좁은 sigma로 후보를 만든다.
+    focus3_best_local_enabled: bool = True
+    focus3_best_local_prob: float = 0.25
+    focus3_best_local_max_prob: float = 0.35
+    focus3_best_local_min_focus3_evals: int = 3
+    focus3_best_local_min_data_ratio: float = 5.0
+    focus3_best_local_sigma: float = 0.015
+    focus3_best_local_top_count: int = 2
+    focus3_best_local_pool_ratio: float = 0.70
+    # Focus2 fallback bounds는 evidence가 약하므로 boundary를 과신하지 않는다.
+    focus3_fallback_bounds_source_policy_enabled: bool = True
+    focus3_fallback_bounds_boundary_max: float = 0.05
+    focus3_fallback_bounds_topk_min: float = 0.45
+    focus3_fallback_bounds_best_local_min: float = 0.20
+    focus3_fallback_bounds_random_min: float = 0.20
     # Random source는 pure random 대신 acquisition filter + archive coverage로 refine start를 고른다.
     focus3_random_cover_enabled: bool = True
     focus3_random_cover_acq_quantile: float = 0.70
@@ -173,21 +220,26 @@ class OptimizerSystemConfig:
     focus3_dedup_random_attempts: int = 64
     # Focus3 정체 시 boundary/random 비율과 kappa를 일시적으로 올려 recovery 모드로 전환한다.
     focus3_recover_enabled: bool = True
-    focus3_recover_window: int = 5
+    focus3_recover_window: int = 20
     # 너무 이른 recovery 전환을 막는다. 충분한 Focus3 history가 쌓인 뒤에만
     # stagnation 판정을 적용한다.
-    focus3_recover_min_history: int = 10
+    focus3_recover_min_history: int = 20
     focus3_recover_tol: float = 1e-8
+    focus3_recover_relative_tol: float = 1e-4
     focus3_recover_boundary_bonus: float = 0.15
     focus3_recover_random_bonus: float = 0.10
     # Mild/strong 2단 recovery. 짧은 정체에서는 boundary 과투입을 막고,
     # 긴 정체에서만 기존 수준에 가까운 탐색 강화로 전환한다.
-    focus3_recover_strong_no_improve: int = 20
-    focus3_recover_mild_boundary_scale: float = 0.35
+    focus3_recover_strong_no_improve: int = 120
+    focus3_recover_mild_boundary_scale: float = 0.15
     focus3_recover_mild_random_scale: float = 0.50
-    focus3_recover_mild_kappa_multiplier: float = 1.15
-    focus3_recover_kappa_multiplier: float = 1.50
-    focus3_recover_max_kappa: float = 3.50
+    focus3_recover_mild_kappa_multiplier: float = 1.10
+    focus3_recover_kappa_multiplier: float = 1.25
+    focus3_recover_max_kappa: float = 2.50
+    # 무제약 recovery는 boundary보다 random/topk 쪽으로 기울인다.
+    focus3_no_constraint_recover_boundary_scale: float = 0.0
+    focus3_no_constraint_recover_random_scale: float = 0.80
+    focus3_no_constraint_recover_topk_bonus: float = 0.10
 
     # ------------------------------------------------------------------
     # Focus2: region manager / TuRBO-lite
@@ -209,6 +261,11 @@ class OptimizerSystemConfig:
     focus2_region_candidate_pool_max: int = 30000
     focus2_region_uncertain_seed_fraction: float = 0.30
     focus2_region_cluster_radius: float = 0.20
+    focus2_region_retry_enabled: bool = True
+    focus2_region_retry_radius_scale: float = 1.50
+    focus2_region_retry_uncertain_seed_fraction: float = 0.60
+    focus2_region_retry_min_good_scale: float = 0.50
+    focus2_region_retry_expand_ratio: float = 1.30
     focus2_region_quantile_low: float = 0.10
     focus2_region_quantile_high: float = 0.90
     focus2_region_expand_ratio: float = 1.15
@@ -259,6 +316,10 @@ class OptimizerSystemConfig:
     focus2_final_bounds_expand_ratio: float = 1.20
     focus2_final_bounds_min_volume_ratio: float = 0.25
     focus2_final_bounds_max_volume_ratio: float = 1.0
+    # Focus2 fallback은 evidence가 약하다는 뜻이므로 final bounds를 더 보수적으로 유지한다.
+    focus2_final_fallback_archive_trim_blend: float = 0.0
+    focus2_final_fallback_bounds_expand_ratio: float = 1.35
+    focus2_final_fallback_min_volume_ratio: float = 0.40
     focus2_merge_enabled: bool = True
     focus2_merge_duplicate_pair_threshold: int = 2
     focus2_merge_shared_pair_threshold: int = 2
@@ -312,6 +373,13 @@ class OptimizerSystemConfig:
     source_feasible_multiplier: int = 3
     source_feasible_retry: int = 3
     source_feasible_min_starts: int = 1
+    # pre-constraint가 있을 때 feasible이지만 제약 경계에 가까운 후보를
+    # 별도 source로 일부 투입한다. 최종 CAE 전 hard feasible check는 항상 유지한다.
+    constraint_boundary_source_enabled: bool = True
+    constraint_boundary_acq_quantile: float = 0.75
+    focus2_constraint_boundary_select_prob: float = 0.25
+    focus3_constraint_boundary_prob: float = 0.20
+    pre_final_feasible_attempts: int = 256
 
     # ------------------------------------------------------------------
     # Archive / GP train-set policy

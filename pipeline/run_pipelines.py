@@ -105,7 +105,7 @@ ACTIVE_PROBLEM_CASES: list[str] = [
     # "rosenbrock",
     # "goldstein_price",
     # "six_hump_camel",
-    # "cantilever_beam_nodummy",
+    "cantilever_beam_nodummy",
     "rosenbrock_nodummy",
     "goldstein_price_nodummy",
     "six_hump_camel_nodummy",
@@ -164,10 +164,26 @@ def _cli_option_present(name: str) -> bool:
     return any(arg == token or arg.startswith(prefix) for arg in sys.argv[1:])
 
 
-def _build_optimizer_system_config(*, debug_level: str):
+def _case_has_pre_constraints(problem_name: str) -> bool:
+    try:
+        from CAE_tool_interface.executor.configurator import select_cae_by_name
+
+        cae_entry = select_cae_by_name(str(problem_name))
+        spec = cae_entry[0]() if isinstance(cae_entry, tuple) and callable(cae_entry[0]) else cae_entry
+        for item in spec.get("constraint_defs", []) if isinstance(spec, dict) else []:
+            if isinstance(item, dict) and str(item.get("scope", "pre")).strip().lower() == "pre":
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _build_optimizer_system_config(*, debug_level: str, problem_name: str | None = None):
     from Optimizer.config import OptimizerSystemConfig
 
     system_cfg = OptimizerSystemConfig(debug_level=str(debug_level))
+    if problem_name and _case_has_pre_constraints(str(problem_name)):
+        system_cfg.enforce_pre_constraints = True
     for key, value in BATCH_OPTIMIZER_SYSTEM_OVERRIDES.items():
         if not hasattr(system_cfg, key):
             raise RuntimeError(f"Unknown optimizer system override in run_pipelines.py: {key}")
@@ -285,7 +301,7 @@ def _build_pipeline_config(
                 n_samples=int(max(int(optimizer_n_samples), 0)),
                 known_optimum=case.known_optimum,
             ),
-            system=_build_optimizer_system_config(debug_level=str(debug_level)),
+            system=_build_optimizer_system_config(debug_level=str(debug_level), problem_name=case.problem_name),
             cae=cae_cfg,
             cae_metadata_path=None,
             doe_metadata_path=None,
@@ -1186,7 +1202,7 @@ def main() -> None:
                                             n_samples=case_optimizer_n_samples,
                                             known_optimum=case.known_optimum,
                                         ),
-                                        system=_build_optimizer_system_config(debug_level=debug_level),
+                                        system=_build_optimizer_system_config(debug_level=debug_level, problem_name=case.problem_name),
                                         cae=cfg.cae,
                                         cae_metadata_path=None,
                                         doe_metadata_path=None,
