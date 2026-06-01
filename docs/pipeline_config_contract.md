@@ -162,17 +162,25 @@ Optimizer:
 ```json
 {
   "n_samples": 30,
+  "goal": null,
   "doe_csv_path": null,
   "explorer_bounds_path": null,
   "system": {
     "algorithm_id": "focus_bo",
-    "focus_pipeline": "auto"
+    "focus_pipeline": "auto",
+    "algorithm_params": {}
   }
 }
 ```
 
 `algorithm_id` selects the Optimizer algorithm implementation from the Optimizer
 registry. The built-in default is `focus_bo`.
+
+Custom Optimizer algorithms are discovered from `Optimizer/algorithms/custom`.
+They must use the common runtime API for evaluation, goal early-stop, archive
+tracking, and standard output generation. Backend code can inspect
+`Optimizer.algorithms.describe_optimizer_algorithms()` to list available
+algorithms and discovery errors.
 
 Optimizer official progress naming inside `focus_bo` is focus-only:
 

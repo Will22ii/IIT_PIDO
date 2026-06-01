@@ -166,7 +166,63 @@ Optimizer/algorithms/
   base.py
   result.py
   focus_bo/
+  custom/
 ```
+
+서비스에서 사용자가 올린 optimizer 알고리즘은 `Optimizer/algorithms/custom/*.py`
+형태로 배치한다. Registry는 Optimizer 시작 시 이 폴더를 자동 discovery한다.
+Custom 파일은 `ALGORITHM_ID`와 `Algorithm` class를 제공해야 한다.
+
+```python
+ALGORITHM_ID = "my_algorithm"
+
+
+class Algorithm:
+    def run(self, *, runtime, config, resolved):
+        for _ in range(config.user.n_samples):
+            x = runtime.sample_uniform(1)[0]
+            runtime.evaluate(x, source_mode=ALGORITHM_ID, segment="custom")
+            if runtime.should_stop:
+                break
+        return runtime.build_result(algorithm_id=ALGORITHM_ID)
+```
+
+Custom 알고리즘은 CAE를 직접 호출하거나 산출물을 직접 저장하지 않는다.
+후보점 생성만 담당하고, evaluation은 `runtime.evaluate()` 또는
+`runtime.evaluate_batch()`를 통해 수행한다. Runtime이 archive/history,
+best tracking, pre-constraint check, optional goal early stop, 표준 output
+저장을 공통으로 처리한다.
+
+`focus_bo`는 성능과 debug artifact 호환성을 위해 아직 전체 loop를
+`OptimizerRuntime`으로 이관하지 않는다. 대신 1차 이관으로
+`Optimizer.executor.evaluation_core`의 공통 evaluator를 공유한다.
+
+```text
+SelectedFeatureMapper
+  selected feature vector -> full CAE variable vector
+
+CaeObjectiveEvaluator
+  CAE 호출 + sanitize + objective 반환
+```
+
+따라서 FocusBO와 custom Runtime은 동일한 feature mapping/objective
+evaluation 코어를 사용한다. 2차 이관으로 pre-constraint raw evaluation과
+constraint debug field 생성도 `evaluation_core`에 공통 helper로 둔다.
+3차 이관으로 custom Runtime과 FocusBO가 공유하는 history row base builder를
+`Optimizer.executor.history_core`에 만들었다. FocusBO는 공통 base row 위에
+focus-specific diagnostics를 붙인다. Focus2/Focus3 region debug,
+timing, plot 산출물은 현재 FocusBO engine 내부에 유지한다.
+4차 이관으로 `Optimizer.executor.archive_core`에 archive append와
+raw/effective best 갱신 helper를 분리했다. FocusBO는 기존 archive array와
+debug loop를 유지하되, 새 평가점 추가와 best update 계산은 공통 helper를
+사용한다.
+5차 이관으로 `Optimizer.executor.history_core`에 goal monitor update와
+공통 evaluation history row 생성을 묶은 helper를 추가했다. Custom Runtime과
+FocusBO가 같은 goal/history 기본 필드를 만들고, FocusBO는 그 위에
+Focus별 debug 진단값만 추가한다.
+6차 이관으로 `Optimizer.executor.result_core`에 `OptimizerAlgorithmResult`
+생성 helper를 추가했다. FocusBO와 Custom Runtime은 각자의 archive/history와
+알고리즘별 summary를 준비한 뒤, 공통 result envelope은 같은 helper로 만든다.
 
 교체 알고리즘도 아래 입력을 공통으로 받는다.
 
@@ -176,6 +232,8 @@ optional objective CSV/archive
 optional selected bounds
 optional selected features/model layer
 n_samples
+goal / goal_objective (optional)
+algorithm_params (optional)
 ```
 
 그리고 `Optimizer.algorithms.result.OptimizerAlgorithmResult` 공통 result contract를 반환해야 한다.
@@ -188,6 +246,12 @@ best_objective
 n_iterations
 algorithm/focus summary
 ```
+
+Backend가 알고리즘 선택 UI를 구성해야 하면
+`Optimizer.algorithms.describe_optimizer_algorithms()`로 현재 사용 가능한
+알고리즘과 custom discovery error를 조회할 수 있다.
+사용자가 업로드한 `.py` 파일을 교체한 직후 같은 프로세스 안에서 다시 조회해야 하면
+`discover_custom_optimizer_algorithms(force=True)`를 호출해 registry를 재탐색한다.
 
 ## Focus Pipeline
 

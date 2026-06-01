@@ -10,6 +10,8 @@
 - selected bounds가 없으면 내부 Focus0 -> Focus1 -> Focus2 -> Focus3 pipeline을 사용한다.
 - 문제별 Optimizer budget과 repeat 수는 고정한다.
 - Optimizer-only 성공 여부는 아래 문제별 goal threshold를 달성했는지로 판단한다.
+- goal을 달성한 뒤 best objective가 5회 연속 개선되지 않으면 조기 종료할 수 있다.
+  이때 종료된 iteration을 기록해 "얼마나 빨리 goal에 도달했는지"를 분석한다.
 
 이후 목표:
 
@@ -60,6 +62,8 @@ Runtime 개선은 benchmark 조건을 보존해야 한다.
 
 - `n_samples`를 줄이지 않는다.
 - `repeat`를 줄이지 않는다.
+- goal 달성 후 patience 기반 early stop은 허용한다. 전체 budget을 줄이는 것이 아니라,
+  이미 목표 품질을 달성한 run의 불필요한 후속 evaluation을 생략하는 정책이다.
 - Score run 중 Focus3 pool size, acquisition refinement, GP update policy 같은 후보 품질 knob를 조용히 낮추지 않는다.
 
 허용되는 최적화 방향:

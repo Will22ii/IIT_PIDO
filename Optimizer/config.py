@@ -14,6 +14,12 @@ class OptimizerUserConfig:
     explorer_bounds_path: str | None = None
     # Debug/benchmark용 known optimum. 있으면 pair plot에 marker로 표시한다.
     known_optimum: Any | None = None
+    # Optional target objective. If provided, any Optimizer algorithm can stop
+    # early after reaching this quality target and observing no further best
+    # improvement. None means "use full budget".
+    goal: float | None = None
+    # Backward-compatible alias. Prefer `goal`.
+    goal_objective: float | None = None
 
 
 @dataclass
@@ -112,6 +118,27 @@ class OptimizerSystemConfig:
     focus0_filter_safety: float = 1.2
     focus0_filter_r_floor: float = 0.02
 
+    # Optional objective-goal early stop. Active only when user.goal or
+    # user.goal_objective is provided. This is useful for benchmark/production
+    # runs with an explicit target quality; normal runs without a target keep
+    # using the full budget.
+    goal_early_stop_enabled: bool = True
+    goal_early_stop_patience: int = 5
+    # Built-in focus_bo only: record goal hits in earlier focus stages, but allow
+    # early stop only from this focus level onward. User algorithms can use
+    # GoalMonitor directly and keep the default "anytime" behavior.
+    goal_early_stop_min_focus: int = 2
+
+    # GP X scaling 정책.
+    # - auto: active bounds span 차이가 충분히 클 때만 [0, 1] 좌표계에서 학습/예측한다.
+    # - bounds: 항상 bounds scaling을 적용한다.
+    # - off/raw: raw 설계변수 좌표계 그대로 GP를 fit한다.
+    # CAE 평가, pre-constraint, output/debug 값은 계속 raw 설계변수로 유지한다.
+    gp_x_scaling_enabled: bool = True
+    gp_x_scaling_mode: str = "auto"
+    gp_x_scaling_auto_span_ratio_threshold: float = 3.0
+    gp_x_scaling_span_floor: float = 1e-12
+
     # ------------------------------------------------------------------
     # Focus3: final selected-bounds BO
     # ------------------------------------------------------------------
@@ -153,10 +180,24 @@ class OptimizerSystemConfig:
     # 2번 discrete GP scoring 후 1번 refine.
     focus3_discrete_enabled: bool = True
     focus3_refine_every: int = 2
+    # 최근 discrete/refine 성과를 보고 expensive L-BFGS-B refine 주기를 조절한다.
+    focus3_refine_adaptive_enabled: bool = True
+    focus3_refine_adaptive_window: int = 80
+    focus3_refine_adaptive_min_samples: int = 6
+    focus3_refine_adaptive_min_every: int = 1
+    focus3_refine_adaptive_max_every: int = 4
+    focus3_refine_adaptive_better_every: int = 1
+    focus3_refine_adaptive_worse_every: int = 4
+    focus3_refine_adaptive_advantage_ratio: float = 1.50
+    focus3_refine_adaptive_disadvantage_ratio: float = 0.50
     # Refine 후보가 boundary/random 중심이면 비싼 L-BFGS-B를 생략하고 GP scoring 결과를
     # 그대로 사용한다. RB/GP처럼 budget이 큰 무제약 run에서 runtime을 크게 줄이기 위한 장치다.
     focus3_refine_source_filter_enabled: bool = True
-    focus3_refine_allowed_sources: str = "topk,best_local,random"
+    focus3_refine_allowed_sources: str = "topk,best_local"
+    focus3_refine_cooldown_enabled: bool = True
+    focus3_refine_cooldown_window: int = 50
+    focus3_refine_cooldown_worse_count: int = 12
+    focus3_refine_cooldown_min_focus3_evals: int = 80
     # L-BFGS-B acquisition refine이 runtime을 지배할 수 있으므로 start 수는 유지하되
     # 각 local refine의 최대 반복/함수평가를 제한한다.
     focus3_refine_maxiter: int = 35
@@ -202,14 +243,20 @@ class OptimizerSystemConfig:
     focus3_best_local_min_focus3_evals: int = 3
     focus3_best_local_min_data_ratio: float = 5.0
     focus3_best_local_sigma: float = 0.015
+    focus3_best_local_sigma_schedule_enabled: bool = True
+    focus3_best_local_sigma_mid_eval: int = 80
+    focus3_best_local_sigma_mid: float = 0.010
+    focus3_best_local_sigma_late_eval: int = 250
+    focus3_best_local_sigma_late: float = 0.006
+    focus3_best_local_sigma_recover_strong_multiplier: float = 0.75
     focus3_best_local_top_count: int = 2
     focus3_best_local_pool_ratio: float = 0.70
     # Focus2 fallback bounds는 evidence가 약하므로 boundary를 과신하지 않는다.
     focus3_fallback_bounds_source_policy_enabled: bool = True
-    focus3_fallback_bounds_boundary_max: float = 0.05
-    focus3_fallback_bounds_topk_min: float = 0.45
-    focus3_fallback_bounds_best_local_min: float = 0.20
-    focus3_fallback_bounds_random_min: float = 0.20
+    focus3_fallback_bounds_boundary_max: float = 0.03
+    focus3_fallback_bounds_topk_min: float = 0.40
+    focus3_fallback_bounds_best_local_min: float = 0.25
+    focus3_fallback_bounds_random_min: float = 0.25
     # Random source는 pure random 대신 acquisition filter + archive coverage로 refine start를 고른다.
     focus3_random_cover_enabled: bool = True
     focus3_random_cover_acq_quantile: float = 0.70
@@ -220,26 +267,29 @@ class OptimizerSystemConfig:
     focus3_dedup_random_attempts: int = 64
     # Focus3 정체 시 boundary/random 비율과 kappa를 일시적으로 올려 recovery 모드로 전환한다.
     focus3_recover_enabled: bool = True
-    focus3_recover_window: int = 20
+    focus3_recover_window: int = 30
     # 너무 이른 recovery 전환을 막는다. 충분한 Focus3 history가 쌓인 뒤에만
     # stagnation 판정을 적용한다.
-    focus3_recover_min_history: int = 20
+    focus3_recover_min_history: int = 40
     focus3_recover_tol: float = 1e-8
     focus3_recover_relative_tol: float = 1e-4
     focus3_recover_boundary_bonus: float = 0.15
     focus3_recover_random_bonus: float = 0.10
     # Mild/strong 2단 recovery. 짧은 정체에서는 boundary 과투입을 막고,
     # 긴 정체에서만 기존 수준에 가까운 탐색 강화로 전환한다.
-    focus3_recover_strong_no_improve: int = 120
+    focus3_recover_strong_no_improve: int = 180
     focus3_recover_mild_boundary_scale: float = 0.15
     focus3_recover_mild_random_scale: float = 0.50
-    focus3_recover_mild_kappa_multiplier: float = 1.10
+    focus3_recover_mild_kappa_multiplier: float = 1.05
     focus3_recover_kappa_multiplier: float = 1.25
     focus3_recover_max_kappa: float = 2.50
     # 무제약 recovery는 boundary보다 random/topk 쪽으로 기울인다.
     focus3_no_constraint_recover_boundary_scale: float = 0.0
-    focus3_no_constraint_recover_random_scale: float = 0.80
+    focus3_no_constraint_recover_random_scale: float = 0.35
     focus3_no_constraint_recover_topk_bonus: float = 0.10
+    focus3_no_constraint_recover_best_local_mild_bonus: float = 0.05
+    focus3_no_constraint_recover_best_local_strong_bonus: float = 0.15
+    focus3_no_constraint_recover_best_local_max: float = 0.45
 
     # ------------------------------------------------------------------
     # Focus2: region manager / TuRBO-lite
@@ -318,8 +368,8 @@ class OptimizerSystemConfig:
     focus2_final_bounds_max_volume_ratio: float = 1.0
     # Focus2 fallback은 evidence가 약하다는 뜻이므로 final bounds를 더 보수적으로 유지한다.
     focus2_final_fallback_archive_trim_blend: float = 0.0
-    focus2_final_fallback_bounds_expand_ratio: float = 1.35
-    focus2_final_fallback_min_volume_ratio: float = 0.40
+    focus2_final_fallback_bounds_expand_ratio: float = 1.50
+    focus2_final_fallback_min_volume_ratio: float = 0.55
     focus2_merge_enabled: bool = True
     focus2_merge_duplicate_pair_threshold: int = 2
     focus2_merge_shared_pair_threshold: int = 2

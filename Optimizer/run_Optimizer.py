@@ -1,5 +1,6 @@
 import os
 import sys
+import inspect
 
 import pandas as pd
 
@@ -8,7 +9,9 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from Optimizer.algorithms.registry import get_optimizer_algorithm
+from Optimizer.algorithms.result import OptimizerAlgorithmResult
 from Optimizer.config import OptimizerConfig
+from Optimizer.executor.algorithm_runtime import OptimizerRuntime
 from Optimizer.executor.input_workflow import resolve_optimizer_inputs
 from Optimizer.executor.output_workflow import save_optimizer_outputs
 from pipeline.run_context import RunContext, create_run_context, get_task_metadata_path, update_run_index
@@ -57,6 +60,8 @@ def run_optimizer(
             "objective_sense": resolved.objective_sense,
             "design_bounds": design_bounds,
             "total_budget": int(config.user.n_samples),
+            "goal": config.user.goal,
+            "goal_objective": config.user.goal_objective,
             "task": "OPT",
         }
         run_context = create_run_context(
@@ -75,7 +80,21 @@ def run_optimizer(
 
     algorithm_id = str(getattr(config.system, "algorithm_id", "focus_bo") or "focus_bo")
     algorithm = get_optimizer_algorithm(algorithm_id)
-    bo_result = algorithm.run(config=config, resolved=resolved)
+    run_signature = inspect.signature(algorithm.run)
+    if "runtime" in run_signature.parameters:
+        runtime = OptimizerRuntime(
+            config=config,
+            resolved=resolved,
+            algorithm_id=algorithm_id,
+        )
+        bo_result = algorithm.run(config=config, resolved=resolved, runtime=runtime)
+    else:
+        bo_result = algorithm.run(config=config, resolved=resolved)
+    if not isinstance(bo_result, OptimizerAlgorithmResult):
+        raise TypeError(
+            f"Optimizer algorithm '{algorithm_id}' returned invalid result type: "
+            f"{type(bo_result).__name__}. Expected OptimizerAlgorithmResult."
+        )
 
     task_out = save_optimizer_outputs(
         config=config,

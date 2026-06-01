@@ -367,10 +367,17 @@ def _build_optimizer_config(
         "explorer_bounds_path",
         inputs.get("explorer_bounds_path"),
     )
+    goal = section.pop("goal", user_overrides.pop("goal", None))
+    goal_objective = section.pop(
+        "goal_objective",
+        user_overrides.pop("goal_objective", None),
+    )
     user = OptimizerUserConfig(
         n_samples=n_samples,
         doe_csv_path=doe_csv_path,
         explorer_bounds_path=explorer_bounds_path,
+        goal=goal,
+        goal_objective=goal_objective,
     )
     # known_optimum markers are injected only by run_pipelines benchmark cases.
     # Keep run_pipeline JSON free of benchmark-only fields.

@@ -21,6 +21,7 @@ class AIONConfig:
     seed: int = 42
     n_doe_samples: int = 100
     optimizer_n_samples: int = 30
+    optimizer_goal: float | None = None
     variables: list[dict] | None = None
     run_root: str | None = None
     debug_level: str = "on"
@@ -91,6 +92,7 @@ def build_aion_pipeline_config(*, config: AIONConfig) -> PipelineConfig:
     optimizer_cfg = OptimizerConfig(
         user=OptimizerUserConfig(
             n_samples=int(config.optimizer_n_samples),
+            goal=config.optimizer_goal,
         ),
         system=OptimizerSystemConfig(
             debug_level=str(config.debug_level),
@@ -178,6 +180,9 @@ def aion_config_from_dict(payload: dict[str, Any]) -> AIONConfig:
     optimizer_n_samples = optimizer.pop("n_samples", None)
     if optimizer_n_samples is None:
         optimizer_n_samples = optimizer.pop("optimizer_n_samples", 30)
+    optimizer_goal = optimizer.pop("goal", None)
+    if optimizer_goal is None:
+        optimizer_goal = optimizer.pop("goal_objective", None)
 
     cfg = AIONConfig(
         problem_name=str(problem_name),
@@ -189,6 +194,7 @@ def aion_config_from_dict(payload: dict[str, Any]) -> AIONConfig:
         use_timestamp=bool(run.pop("use_timestamp", False)),
         n_doe_samples=int(n_doe_samples),
         optimizer_n_samples=int(optimizer_n_samples),
+        optimizer_goal=float(optimizer_goal) if optimizer_goal is not None else None,
         reuse=reuse,
     )
 

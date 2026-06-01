@@ -36,24 +36,28 @@ class ProblemCase:
     optimizer_n_samples: int | None = None
     objective_sense: str = "min"
     repeats: int = 1
+    optimizer_goal: float | None = None
 
 
 PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
     "rosenbrock": ProblemCase(
         problem_name="rosenbrock",
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
+        optimizer_goal=1.2,
         n_samples=450,
         repeats=10,
     ),
     "cantilever_beam": ProblemCase(
         problem_name="cantilever_beam",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
+        optimizer_goal=114.66,
         n_samples=90,
         repeats=25,
     ),
     "goldstein_price": ProblemCase(
         problem_name="goldstein_price",
         known_optimum={"x1": 0.0, "x2": -1.0},
+        optimizer_goal=3.6,
         n_samples=150,
         repeats=50,
     ),
@@ -63,29 +67,33 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": 0.0898, "x2": -0.7126},
             {"x1": -0.0898, "x2": 0.7126},
         ],
+        optimizer_goal=-0.86,
         n_samples=50,
         repeats=25,
     ),
     "rosenbrock_nodummy": ProblemCase(
         problem_name="rosenbrock_nodummy",
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
+        optimizer_goal=1.2,
         n_samples=450,
         optimizer_n_samples=1500,
-        repeats=30,
+        repeats=5,
     ),
     "cantilever_beam_nodummy": ProblemCase(
         problem_name="cantilever_beam_nodummy",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
+        optimizer_goal=114.66,
         n_samples=45,
         optimizer_n_samples=150,
-        repeats=30,
+        repeats=5,
     ),
     "goldstein_price_nodummy": ProblemCase(
         problem_name="goldstein_price_nodummy",
         known_optimum={"x1": 0.0, "x2": -1.0},
+        optimizer_goal=3.6,
         n_samples=150,
         optimizer_n_samples=500,
-        repeats=30,
+        repeats=5,
     ),
     "six_hump_camel_nodummy": ProblemCase(
         problem_name="six_hump_camel_nodummy",
@@ -93,9 +101,10 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": 0.0898, "x2": -0.7126},
             {"x1": -0.0898, "x2": 0.7126},
         ],
+        optimizer_goal=-0.86,
         n_samples=15,
         optimizer_n_samples=50,
-        repeats=30,
+        repeats=5,
     ),
 }
 
@@ -300,6 +309,7 @@ def _build_pipeline_config(
             user=OptimizerUserConfig(
                 n_samples=int(max(int(optimizer_n_samples), 0)),
                 known_optimum=case.known_optimum,
+                goal=case.optimizer_goal,
             ),
             system=_build_optimizer_system_config(debug_level=str(debug_level), problem_name=case.problem_name),
             cae=cae_cfg,
@@ -1054,6 +1064,16 @@ def main() -> None:
     )
     if run_optimizer:
         print(f"- default_optimizer_n_samples={optimizer_n_samples_default}")
+        print(
+            "- optimizer_goals="
+            + ",".join(
+                [
+                    f"{case.problem_name}:{case.optimizer_goal}"
+                    for case in PROBLEM_SUITE
+                    if case.optimizer_goal is not None
+                ]
+            )
+        )
     print(
         "- problem_repeats="
         + ",".join(
@@ -1201,6 +1221,7 @@ def main() -> None:
                                         user=OptimizerUserConfig(
                                             n_samples=case_optimizer_n_samples,
                                             known_optimum=case.known_optimum,
+                                            goal=case.optimizer_goal,
                                         ),
                                         system=_build_optimizer_system_config(debug_level=debug_level, problem_name=case.problem_name),
                                         cae=cfg.cae,

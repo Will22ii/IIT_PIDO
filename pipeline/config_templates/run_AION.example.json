@@ -17,6 +17,7 @@
     "n_samples": 90
   },
   "optimizer": {
-    "n_samples": 30
+    "n_samples": 30,
+    "goal": null
   }
 }

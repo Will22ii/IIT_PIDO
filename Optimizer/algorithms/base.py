@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from Optimizer.config import OptimizerConfig
     from Optimizer.algorithms.result import OptimizerAlgorithmResult
+    from Optimizer.executor.algorithm_runtime import OptimizerRuntime
     from Optimizer.executor.input_workflow import ResolvedOptimizerInputs
 
 
@@ -23,5 +24,6 @@ class OptimizerAlgorithm(Protocol):
         *,
         config: OptimizerConfig,
         resolved: ResolvedOptimizerInputs,
+        runtime: OptimizerRuntime | None = None,
     ) -> OptimizerAlgorithmResult:
         ...

@@ -32,6 +32,7 @@ class FocusBOAlgorithm:
             objective_col=str(config.system.objective_col),
             objective_sense=str(resolved.objective_sense),
             n_samples=int(config.user.n_samples),
+            goal=getattr(config.user, "goal", None) if getattr(config.user, "goal", None) is not None else getattr(config.user, "goal_objective", None),
             system=config.system,
             seed=int(resolved.seed),
             constraint_defs=resolved.constraint_defs,
