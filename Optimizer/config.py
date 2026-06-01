@@ -194,6 +194,11 @@ class OptimizerSystemConfig:
     # 그대로 사용한다. RB/GP처럼 budget이 큰 무제약 run에서 runtime을 크게 줄이기 위한 장치다.
     focus3_refine_source_filter_enabled: bool = True
     focus3_refine_allowed_sources: str = "topk,best_local"
+    # Random start는 local refine에서 개선 기여가 낮게 관측되었다. 무제약 Focus3에서는
+    # random source의 best acquisition score가 topk/best_local보다 충분히 좋을 때만
+    # L-BFGS-B refine start quota를 유지한다.
+    focus3_no_constraint_random_refine_gate_enabled: bool = True
+    focus3_no_constraint_random_refine_gate_margin_ratio: float = 0.03
     focus3_refine_cooldown_enabled: bool = True
     focus3_refine_cooldown_window: int = 50
     focus3_refine_cooldown_worse_count: int = 12
@@ -215,9 +220,9 @@ class OptimizerSystemConfig:
     focus3_source_adaptive_enabled: bool = True
     focus3_data_ratio_low: float = 5.0
     focus3_data_ratio_good: float = 15.0
-    focus3_low_reliability_boundary_bonus: float = 0.05
-    focus3_low_reliability_random_bonus: float = 0.15
-    focus3_mid_reliability_random_bonus: float = 0.05
+    focus3_low_reliability_boundary_bonus: float = 0.00
+    focus3_low_reliability_random_bonus: float = 0.10
+    focus3_mid_reliability_random_bonus: float = 0.03
     focus3_gp_fallback_boundary_bonus: float = 0.00
     focus3_gp_fallback_random_bonus: float = 0.15
     focus3_recent_improvement_topk_bonus: float = 0.10
@@ -235,11 +240,16 @@ class OptimizerSystemConfig:
     # boundary가 best_plan을 과도하게 이기지 못하게 한다. 낮은 acquisition score가 우수하다.
     focus3_no_constraint_boundary_score_penalty_enabled: bool = True
     focus3_no_constraint_boundary_score_penalty_ratio: float = 0.25
+    # Discrete Focus3 compares the best candidate from each source pool. If
+    # random gets the same pool size as structured sources, it can win simply
+    # through broad coverage. Keep random available, but smaller in unconstrained
+    # local search where topk/best_local have shown better improvement rates.
+    focus3_no_constraint_random_pool_ratio: float = 0.55
     # RB처럼 narrow valley를 가진 문제에서는 top-k 전체보다 현재 best 주변을 더 촘촘히
     # 파는 source가 필요하다. best_local은 topk quota 일부를 가져와 좁은 sigma로 후보를 만든다.
     focus3_best_local_enabled: bool = True
-    focus3_best_local_prob: float = 0.25
-    focus3_best_local_max_prob: float = 0.35
+    focus3_best_local_prob: float = 0.30
+    focus3_best_local_max_prob: float = 0.45
     focus3_best_local_min_focus3_evals: int = 3
     focus3_best_local_min_data_ratio: float = 5.0
     focus3_best_local_sigma: float = 0.015
@@ -248,9 +258,13 @@ class OptimizerSystemConfig:
     focus3_best_local_sigma_mid: float = 0.010
     focus3_best_local_sigma_late_eval: int = 250
     focus3_best_local_sigma_late: float = 0.006
-    focus3_best_local_sigma_recover_strong_multiplier: float = 0.75
-    focus3_best_local_top_count: int = 2
-    focus3_best_local_pool_ratio: float = 0.70
+    focus3_best_local_sigma_recover_strong_multiplier: float = 0.85
+    focus3_best_local_top_count: int = 5
+    focus3_best_local_pool_ratio: float = 0.90
+    focus3_best_local_anisotropic_enabled: bool = True
+    focus3_best_local_elite_std_scale: float = 0.75
+    focus3_best_local_max_sigma: float = 0.08
+    focus3_best_local_anchor_best_prob: float = 0.45
     # Focus2 fallback bounds는 evidence가 약하므로 boundary를 과신하지 않는다.
     focus3_fallback_bounds_source_policy_enabled: bool = True
     focus3_fallback_bounds_boundary_max: float = 0.03
@@ -267,14 +281,14 @@ class OptimizerSystemConfig:
     focus3_dedup_random_attempts: int = 64
     # Focus3 정체 시 boundary/random 비율과 kappa를 일시적으로 올려 recovery 모드로 전환한다.
     focus3_recover_enabled: bool = True
-    focus3_recover_window: int = 30
+    focus3_recover_window: int = 60
     # 너무 이른 recovery 전환을 막는다. 충분한 Focus3 history가 쌓인 뒤에만
     # stagnation 판정을 적용한다.
-    focus3_recover_min_history: int = 40
+    focus3_recover_min_history: int = 90
     focus3_recover_tol: float = 1e-8
     focus3_recover_relative_tol: float = 1e-4
     focus3_recover_boundary_bonus: float = 0.15
-    focus3_recover_random_bonus: float = 0.10
+    focus3_recover_random_bonus: float = 0.06
     # Mild/strong 2단 recovery. 짧은 정체에서는 boundary 과투입을 막고,
     # 긴 정체에서만 기존 수준에 가까운 탐색 강화로 전환한다.
     focus3_recover_strong_no_improve: int = 180
@@ -285,11 +299,12 @@ class OptimizerSystemConfig:
     focus3_recover_max_kappa: float = 2.50
     # 무제약 recovery는 boundary보다 random/topk 쪽으로 기울인다.
     focus3_no_constraint_recover_boundary_scale: float = 0.0
-    focus3_no_constraint_recover_random_scale: float = 0.35
-    focus3_no_constraint_recover_topk_bonus: float = 0.10
-    focus3_no_constraint_recover_best_local_mild_bonus: float = 0.05
-    focus3_no_constraint_recover_best_local_strong_bonus: float = 0.15
-    focus3_no_constraint_recover_best_local_max: float = 0.45
+    focus3_no_constraint_recover_random_scale: float = 0.15
+    focus3_no_constraint_recover_topk_bonus: float = 0.18
+    focus3_no_constraint_recover_strong_no_improve: int = 720
+    focus3_no_constraint_recover_best_local_mild_bonus: float = 0.10
+    focus3_no_constraint_recover_best_local_strong_bonus: float = 0.22
+    focus3_no_constraint_recover_best_local_max: float = 0.55
 
     # ------------------------------------------------------------------
     # Focus2: region manager / TuRBO-lite
@@ -412,8 +427,8 @@ class OptimizerSystemConfig:
     # 정체(stagnation) 감지 시 탐색 강화. Focus3 adaptive source policy에서 사용한다.
     source_stagnation_window: int = 8
     source_stagnation_tol: float = 1e-8
-    source_stagnation_boundary_bonus: float = 0.10
-    source_stagnation_random_bonus: float = 0.05
+    source_stagnation_boundary_bonus: float = 0.00
+    source_stagnation_random_bonus: float = 0.02
     # source pool 생성 파라미터
     source_pool_size: int = 24
     source_topk_fraction: float = 0.20
