@@ -195,6 +195,30 @@ Focus0~3 are internal stages of the built-in `focus_bo` algorithm. Other
 registered algorithms do not need to use focus stages as long as they consume the
 common Optimizer inputs and return the common Optimizer result contract.
 
+For non-focus runtime algorithms, OPT metadata uses algorithm-neutral schema
+names:
+
+```text
+optimizer_progress_scheme = custom_algorithm
+optimizer_output_schema = optimizer_points_v2
+optimizer_debug_schema = optimizer_history_v2
+```
+
+`focus_regions.json`, `focus_bounds.json`, and Focus2/Focus3 debug plots are
+emitted only by the built-in `focus_bo` algorithm. All algorithms emit
+`OPT/artifacts/meta/optimizer_algorithm.json`.
+
+All algorithms also emit `OPT/artifacts/meta/optimizer_system_config.json`.
+This audit artifact separates `optimizer.system` into common Optimizer contract
+fields, selected algorithm fields, built-in FocusBO fields, and compatibility
+fields. The legacy full dataclass snapshot remains in task metadata for
+backward compatibility.
+
+Implementation note: `OptimizerSystemConfig` remains a flat dataclass so
+existing JSON overrides and benchmark configs keep working. Code that needs the
+ownership boundary should use `optimizer_system_config_view()` or
+`split_optimizer_system_config()` instead of inferring it from field names.
+
 `phase` is reserved for DOE additional internals and is not part of Optimizer
 output/debug/metadata schema.
 

@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from CAE_tool_interface.config import CAEConfig
@@ -20,6 +20,19 @@ class OptimizerUserConfig:
     goal: float | None = None
     # Backward-compatible alias. Prefer `goal`.
     goal_objective: float | None = None
+
+
+@dataclass(frozen=True)
+class OptimizerSystemConfigView:
+    """Non-mutating view of Optimizer system config ownership boundaries."""
+
+    schema: str
+    algorithm_id: str
+    algorithm_contract: str
+    common: dict[str, object]
+    algorithm: dict[str, object]
+    focus_bo: dict[str, object]
+    compatibility: dict[str, object]
 
 
 @dataclass
@@ -199,6 +212,16 @@ class OptimizerSystemConfig:
     # L-BFGS-B refine start quota를 유지한다.
     focus3_no_constraint_random_refine_gate_enabled: bool = True
     focus3_no_constraint_random_refine_gate_margin_ratio: float = 0.03
+    # 최근 실제 source 성과를 보고 refine start quota를 보정한다. Acquisition score만으로
+    # random을 계속 refine하는 현상을 막기 위한 장치이며, 무제약 Focus3에만 적용한다.
+    focus3_source_performance_policy_enabled: bool = True
+    focus3_source_performance_recover_only: bool = True
+    focus3_source_performance_window: int = 120
+    focus3_source_performance_min_focus3_evals: int = 80
+    focus3_source_performance_min_source_count: int = 20
+    focus3_source_performance_poor_improve_rate: float = 0.003
+    focus3_source_performance_random_penalty_fraction: float = 0.75
+    focus3_source_performance_random_min_quota_fraction: float = 0.06
     focus3_refine_cooldown_enabled: bool = True
     focus3_refine_cooldown_window: int = 50
     focus3_refine_cooldown_worse_count: int = 12
@@ -305,6 +328,11 @@ class OptimizerSystemConfig:
     focus3_no_constraint_recover_best_local_mild_bonus: float = 0.10
     focus3_no_constraint_recover_best_local_strong_bonus: float = 0.22
     focus3_no_constraint_recover_best_local_max: float = 0.55
+    focus3_no_constraint_recover_best_local_late_no_improve: int = 300
+    focus3_no_constraint_recover_best_local_late_bonus: float = 0.12
+    focus3_no_constraint_recover_best_local_late_max: float = 0.70
+    focus3_recover_random_discrete_gate_enabled: bool = True
+    focus3_recover_random_discrete_gate_margin_ratio: float = 0.06
 
     # ------------------------------------------------------------------
     # Focus2: region manager / TuRBO-lite
@@ -385,6 +413,20 @@ class OptimizerSystemConfig:
     focus2_final_fallback_archive_trim_blend: float = 0.0
     focus2_final_fallback_bounds_expand_ratio: float = 1.50
     focus2_final_fallback_min_volume_ratio: float = 0.55
+    # Fallback으로 분류되지는 않았지만 최종 선택 region의 archive support가 약하면
+    # Focus3 입력 bounds를 덜 공격적으로 좁힌다.
+    focus2_final_low_support_policy_enabled: bool = True
+    focus2_final_low_support_min_archive_points: int = 8
+    focus2_final_low_support_min_per_dim: float = 4.0
+    focus2_final_low_support_union_top_k: int = 3
+    focus2_final_low_support_archive_trim_blend: float = 0.05
+    focus2_final_low_support_bounds_expand_ratio: float = 1.35
+    focus2_final_low_support_min_volume_ratio: float = 0.40
+    # Volume ratio만 맞추면 특정 축이 좁게 잘릴 수 있다. Evidence가 약한 final bounds는
+    # 축별 최소 coverage도 강제해 hard miss를 줄인다.
+    focus2_final_axis_coverage_enabled: bool = True
+    focus2_final_axis_coverage_low_support_min_width_ratio: float = 0.55
+    focus2_final_axis_coverage_fallback_min_width_ratio: float = 0.75
     focus2_merge_enabled: bool = True
     focus2_merge_duplicate_pair_threshold: int = 2
     focus2_merge_shared_pair_threshold: int = 2
@@ -498,6 +540,146 @@ class OptimizerSystemConfig:
     # Optimizer 병목 분석용 timing 로그. Public 결과에는 들어가지 않고
     # debug full history와 console progress에만 기록한다.
     optimizer_timing_log_enabled: bool = True
+
+
+OPTIMIZER_COMMON_SYSTEM_FIELDS: set[str] = {
+    "algorithm_id",
+    "algorithm_params",
+    "objective_col",
+    "objective_sense_override",
+    "enforce_pre_constraints",
+    "post_constraint_enabled",
+    "post_penalty_lambda",
+    "post_p_feasible_min",
+    "post_p_feasible_hard_penalty",
+    "post_score_mode",
+    "goal_early_stop_enabled",
+    "goal_early_stop_patience",
+    "dedup_decimals",
+    "debug_level",
+    "optimizer_progress_log_every",
+    "optimizer_timing_log_enabled",
+}
+
+OPTIMIZER_FOCUS_BO_SYSTEM_PREFIXES: tuple[str, ...] = (
+    "focus_",
+    "focus0_",
+    "focus1_",
+    "focus2_",
+    "focus3_",
+)
+
+OPTIMIZER_FOCUS_BO_SYSTEM_FIELDS: set[str] = {
+    "acq_type",
+    "kappa_start",
+    "kappa_end",
+    "ei_xi",
+    "starts_per_iter",
+    "random_starts_ratio",
+    "source_mixture_enabled",
+    "source_topk_prob",
+    "source_boundary_prob",
+    "source_random_prob",
+    "source_stagnation_window",
+    "source_stagnation_tol",
+    "source_stagnation_boundary_bonus",
+    "source_stagnation_random_bonus",
+    "source_pool_size",
+    "source_topk_fraction",
+    "source_topk_perturb_sigma",
+    "source_boundary_near_ratio",
+    "source_feasible_multiplier",
+    "source_feasible_retry",
+    "source_feasible_min_starts",
+    "constraint_boundary_source_enabled",
+    "constraint_boundary_acq_quantile",
+    "pre_final_feasible_attempts",
+    "init_from_doe_topk",
+    "init_train_np_ratio",
+    "init_max_points",
+    "init_train_top_fraction",
+    "gp_train_recent_fraction",
+    "doe_seed_scope",
+    "gp_refit_every",
+    "gp_x_scaling_enabled",
+    "gp_x_scaling_mode",
+    "gp_x_scaling_auto_span_ratio_threshold",
+    "gp_x_scaling_span_floor",
+    "goal_early_stop_min_focus",
+}
+
+
+def _optimizer_system_config_payload(system: OptimizerSystemConfig) -> dict[str, object]:
+    if isinstance(system, OptimizerSystemConfig):
+        return asdict(system)
+    if hasattr(system, "__dict__"):
+        return dict(vars(system))
+    return {}
+
+
+def optimizer_common_system_snapshot(system: OptimizerSystemConfig) -> dict[str, object]:
+    payload = _optimizer_system_config_payload(system)
+    return {
+        key: payload[key]
+        for key in sorted(OPTIMIZER_COMMON_SYSTEM_FIELDS)
+        if key in payload
+    }
+
+
+def optimizer_focus_bo_system_snapshot(system: OptimizerSystemConfig) -> dict[str, object]:
+    payload = _optimizer_system_config_payload(system)
+    return {
+        key: value
+        for key, value in sorted(payload.items())
+        if key in OPTIMIZER_FOCUS_BO_SYSTEM_FIELDS
+        or key.startswith(OPTIMIZER_FOCUS_BO_SYSTEM_PREFIXES)
+    }
+
+
+def split_optimizer_system_config(
+    system: OptimizerSystemConfig,
+    *,
+    algorithm_id: str | None = None,
+) -> dict[str, object]:
+    """Return an audit snapshot split by the common contract and algorithm knobs."""
+
+    return asdict(optimizer_system_config_view(system, algorithm_id=algorithm_id))
+
+
+def optimizer_system_config_view(
+    system: OptimizerSystemConfig,
+    *,
+    algorithm_id: str | None = None,
+) -> OptimizerSystemConfigView:
+    """Build a structured view without changing the flat runtime config shape."""
+
+    payload = _optimizer_system_config_payload(system)
+    common = optimizer_common_system_snapshot(system)
+    focus_bo = optimizer_focus_bo_system_snapshot(system)
+    assigned = set(common) | set(focus_bo)
+    compatibility = {
+        key: value
+        for key, value in sorted(payload.items())
+        if key not in assigned
+    }
+    selected_algorithm_id = str(algorithm_id or payload.get("algorithm_id", "focus_bo") or "focus_bo")
+    if selected_algorithm_id in {"focus_bo", "default"}:
+        algorithm = dict(focus_bo)
+        algorithm_contract = "focus_bo_builtin"
+    else:
+        algorithm = {
+            "algorithm_params": dict(payload.get("algorithm_params", {}) or {}),
+        }
+        algorithm_contract = "optimizer_runtime"
+    return OptimizerSystemConfigView(
+        schema="optimizer_system_config_v1",
+        algorithm_id=selected_algorithm_id,
+        algorithm_contract=algorithm_contract,
+        common=common,
+        algorithm=algorithm,
+        focus_bo=focus_bo,
+        compatibility=compatibility,
+    )
 
 
 @dataclass

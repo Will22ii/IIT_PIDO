@@ -926,6 +926,15 @@ def _apply_focus3_recover_best_local_policy(
     else:
         bonus = float(max(float(getattr(system, "focus3_no_constraint_recover_best_local_mild_bonus", 0.05)), 0.0))
     max_best = float(np.clip(float(getattr(system, "focus3_no_constraint_recover_best_local_max", 0.45)), 0.0, 1.0))
+    no_improve_count = int(max(int(recover_info.get("no_improve_count", 0) or 0), 0))
+    late_after = int(max(int(getattr(system, "focus3_no_constraint_recover_best_local_late_no_improve", 300)), 0))
+    late_active = bool(late_after > 0 and no_improve_count >= late_after)
+    if late_active:
+        bonus += float(max(float(getattr(system, "focus3_no_constraint_recover_best_local_late_bonus", 0.0)), 0.0))
+        max_best = float(max(
+            max_best,
+            np.clip(float(getattr(system, "focus3_no_constraint_recover_best_local_late_max", max_best)), 0.0, 1.0),
+        ))
     target = float(min(max_best, p_best_local + bonus))
     need = float(max(target - p_best_local, 0.0))
     if need <= 0.0:
@@ -965,6 +974,9 @@ def _apply_focus3_recover_best_local_policy(
         "level": str(level),
         "bonus": float(bonus),
         "max_best_local": float(max_best),
+        "no_improve_count": int(no_improve_count),
+        "late_active": bool(late_active),
+        "late_no_improve_threshold": int(late_after),
         "after": after,
     })
     return p_topk, p_boundary, p_random, p_best_local, info
@@ -1221,6 +1233,201 @@ def _focus3_no_constraint_random_refine_gate(
         "structured_best": float(s_best),
     })
     return info
+
+
+def _focus3_recover_random_discrete_gate(
+    *,
+    system: OptimizerSystemConfig,
+    best_scores: dict[str, float],
+    has_constraints: bool,
+    recover_info: dict[str, object] | None,
+) -> dict[str, object]:
+    enabled = bool(getattr(system, "focus3_recover_random_discrete_gate_enabled", True))
+    recovering = bool(recover_info.get("active", False)) if isinstance(recover_info, dict) else False
+    r_score = float(best_scores.get("random", float("nan")))
+    info: dict[str, object] = {
+        "enabled": bool(enabled),
+        "applied": False,
+        "allowed": True,
+        "reason": "disabled" if not enabled else "",
+        "recovery_active": bool(recovering),
+        "margin": float("nan"),
+        "random_score": float(r_score),
+        "structured_best": float("nan"),
+    }
+    if not enabled:
+        return info
+    if bool(has_constraints):
+        info["reason"] = "constraints_present"
+        return info
+    if not recovering:
+        info["reason"] = "not_recovering"
+        return info
+    structured = [
+        float(best_scores.get(src, float("nan")))
+        for src in ("topk", "best_local")
+        if math.isfinite(float(best_scores.get(src, float("nan"))))
+    ]
+    if not math.isfinite(r_score):
+        info.update({"allowed": False, "applied": True, "reason": "random_score_nan"})
+        return info
+    if not structured:
+        info["reason"] = "no_structured_candidate"
+        return info
+    s_best = float(min(structured))
+    margin_ratio = float(max(float(getattr(system, "focus3_recover_random_discrete_gate_margin_ratio", 0.06)), 0.0))
+    margin = float(max(abs(s_best), abs(r_score), 1.0) * margin_ratio)
+    allowed = bool(r_score <= s_best - margin)
+    info.update({
+        "allowed": bool(allowed),
+        "applied": bool(not allowed),
+        "reason": "recover_random_not_sufficiently_better" if not allowed else "recover_random_sufficiently_better",
+        "margin": float(margin),
+        "random_score": float(r_score),
+        "structured_best": float(s_best),
+    })
+    return info
+
+
+def _resolve_focus3_source_performance_policy(
+    *,
+    system: OptimizerSystemConfig,
+    history_rows: list[dict],
+    has_constraints: bool,
+    recovery_active: bool = False,
+) -> dict[str, object]:
+    enabled = bool(getattr(system, "focus3_source_performance_policy_enabled", True))
+    recover_only = bool(getattr(system, "focus3_source_performance_recover_only", True))
+    window = int(max(int(getattr(system, "focus3_source_performance_window", 120)), 1))
+    min_evals = int(max(int(getattr(system, "focus3_source_performance_min_focus3_evals", 80)), 0))
+    min_count = int(max(int(getattr(system, "focus3_source_performance_min_source_count", 20)), 1))
+    poor_rate = float(max(float(getattr(system, "focus3_source_performance_poor_improve_rate", 0.003)), 0.0))
+    penalty_fraction = float(np.clip(float(getattr(system, "focus3_source_performance_random_penalty_fraction", 0.75)), 0.0, 1.0))
+    min_quota_fraction = float(np.clip(float(getattr(system, "focus3_source_performance_random_min_quota_fraction", 0.06)), 0.0, 1.0))
+    info: dict[str, object] = {
+        "enabled": bool(enabled),
+        "applied": False,
+        "reason": "disabled" if not enabled else "",
+        "recover_only": bool(recover_only),
+        "recovery_active": bool(recovery_active),
+        "window": int(window),
+        "min_focus3_evals": int(min_evals),
+        "min_source_count": int(min_count),
+        "poor_improve_rate": float(poor_rate),
+        "penalty_fraction": float(penalty_fraction),
+        "random_min_quota_fraction": float(min_quota_fraction),
+        "penalized_sources": "",
+        "random_refine_count": 0,
+        "random_refine_improved_count": 0,
+        "random_refine_improve_rate": float("nan"),
+        "best_local_refine_count": 0,
+        "best_local_refine_improve_rate": float("nan"),
+        "topk_refine_count": 0,
+        "topk_refine_improve_rate": float("nan"),
+        "boundary_refine_count": 0,
+        "boundary_refine_improve_rate": float("nan"),
+        "quota_random_before": 0,
+        "quota_random_after": 0,
+        "quota_shift_to_best_local": 0,
+        "quota_shift_to_topk": 0,
+    }
+    if not enabled:
+        return info
+    if bool(has_constraints):
+        info["reason"] = "constraints_present"
+        return info
+    if recover_only and not bool(recovery_active):
+        info["reason"] = "not_recovering"
+        return info
+
+    focus3_rows = [r for r in history_rows if str(r.get("segment", "")).strip().lower() == "focus3"]
+    if len(focus3_rows) < min_evals:
+        info["reason"] = "insufficient_focus3_history"
+        info["focus3_count"] = int(len(focus3_rows))
+        return info
+    recent = focus3_rows[-window:]
+    info["focus3_count"] = int(len(focus3_rows))
+    info["recent_count"] = int(len(recent))
+
+    def _improved(row: dict) -> bool:
+        val = row.get("raw_improved", False)
+        if isinstance(val, bool):
+            return bool(val)
+        return str(val).strip().lower() in {"true", "1", "yes"}
+
+    for src in ("random", "best_local", "topk", "boundary"):
+        src_rows = [r for r in recent if str(r.get("focus3_nearest_refine_source", "")).strip() == src]
+        count = int(len(src_rows))
+        imp = int(sum(1 for r in src_rows if _improved(r)))
+        rate = float(imp / count) if count > 0 else float("nan")
+        info[f"{src}_refine_count"] = int(count)
+        info[f"{src}_refine_improved_count"] = int(imp)
+        info[f"{src}_refine_improve_rate"] = float(rate)
+
+    random_count = int(info.get("random_refine_count", 0))
+    random_rate = float(info.get("random_refine_improve_rate", float("nan")))
+    if random_count < min_count:
+        info["reason"] = "random_count_below_threshold"
+        return info
+    if math.isfinite(random_rate) and random_rate <= poor_rate:
+        info.update({
+            "applied": True,
+            "reason": "random_refine_recently_unproductive",
+            "penalized_sources": "random",
+        })
+    else:
+        info["reason"] = "random_refine_performance_ok"
+    return info
+
+
+def _apply_focus3_source_performance_to_quotas(
+    *,
+    quotas: dict[str, int],
+    source_performance_info: dict[str, object] | None,
+    p_best_local: float,
+    total: int,
+) -> tuple[dict[str, int], dict[str, object]]:
+    info = dict(source_performance_info or {})
+    quotas_out = {str(k): int(v) for k, v in quotas.items()}
+    info.setdefault("quota_random_before", int(quotas_out.get("random", 0)))
+    info.setdefault("quota_random_after", int(quotas_out.get("random", 0)))
+    info.setdefault("quota_shift_to_best_local", 0)
+    info.setdefault("quota_shift_to_topk", 0)
+    if not bool(info.get("applied", False)):
+        return quotas_out, info
+    penalized = {item.strip() for item in str(info.get("penalized_sources", "")).split(",") if item.strip()}
+    if "random" not in penalized:
+        return quotas_out, info
+
+    old_random = int(max(quotas_out.get("random", 0), 0))
+    info["quota_random_before"] = int(old_random)
+    if old_random <= 0:
+        info["reason"] = str(info.get("reason", "")) + "+no_random_quota"
+        return quotas_out, info
+
+    penalty_fraction = float(np.clip(float(info.get("penalty_fraction", 0.75)), 0.0, 1.0))
+    min_fraction = float(np.clip(float(info.get("random_min_quota_fraction", 0.06)), 0.0, 1.0))
+    min_quota = int(math.ceil(max(int(total), 1) * min_fraction))
+    target_random = int(max(min_quota, math.ceil(old_random * (1.0 - penalty_fraction))))
+    target_random = int(min(target_random, old_random))
+    shift = int(max(old_random - target_random, 0))
+    quotas_out["random"] = int(target_random)
+    info["quota_random_after"] = int(target_random)
+    if shift <= 0:
+        info["reason"] = str(info.get("reason", "")) + "+random_at_floor"
+        return quotas_out, info
+
+    if float(p_best_local) > 0.0:
+        to_best = int(math.ceil(shift * 0.65))
+        to_topk = int(max(shift - to_best, 0))
+    else:
+        to_best = 0
+        to_topk = int(shift)
+    quotas_out["best_local"] = int(quotas_out.get("best_local", 0)) + int(to_best)
+    quotas_out["topk"] = int(quotas_out.get("topk", 0)) + int(to_topk)
+    info["quota_shift_to_best_local"] = int(to_best)
+    info["quota_shift_to_topk"] = int(to_topk)
+    return quotas_out, info
 
 
 def _apply_focus3_boundary_score_penalty(
@@ -1491,6 +1698,51 @@ def _centered_bounds_from_width(
     lo = np.maximum(lo, full_lb)
     hi = np.minimum(hi, full_ub)
     return lo, hi
+
+
+def _enforce_min_axis_width_ratio(
+    *,
+    focus_lb: np.ndarray,
+    focus_ub: np.ndarray,
+    full_lb: np.ndarray,
+    full_ub: np.ndarray,
+    min_width_ratio: float,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    ratio = float(np.clip(float(min_width_ratio), 0.0, 1.0))
+    info: dict[str, object] = {
+        "enabled": bool(ratio > 0.0),
+        "applied": False,
+        "min_width_ratio": float(ratio),
+        "axis_expanded_count": 0,
+        "width_ratio_min_before": float("nan"),
+        "width_ratio_min_after": float("nan"),
+    }
+    full_width = np.maximum(np.asarray(full_ub, dtype=float) - np.asarray(full_lb, dtype=float), 1e-12)
+    width = np.maximum(np.asarray(focus_ub, dtype=float) - np.asarray(focus_lb, dtype=float), 1e-12)
+    before = np.clip(width / full_width, 0.0, 1.0)
+    info["width_ratio_min_before"] = float(np.min(before)) if before.size else float("nan")
+    if ratio <= 0.0:
+        info["width_ratio_min_after"] = info["width_ratio_min_before"]
+        return focus_lb, focus_ub, info
+    target_width = np.maximum(width, full_width * ratio)
+    expanded = target_width > width * (1.0 + 1e-12)
+    if not np.any(expanded):
+        info["width_ratio_min_after"] = info["width_ratio_min_before"]
+        return focus_lb, focus_ub, info
+    center = 0.5 * (np.asarray(focus_lb, dtype=float) + np.asarray(focus_ub, dtype=float))
+    lo, hi = _centered_bounds_from_width(
+        center=center,
+        width=target_width,
+        full_lb=full_lb,
+        full_ub=full_ub,
+    )
+    after = np.clip(np.maximum(hi - lo, 1e-12) / full_width, 0.0, 1.0)
+    info.update({
+        "applied": True,
+        "axis_expanded_count": int(np.sum(expanded)),
+        "width_ratio_min_after": float(np.min(after)) if after.size else float("nan"),
+    })
+    return lo, hi, info
 
 
 def _enforce_min_volume_ratio(
@@ -3116,10 +3368,17 @@ def _build_focus2_final_bounds(
         for s in region_states
         if isinstance(s, dict) and str(s.get("region_id", ""))
     }
+    p_dim = int(max(full_lb.shape[0], 1))
+    low_support_enabled = bool(getattr(system, "focus2_final_low_support_policy_enabled", True))
+    low_support_min_points = int(max(int(getattr(system, "focus2_final_low_support_min_archive_points", 8)), 1))
+    low_support_min_per_dim = float(max(float(getattr(system, "focus2_final_low_support_min_per_dim", 4.0)), 0.0))
+    low_support_required = int(max(low_support_min_points, math.ceil(low_support_min_per_dim * float(p_dim))))
+    low_support_union_top_k = int(max(int(getattr(system, "focus2_final_low_support_union_top_k", top_k)), 1))
     rows = selection.get("candidates", []) if isinstance(selection, dict) else []
     ranked_rows = [r for r in rows if isinstance(r, dict) and str(r.get("region_id", "")) in state_by_id]
     ranked_rows.sort(key=lambda r: float(r.get("final_score", float("-inf"))), reverse=True)
 
+    eligible_rows: list[dict[str, object]] = []
     selected_rows: list[dict[str, object]] = []
     if union_enabled and ranked_rows:
         if include_dropped_competitive:
@@ -3140,17 +3399,59 @@ def _build_focus2_final_bounds(
             }
         ]
 
-    states: list[dict[str, object]] = []
-    seen_ids: set[str] = set()
-    for row in selected_rows:
-        rid = str(row.get("region_id", ""))
-        state = state_by_id.get(rid)
-        if not isinstance(state, dict) or rid in seen_ids:
-            continue
-        states.append(state)
-        seen_ids.add(rid)
+    def _states_from_rows(row_items: list[dict[str, object]]) -> list[dict[str, object]]:
+        out: list[dict[str, object]] = []
+        seen_ids: set[str] = set()
+        for row in row_items:
+            rid = str(row.get("region_id", ""))
+            state = state_by_id.get(rid)
+            if not isinstance(state, dict) or rid in seen_ids:
+                continue
+            out.append(state)
+            seen_ids.add(rid)
+        return out
+
+    def _source_archive_count(state: dict[str, object]) -> int:
+        src = state.get("source_region", {}) if isinstance(state.get("source_region", {}), dict) else {}
+        counts = src.get("archive_counts", {}) if isinstance(src.get("archive_counts", {}), dict) else {}
+        try:
+            return int(counts.get("total", 0) or 0)
+        except Exception:
+            return 0
+
+    states = _states_from_rows(selected_rows)
     if not states:
         states = [selected]
+
+    source_counts = [_source_archive_count(s) for s in states if isinstance(s, dict)]
+    primary_source_count = int(_source_archive_count(states[0])) if states else 0
+    source_count_min = int(min(source_counts)) if source_counts else 0
+    source_count_sum = int(sum(source_counts)) if source_counts else 0
+    source_low_support = bool(
+        low_support_enabled
+        and (
+            primary_source_count < low_support_required
+            or source_count_min < max(1, int(math.ceil(0.75 * float(low_support_required))))
+        )
+    )
+    low_support_union_expanded = False
+    if (
+        source_low_support
+        and union_enabled
+        and eligible_rows
+        and low_support_union_top_k > top_k
+        and len(eligible_rows) > len(selected_rows)
+    ):
+        top_k = int(low_support_union_top_k)
+        selected_rows = eligible_rows[: min(top_k, len(eligible_rows))]
+        expanded_states = _states_from_rows(selected_rows)
+        if expanded_states:
+            states = expanded_states
+            low_support_union_expanded = True
+            source_counts = [_source_archive_count(s) for s in states if isinstance(s, dict)]
+            primary_source_count = int(_source_archive_count(states[0])) if states else 0
+            source_count_min = int(min(source_counts)) if source_counts else 0
+            source_count_sum = int(sum(source_counts)) if source_counts else 0
 
     fallback_selected = any(
         str(s.get("status", "")).lower() == "fallback"
@@ -3158,19 +3459,6 @@ def _build_focus2_final_bounds(
         for s in states
         if isinstance(s, dict)
     )
-    if bool(fallback_selected):
-        trim_blend = float(min(
-            trim_blend,
-            np.clip(float(getattr(system, "focus2_final_fallback_archive_trim_blend", 0.0)), 0.0, 1.0),
-        ))
-        expand_ratio = float(max(
-            expand_ratio,
-            float(getattr(system, "focus2_final_fallback_bounds_expand_ratio", 1.35)),
-        ))
-        min_volume = float(max(
-            min_volume,
-            np.clip(float(getattr(system, "focus2_final_fallback_min_volume_ratio", 0.40)), 0.0, 1.0),
-        ))
 
     lb_key = "parent_lb" if use_parent else "bounds_lb"
     ub_key = "parent_ub" if use_parent else "bounds_ub"
@@ -3190,7 +3478,56 @@ def _build_focus2_final_bounds(
     union_lb = final_lb.copy()
     union_ub = final_ub.copy()
 
-    p_dim = int(max(full_lb.shape[0], 1))
+    union_archive_inside_count = 0
+    X_policy = np.asarray(X_archive, dtype=float) if X_archive is not None else np.empty((0, full_lb.shape[0]), dtype=float)
+    if X_policy.ndim == 2 and X_policy.shape[1] == full_lb.shape[0] and X_policy.shape[0] > 0:
+        finite_policy = np.all(np.isfinite(X_policy), axis=1)
+        inside_policy = np.all((X_policy >= union_lb.reshape(1, -1)) & (X_policy <= union_ub.reshape(1, -1)), axis=1)
+        union_archive_inside_count = int(np.sum(finite_policy & inside_policy))
+    archive_inside_low_support = bool(low_support_enabled and union_archive_inside_count < low_support_required)
+    low_support_active = bool(source_low_support or archive_inside_low_support)
+    low_support_info: dict[str, object] = {
+        "enabled": bool(low_support_enabled),
+        "active": bool(low_support_active),
+        "source_low_support": bool(source_low_support),
+        "archive_inside_low_support": bool(archive_inside_low_support),
+        "required_archive_points": int(low_support_required),
+        "min_archive_points": int(low_support_min_points),
+        "min_per_dim": float(low_support_min_per_dim),
+        "primary_source_archive_count": int(primary_source_count),
+        "selected_source_archive_count_min": int(source_count_min),
+        "selected_source_archive_count_sum": int(source_count_sum),
+        "union_archive_inside_count": int(union_archive_inside_count),
+        "union_top_k_expanded": bool(low_support_union_expanded),
+        "low_support_union_top_k": int(low_support_union_top_k),
+    }
+    if bool(fallback_selected):
+        trim_blend = float(min(
+            trim_blend,
+            np.clip(float(getattr(system, "focus2_final_fallback_archive_trim_blend", 0.0)), 0.0, 1.0),
+        ))
+        expand_ratio = float(max(
+            expand_ratio,
+            float(getattr(system, "focus2_final_fallback_bounds_expand_ratio", 1.35)),
+        ))
+        min_volume = float(max(
+            min_volume,
+            np.clip(float(getattr(system, "focus2_final_fallback_min_volume_ratio", 0.40)), 0.0, 1.0),
+        ))
+    if bool(low_support_active):
+        trim_blend = float(min(
+            trim_blend,
+            np.clip(float(getattr(system, "focus2_final_low_support_archive_trim_blend", 0.05)), 0.0, 1.0),
+        ))
+        expand_ratio = float(max(
+            expand_ratio,
+            float(getattr(system, "focus2_final_low_support_bounds_expand_ratio", 1.35)),
+        ))
+        min_volume = float(max(
+            min_volume,
+            np.clip(float(getattr(system, "focus2_final_low_support_min_volume_ratio", 0.40)), 0.0, 1.0),
+        ))
+
     trim_required_points = int(max(trim_min_points, math.ceil(trim_min_per_dim * float(p_dim))))
     trim_keep_min = int(max(trim_keep_min_points, math.ceil(trim_keep_min_per_dim * float(p_dim))))
     trim_info: dict[str, object] = {
@@ -3208,6 +3545,7 @@ def _build_focus2_final_bounds(
         "quantile_high": float(trim_qhi),
         "blend": float(trim_blend),
         "fallback_selected": bool(fallback_selected),
+        "low_support_active": bool(low_support_active),
     }
     if archive_trim_enabled:
         X_arr = np.asarray(X_archive, dtype=float) if X_archive is not None else np.empty((0, full_lb.shape[0]), dtype=float)
@@ -3273,6 +3611,12 @@ def _build_focus2_final_bounds(
                         "volume_after_blend": float(volume_after_blend),
                     })
 
+    axis_coverage_info: dict[str, object] = {
+        "enabled": bool(getattr(system, "focus2_final_axis_coverage_enabled", True)),
+        "applied": False,
+        "reason": "not_applicable",
+        "min_width_ratio": 0.0,
+    }
     if expand_ratio > 1.0:
         center = 0.5 * (final_lb + final_ub)
         width = np.maximum(final_ub - final_lb, 1e-12) * expand_ratio
@@ -3282,6 +3626,31 @@ def _build_focus2_final_bounds(
             full_lb=full_lb,
             full_ub=full_ub,
         )
+
+    if bool(getattr(system, "focus2_final_axis_coverage_enabled", True)) and (bool(fallback_selected) or bool(low_support_active)):
+        low_axis = float(np.clip(
+            float(getattr(system, "focus2_final_axis_coverage_low_support_min_width_ratio", 0.55)),
+            0.0,
+            1.0,
+        ))
+        fallback_axis = float(np.clip(
+            float(getattr(system, "focus2_final_axis_coverage_fallback_min_width_ratio", 0.75)),
+            0.0,
+            1.0,
+        ))
+        axis_ratio = float(max(low_axis if bool(low_support_active) else 0.0, fallback_axis if bool(fallback_selected) else 0.0))
+        final_lb, final_ub, axis_coverage_info = _enforce_min_axis_width_ratio(
+            focus_lb=final_lb,
+            focus_ub=final_ub,
+            full_lb=full_lb,
+            full_ub=full_ub,
+            min_width_ratio=axis_ratio,
+        )
+        axis_coverage_info["reason"] = "fallback_or_low_support"
+        axis_coverage_info["fallback_selected"] = bool(fallback_selected)
+        axis_coverage_info["low_support_active"] = bool(low_support_active)
+    elif not bool(getattr(system, "focus2_final_axis_coverage_enabled", True)):
+        axis_coverage_info["reason"] = "disabled"
 
     final_lb, final_ub, final_volume = _enforce_min_volume_ratio(
         focus_lb=final_lb,
@@ -3309,6 +3678,8 @@ def _build_focus2_final_bounds(
         "min_volume_ratio": float(min_volume),
         "max_volume_ratio": float(max_volume),
         "fallback_selected": bool(fallback_selected),
+        "low_support": low_support_info,
+        "axis_coverage": axis_coverage_info,
         "selected_region_ids": [str(s.get("region_id", "")) for s in states],
     }
     selection["selected_region_ids"] = [str(s.get("region_id", "")) for s in states]
@@ -4287,6 +4658,7 @@ def _build_focus3_plan_refine_starts(
     post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
     post_penalty_lambda: float,
     has_constraints: bool,
+    source_performance_info: dict[str, object] | None = None,
 ) -> tuple[np.ndarray, dict[str, int], dict[str, int], dict[str, object]]:
     n_pool = int(max(plan_pool_per_source, 1))
     n_refine = int(max(refine_starts, 1))
@@ -4413,6 +4785,13 @@ def _build_focus3_plan_refine_starts(
             else:
                 quotas["topk"] = int(quotas.get("topk", 0)) + random_quota
 
+    quotas, source_performance_info = _apply_focus3_source_performance_to_quotas(
+        quotas=quotas,
+        source_performance_info=source_performance_info,
+        p_best_local=float(p_best_local),
+        total=int(n_refine),
+    )
+
     for source in source_order:
         pool = candidate_parts.get(source, np.empty((0, lb.shape[0]), dtype=float))
         scores = candidate_scores.get(source, np.empty((0,), dtype=float))
@@ -4451,6 +4830,7 @@ def _build_focus3_plan_refine_starts(
         "random_cover": dict(random_cover_info),
         "boundary_gate": dict(boundary_gate_info),
         "random_refine_gate": dict(random_refine_gate_info),
+        "source_performance": dict(source_performance_info or {}),
         "boundary_score_penalty": dict(boundary_score_penalty_info),
         "best_plan_source": min(
             [
@@ -4497,6 +4877,7 @@ def _build_focus3_plan_discrete_candidate(
     post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
     post_penalty_lambda: float,
     has_constraints: bool,
+    recover_info: dict[str, object] | None = None,
 ) -> tuple[np.ndarray | None, dict[str, int], dict[str, int], dict[str, object]]:
     n_pool = int(max(plan_pool_per_source, 1))
     pool_counts: dict[str, int] = {}
@@ -4568,6 +4949,14 @@ def _build_focus3_plan_discrete_candidate(
     )
     if bool(boundary_gate_info.get("applied", False)):
         best_rows = [row for row in best_rows if str(row[0]) != "boundary"]
+    random_discrete_gate_info = _focus3_recover_random_discrete_gate(
+        system=system,
+        best_scores=best_scores,
+        has_constraints=bool(has_constraints),
+        recover_info=recover_info,
+    )
+    if bool(random_discrete_gate_info.get("applied", False)):
+        best_rows = [row for row in best_rows if str(row[0]) != "random"]
 
     if not best_rows:
         return None, pool_counts, selected_counts, {
@@ -4577,6 +4966,7 @@ def _build_focus3_plan_discrete_candidate(
             "selected_labels": [],
             "best_plan_source": "",
             "boundary_gate": dict(boundary_gate_info),
+            "random_discrete_gate": dict(random_discrete_gate_info),
             "boundary_score_penalty": dict(boundary_score_penalty_info),
             "random_cover": {
                 "enabled": False,
@@ -4610,6 +5000,7 @@ def _build_focus3_plan_discrete_candidate(
         "best_plan_source": str(source),
         "best_plan_score": float(score_best),
         "boundary_gate": dict(boundary_gate_info),
+        "random_discrete_gate": dict(random_discrete_gate_info),
         "boundary_score_penalty": dict(boundary_score_penalty_info),
         "random_cover": random_cover_info,
     }
@@ -5462,7 +5853,9 @@ def run_bo_engine(
         }
         focus3_boundary_gate_info: dict[str, object] = {}
         focus3_random_refine_gate_info: dict[str, object] = {}
+        focus3_random_discrete_gate_info: dict[str, object] = {}
         focus3_boundary_score_penalty_info: dict[str, object] = {}
+        focus3_source_perf_info: dict[str, object] = {}
         focus3_recover_info: dict[str, object] = {}
         focus3_source_cap_info: dict[str, object] = {}
         focus3_best_local_info: dict[str, object] = {}
@@ -6166,6 +6559,12 @@ def run_bo_engine(
                         and bool(focus3_refine_cooldown_info.get("active", False))
                     ):
                         refine_this_iter = False
+                    focus3_source_perf_info = _resolve_focus3_source_performance_policy(
+                        system=system,
+                        history_rows=history_rows,
+                        has_constraints=bool(constraint_defs),
+                        recovery_active=bool(focus3_recover_info.get("active", False)),
+                    )
                     t0 = _timer_start()
                     if refine_this_iter:
                         refine_starts, pool_counts, selected_counts, focus3_plan_diag = _build_focus3_plan_refine_starts(
@@ -6199,6 +6598,7 @@ def run_bo_engine(
                             post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                             post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
                             has_constraints=bool(constraint_defs),
+                            source_performance_info=focus3_source_perf_info,
                         )
                         focus3_plan_mode = "refine"
                     else:
@@ -6229,6 +6629,7 @@ def run_bo_engine(
                             post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                             post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
                             has_constraints=bool(constraint_defs),
+                            recover_info=focus3_recover_info,
                         )
                         refine_starts = x_discrete.reshape(1, -1) if x_discrete is not None else np.empty((0, p_dim), dtype=float)
                         focus3_plan_mode = "discrete"
@@ -6255,6 +6656,12 @@ def run_bo_engine(
                     random_refine_gate = focus3_plan_diag.get("random_refine_gate", {})
                     if isinstance(random_refine_gate, dict):
                         focus3_random_refine_gate_info = dict(random_refine_gate)
+                    random_discrete_gate = focus3_plan_diag.get("random_discrete_gate", {})
+                    if isinstance(random_discrete_gate, dict):
+                        focus3_random_discrete_gate_info = dict(random_discrete_gate)
+                    source_perf = focus3_plan_diag.get("source_performance", {})
+                    if isinstance(source_perf, dict) and source_perf:
+                        focus3_source_perf_info = dict(source_perf)
                     boundary_score_penalty = focus3_plan_diag.get("boundary_score_penalty", {})
                     if isinstance(boundary_score_penalty, dict):
                         focus3_boundary_score_penalty_info = dict(boundary_score_penalty)
@@ -6794,6 +7201,32 @@ def run_bo_engine(
             "focus3_random_refine_gate_margin": float(focus3_random_refine_gate_info.get("margin", float("nan"))) if focus3_random_refine_gate_info else float("nan"),
             "focus3_random_refine_gate_random_score": float(focus3_random_refine_gate_info.get("random_score", float("nan"))) if focus3_random_refine_gate_info else float("nan"),
             "focus3_random_refine_gate_structured_best": float(focus3_random_refine_gate_info.get("structured_best", float("nan"))) if focus3_random_refine_gate_info else float("nan"),
+            "focus3_random_discrete_gate_enabled": bool(focus3_random_discrete_gate_info.get("enabled", False)) if focus3_random_discrete_gate_info else False,
+            "focus3_random_discrete_gate_applied": bool(focus3_random_discrete_gate_info.get("applied", False)) if focus3_random_discrete_gate_info else False,
+            "focus3_random_discrete_gate_allowed": bool(focus3_random_discrete_gate_info.get("allowed", True)) if focus3_random_discrete_gate_info else True,
+            "focus3_random_discrete_gate_reason": str(focus3_random_discrete_gate_info.get("reason", "")) if focus3_random_discrete_gate_info else "",
+            "focus3_random_discrete_gate_margin": float(focus3_random_discrete_gate_info.get("margin", float("nan"))) if focus3_random_discrete_gate_info else float("nan"),
+            "focus3_random_discrete_gate_random_score": float(focus3_random_discrete_gate_info.get("random_score", float("nan"))) if focus3_random_discrete_gate_info else float("nan"),
+            "focus3_random_discrete_gate_structured_best": float(focus3_random_discrete_gate_info.get("structured_best", float("nan"))) if focus3_random_discrete_gate_info else float("nan"),
+            "focus3_random_discrete_gate_recovery_active": bool(focus3_random_discrete_gate_info.get("recovery_active", False)) if focus3_random_discrete_gate_info else False,
+            "focus3_source_perf_enabled": bool(focus3_source_perf_info.get("enabled", False)) if focus3_source_perf_info else False,
+            "focus3_source_perf_applied": bool(focus3_source_perf_info.get("applied", False)) if focus3_source_perf_info else False,
+            "focus3_source_perf_reason": str(focus3_source_perf_info.get("reason", "")) if focus3_source_perf_info else "",
+            "focus3_source_perf_recover_only": bool(focus3_source_perf_info.get("recover_only", False)) if focus3_source_perf_info else False,
+            "focus3_source_perf_recovery_active": bool(focus3_source_perf_info.get("recovery_active", False)) if focus3_source_perf_info else False,
+            "focus3_source_perf_window": int(focus3_source_perf_info.get("window", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_penalized_sources": str(focus3_source_perf_info.get("penalized_sources", "")) if focus3_source_perf_info else "",
+            "focus3_source_perf_random_count": int(focus3_source_perf_info.get("random_refine_count", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_random_improved_count": int(focus3_source_perf_info.get("random_refine_improved_count", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_random_improve_rate": float(focus3_source_perf_info.get("random_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
+            "focus3_source_perf_best_local_count": int(focus3_source_perf_info.get("best_local_refine_count", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_best_local_improve_rate": float(focus3_source_perf_info.get("best_local_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
+            "focus3_source_perf_topk_count": int(focus3_source_perf_info.get("topk_refine_count", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_topk_improve_rate": float(focus3_source_perf_info.get("topk_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
+            "focus3_source_perf_quota_random_before": int(focus3_source_perf_info.get("quota_random_before", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_quota_random_after": int(focus3_source_perf_info.get("quota_random_after", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_quota_shift_to_best_local": int(focus3_source_perf_info.get("quota_shift_to_best_local", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_quota_shift_to_topk": int(focus3_source_perf_info.get("quota_shift_to_topk", 0)) if focus3_source_perf_info else 0,
             "focus3_boundary_score_penalty_enabled": bool(focus3_boundary_score_penalty_info.get("enabled", False)) if focus3_boundary_score_penalty_info else False,
             "focus3_boundary_score_penalty_applied": bool(focus3_boundary_score_penalty_info.get("applied", False)) if focus3_boundary_score_penalty_info else False,
             "focus3_boundary_score_penalty_reason": str(focus3_boundary_score_penalty_info.get("reason", "")) if focus3_boundary_score_penalty_info else "",
@@ -6841,6 +7274,8 @@ def run_bo_engine(
             "focus3_recover_best_local_applied": bool(focus3_recover_best_local_info.get("applied", False)) if focus3_recover_best_local_info else False,
             "focus3_recover_best_local_reason": str(focus3_recover_best_local_info.get("reason", "")) if focus3_recover_best_local_info else "",
             "focus3_recover_best_local_bonus": float(focus3_recover_best_local_info.get("bonus", 0.0)) if focus3_recover_best_local_info else 0.0,
+            "focus3_recover_best_local_late_active": bool(focus3_recover_best_local_info.get("late_active", False)) if focus3_recover_best_local_info else False,
+            "focus3_recover_best_local_max": float(focus3_recover_best_local_info.get("max_best_local", float("nan"))) if focus3_recover_best_local_info else float("nan"),
             "focus3_best_local_sigma_enabled": bool(focus3_best_local_sigma_info.get("enabled", False)) if focus3_best_local_sigma_info else False,
             "focus3_best_local_sigma_base": float(focus3_best_local_sigma_info.get("base", float("nan"))) if focus3_best_local_sigma_info else float("nan"),
             "focus3_best_local_sigma_effective": float(focus3_best_local_sigma_info.get("effective", float("nan"))) if focus3_best_local_sigma_info else float("nan"),

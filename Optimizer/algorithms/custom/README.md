@@ -6,6 +6,11 @@ while the Python process is alive, call
 `discover_custom_optimizer_algorithms(force=True)` before listing/selecting
 algorithms again.
 
+Bad custom files are skipped and reported through
+`describe_optimizer_algorithms()["errors"]` and
+`list_optimizer_algorithm_errors()`. A broken upload must not prevent built-in
+`focus_bo` or other valid custom algorithms from running.
+
 Each `.py` file must define:
 
 ```python
@@ -53,6 +58,8 @@ Contract:
 - Return `runtime.build_result(algorithm_id=ALGORITHM_ID)`.
 - Read custom knobs from `runtime.algorithm_params` or
   `config.system.algorithm_params`.
+- Do not add FocusBO-specific fields to the common runtime contract. Algorithm
+  parameters belong under `optimizer.system.algorithm_params`.
 
 Runtime owns:
 
@@ -63,6 +70,14 @@ Runtime owns:
 - `goal` / early stop
 - standard Optimizer outputs (`opt_results.csv`, `best_point.json`,
   `metadata.json`)
+- algorithm-neutral meta outputs (`optimizer_algorithm.json`,
+  `optimizer_system_config.json`)
+
+Custom/runtime algorithms do not emit FocusBO-only artifacts:
+
+- `focus_regions.json`
+- `focus_bounds.json`
+- Focus2/Focus3 debug plots
 
 Useful Runtime API:
 

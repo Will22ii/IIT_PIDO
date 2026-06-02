@@ -832,32 +832,40 @@ OPT/artifacts/public/best_point.json
 meta:
 OPT/artifacts/meta/selected_features.csv
 OPT/artifacts/meta/optimizer_inputs.json
-OPT/artifacts/meta/focus_regions.json
-OPT/artifacts/meta/focus_bounds.json
+OPT/artifacts/meta/optimizer_algorithm.json
+OPT/artifacts/meta/optimizer_system_config.json
+OPT/artifacts/meta/focus_regions.json   # focus_bo only
+OPT/artifacts/meta/focus_bounds.json    # focus_bo only
 
 debug:
 OPT/artifacts/debug/optimizer_history_full.csv
-OPT/artifacts/debug/focus2/*
-OPT/artifacts/debug/focus3/*
+OPT/artifacts/debug/focus2/*            # focus_bo only
+OPT/artifacts/debug/focus3/*            # focus_bo only
 ```
 
 Public optimizer CSV는 compact하고 downstream/user-facing이어야 한다.
 
-`best_point.json`은 Focus3까지 수렴 최적화를 시도했는지와, bounds 없이 데이터 보강만 수행했는지를 구분한다.
+`best_point.json`은 알고리즘 종류와 결과 상태를 함께 기록한다. `focus_bo`는 Focus3까지 수렴 최적화를 시도했는지와, bounds 없이 데이터 보강만 수행했는지를 구분한다. Runtime/custom 알고리즘은 Focus3를 갖지 않으므로, 평가를 1회 이상 수행하면 Focus3 여부와 무관하게 `result_status=optimized`로 기록한다.
 
 ```json
 {
   "result_status": "optimized | exploratory_best",
   "converged": true,
   "final_focus": "focus3",
+  "algorithm_id": "focus_bo",
+  "algorithm_engine": "focus_bo",
+  "algorithm_kind": "focus",
   "selected_bounds_available": true,
   "generated_bounds_available": false,
   "optimization_bounds_available": true,
-  "focus3_executed": true
+  "focus3_executed": true,
+  "optimizer_status_basis": "focus3_and_bounds"
 }
 ```
 
 `optimization_bounds_available=false`이거나 Focus3가 실행되지 않은 경우 `result_status=exploratory_best`다. 이때 best point는 최적화 완료 해가 아니라, 입력 archive와 이번 Optimizer 평가점 중 현재까지 관측된 best다. `selected_bounds_available=false`라도 Focus2가 generated bounds를 만들고 Focus3가 실행되면 `generated_bounds_available=true`, `result_status=optimized`가 될 수 있다.
+
+위 Focus3 기준은 `focus_bo`에만 적용된다. Custom 알고리즘은 `optimizer_algorithm.json`에 algorithm summary와 schema 정보를 남기고, `focus_regions.json`/`focus_bounds.json` 및 Focus2/Focus3 debug plot은 생성하지 않는다.
 
 `opt_results.csv`는 모든 focus가 같은 schema를 쓴다. 이 파일은 실제 Optimizer가 추가로 CAE 평가한 점만 기록하며, DOE seed/archive row는 포함하지 않는다.
 
@@ -878,7 +886,11 @@ Focus별 진단값(`focus1_tau`, pool count, Focus3 source count, GP train count
 
 `selected_features.csv`와 `optimizer_inputs.json`은 Optimizer input resolve 결과를 기록하므로 public이 아니라 meta다. Feature list와 initial bounds는 Focus0/1/3이 각각 정하는 값이 아니라 Optimizer 시작 시점에 확정된 input layer 산출물이다.
 
-`focus_regions.json`과 `focus_bounds.json`도 사용자 최종 결과가 아니라 Focus2 내부 region manager와 generated bounds audit 정보다. Backend가 필요하면 meta에서 선택적으로 읽어 UI에 노출할 수 있지만, 기본 public artifact는 아니다.
+`optimizer_algorithm.json`은 모든 알고리즘에 대해 생성되는 algorithm-neutral meta artifact다. `optimizer_system_config.json`도 모든 알고리즘에 대해 생성되며, 기존 전체 dataclass snapshot과 별도로 system 설정을 `common`, selected `algorithm`, `focus_bo`, `compatibility` 영역으로 나눈 audit artifact다. 이 파일은 custom/runtime 알고리즘 이관 시 어떤 설정이 공통 계약이고 어떤 설정이 FocusBO 전용인지 확인하는 기준이다.
+
+구현상 `OptimizerSystemConfig`는 아직 flat dataclass로 유지한다. 기존 pipeline JSON override와 성능 실험 config가 field 이름에 의존하므로, 물리 분리는 성능 안정화 이후 별도 compatibility window에서만 진행한다. 현재 이관 경계는 `optimizer_system_config_view()`와 `split_optimizer_system_config()`가 제공하는 view를 기준으로 판단한다.
+
+`focus_regions.json`과 `focus_bounds.json`은 `focus_bo` 전용이며, 사용자 최종 결과가 아니라 Focus2 내부 region manager와 generated bounds audit 정보다. Backend가 필요하면 meta에서 선택적으로 읽어 UI에 노출할 수 있지만, 기본 public artifact는 아니다.
 
 ## Debug Outputs
 
