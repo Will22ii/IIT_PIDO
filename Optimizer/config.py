@@ -87,6 +87,8 @@ class OptimizerSystemConfig:
     focus_budget_selected_bounds_focus3_fraction: float = 0.70
     focus_budget_generated_bounds_focus3_fraction: float = 0.50
     focus_budget_low_np_focus3_fraction: float = 0.35
+    # Used only when focus2 is explicitly included with external selected bounds.
+    # auto trusts external bounds and goes directly to Focus3 after any needed archive fill.
     focus_budget_focus2_fraction_selected_bounds: float = 0.15
     focus_budget_focus2_fraction_generated_bounds: float = 0.25
     focus_budget_focus1_fraction_low_archive: float = 0.45
@@ -328,11 +330,21 @@ class OptimizerSystemConfig:
     focus3_no_constraint_recover_best_local_mild_bonus: float = 0.10
     focus3_no_constraint_recover_best_local_strong_bonus: float = 0.22
     focus3_no_constraint_recover_best_local_max: float = 0.55
-    focus3_no_constraint_recover_best_local_late_no_improve: int = 300
-    focus3_no_constraint_recover_best_local_late_bonus: float = 0.12
-    focus3_no_constraint_recover_best_local_late_max: float = 0.70
+    focus3_no_constraint_recover_best_local_late_no_improve: int = 450
+    focus3_no_constraint_recover_best_local_late_bonus: float = 0.06
+    focus3_no_constraint_recover_best_local_late_max: float = 0.62
     focus3_recover_random_discrete_gate_enabled: bool = True
     focus3_recover_random_discrete_gate_margin_ratio: float = 0.06
+    focus3_recover_random_discrete_gate_min_no_improve: int = 180
+    # Recovery 중에는 best 주변의 축/대각 probe 후보를 별도 source로 넣어
+    # 단순 best-local gaussian이 놓치는 좁은 valley 방향을 보완한다.
+    focus3_local_probe_enabled: bool = True
+    focus3_local_probe_min_no_improve: int = 120
+    focus3_local_probe_prob: float = 0.12
+    focus3_local_probe_max_prob: float = 0.18
+    focus3_local_probe_step_ratio: float = 0.035
+    focus3_local_probe_min_step_ratio: float = 0.006
+    focus3_local_probe_scales: str = "1.0,0.5,0.25,1.75"
 
     # ------------------------------------------------------------------
     # Focus2: region manager / TuRBO-lite

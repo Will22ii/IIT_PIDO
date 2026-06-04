@@ -288,14 +288,8 @@ def build_focus_pipeline_plan(
             if bool(getattr(system, "focus1_enabled", True)) and int(initial_objective_count) < focus1_target:
                 stages_list.append("focus1")
                 reasons["focus1"] = "initial objective archive below focus1 target"
-            focus2_min_total = int(max(int(getattr(system, "focus2_min_total_budget", 10)), 0))
-            if bool(getattr(system, "focus2_enabled", True)) and n_total >= focus2_min_total:
-                stages_list.append("focus2")
-                reasons["focus2"] = "selected bounds available; validate candidate regions before focus3"
-            elif bool(getattr(system, "focus2_enabled", True)):
-                reasons["focus2_skipped"] = f"n_samples below focus2_min_total_budget={focus2_min_total}"
             stages_list.append("focus3")
-            reasons["focus3"] = "selected bounds available"
+            reasons["focus3"] = "external selected bounds available; trust bounds and run final Focus3"
             stages = tuple(dict.fromkeys(stages_list))
         else:
             stages_list = []

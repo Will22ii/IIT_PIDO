@@ -45,6 +45,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
         optimizer_goal=1.2,
         n_samples=450,
+        optimizer_n_samples=1050,
         repeats=10,
     ),
     "cantilever_beam": ProblemCase(
@@ -52,6 +53,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         optimizer_goal=114.66,
         n_samples=90,
+        optimizer_n_samples=60,
         repeats=25,
     ),
     "goldstein_price": ProblemCase(
@@ -59,6 +61,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         known_optimum={"x1": 0.0, "x2": -1.0},
         optimizer_goal=3.6,
         n_samples=150,
+        optimizer_n_samples=350,
         repeats=50,
     ),
     "six_hump_camel": ProblemCase(
@@ -69,6 +72,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         ],
         optimizer_goal=-0.86,
         n_samples=50,
+        optimizer_n_samples=50,
         repeats=25,
     ),
     "rosenbrock_nodummy": ProblemCase(
@@ -83,7 +87,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="cantilever_beam_nodummy",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         optimizer_goal=114.66,
-        n_samples=45,
+        n_samples=90,
         optimizer_n_samples=150,
         repeats=10,
     ),
@@ -102,7 +106,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": -0.0898, "x2": 0.7126},
         ],
         optimizer_goal=-0.86,
-        n_samples=15,
+        n_samples=50,
         optimizer_n_samples=50,
         repeats=10,
     ),
@@ -131,9 +135,9 @@ BATCH_TASKS: dict[str, bool] = {
     "optimizer": True,
 }
 BATCH_DEFAULT_OPTIMIZER_N_SAMPLES = 80
-BATCH_USE_ADDITIONAL = True
+BATCH_USE_ADDITIONAL = False
 BATCH_USE_HPO = False
-BATCH_USE_PRIMARY_SELECTION = True
+BATCH_USE_PRIMARY_SELECTION = False
 BATCH_USE_TIMESTAMP = True
 BATCH_DEBUG_LEVEL = "on"
 BATCH_CONTINUE_ON_ERROR = False
@@ -672,6 +676,7 @@ def _save_explorer_stats_csv(
                 "volume_ratio",
                 "volume_ratio_pct",
                 "volume_cap_pass",
+                "explorer_bounds_pass",
                 "joint_pass",
                 "fail_type",
                 "explorer_metadata",
@@ -797,13 +802,16 @@ def _save_explorer_stats_csv(
     # --- derive DSE metrics per row ---
     if not detail_df.empty:
         _opt = detail_df["survivor_optimum_included"].astype(bool)
+        _feature = detail_df["modeler_all_real_only"].astype(bool)
         _vr = pd.to_numeric(detail_df["volume_ratio"], errors="coerce").fillna(1.0)
         detail_df["volume_cap_pass"] = (_vr <= 0.25).astype(int)
-        detail_df["joint_pass"] = (_opt & (_vr <= 0.25)).astype(int)
+        detail_df["explorer_bounds_pass"] = (_opt & (_vr <= 0.25)).astype(int)
+        detail_df["joint_pass"] = (_feature & _opt & (_vr <= 0.25)).astype(int)
         detail_df["fail_type"] = "both_fail"
-        detail_df.loc[_opt & (_vr <= 0.25), "fail_type"] = "pass"
-        detail_df.loc[~_opt & (_vr <= 0.25), "fail_type"] = "over_shrink_fail"
-        detail_df.loc[_opt & (_vr > 0.25), "fail_type"] = "over_wide_fail"
+        detail_df.loc[~_feature, "fail_type"] = "feature_fail"
+        detail_df.loc[_feature & _opt & (_vr <= 0.25), "fail_type"] = "pass"
+        detail_df.loc[_feature & ~_opt & (_vr <= 0.25), "fail_type"] = "over_shrink_fail"
+        detail_df.loc[_feature & _opt & (_vr > 0.25), "fail_type"] = "over_wide_fail"
 
     detail_path = os.path.join(stats_root, f"explorer_strategy_try_stats_{ts}.csv")
     detail_df.to_csv(detail_path, index=False, encoding="utf-8-sig")
@@ -812,6 +820,8 @@ def _save_explorer_stats_csv(
     if not summary_df.empty:
         summary_df["optimum_included_num"] = summary_df["survivor_optimum_included"].astype(bool).astype(int)
         summary_df["modeler_all_real_only_num"] = summary_df["modeler_all_real_only"].astype(bool).astype(int)
+        summary_df["explorer_bounds_pass_num"] = summary_df["explorer_bounds_pass"].astype(bool).astype(int)
+        summary_df["feature_fail"] = (summary_df["fail_type"] == "feature_fail").astype(int)
         summary_df["over_shrink_fail"] = (summary_df["fail_type"] == "over_shrink_fail").astype(int)
         summary_df["over_wide_fail"] = (summary_df["fail_type"] == "over_wide_fail").astype(int)
         summary_df["both_fail"] = (summary_df["fail_type"] == "both_fail").astype(int)
@@ -825,7 +835,9 @@ def _save_explorer_stats_csv(
                 modeler_real_coverage_pct_mean=("modeler_real_coverage_pct", "mean"),
                 volume_ratio_pct_mean=("volume_ratio_pct", "mean"),
                 joint_pass_pct=("joint_pass", "mean"),
+                explorer_bounds_pass_pct=("explorer_bounds_pass_num", "mean"),
                 volume_cap_pass_pct=("volume_cap_pass", "mean"),
+                feature_fail_pct=("feature_fail", "mean"),
                 over_shrink_fail_pct=("over_shrink_fail", "mean"),
                 over_wide_fail_pct=("over_wide_fail", "mean"),
                 both_fail_pct=("both_fail", "mean"),
@@ -834,7 +846,9 @@ def _save_explorer_stats_csv(
         grouped["survivor_optimum_included_pct"] = grouped["survivor_optimum_included_pct"] * 100.0
         grouped["modeler_all_real_only_pct"] = grouped["modeler_all_real_only_pct"] * 100.0
         grouped["joint_pass_pct"] = grouped["joint_pass_pct"] * 100.0
+        grouped["explorer_bounds_pass_pct"] = grouped["explorer_bounds_pass_pct"] * 100.0
         grouped["volume_cap_pass_pct"] = grouped["volume_cap_pass_pct"] * 100.0
+        grouped["feature_fail_pct"] = grouped["feature_fail_pct"] * 100.0
         grouped["over_shrink_fail_pct"] = grouped["over_shrink_fail_pct"] * 100.0
         grouped["over_wide_fail_pct"] = grouped["over_wide_fail_pct"] * 100.0
         grouped["both_fail_pct"] = grouped["both_fail_pct"] * 100.0
@@ -844,11 +858,13 @@ def _save_explorer_stats_csv(
                 "problem",
                 "tries",
                 "joint_pass_pct",
+                "explorer_bounds_pass_pct",
                 "survivor_optimum_included_pct",
                 "modeler_all_real_only_pct",
                 "modeler_real_coverage_pct_mean",
                 "volume_ratio_pct_mean",
                 "volume_cap_pass_pct",
+                "feature_fail_pct",
                 "over_shrink_fail_pct",
                 "over_wide_fail_pct",
                 "both_fail_pct",
@@ -861,11 +877,13 @@ def _save_explorer_stats_csv(
                 "problem",
                 "tries",
                 "joint_pass_pct",
+                "explorer_bounds_pass_pct",
                 "survivor_optimum_included_pct",
                 "modeler_all_real_only_pct",
                 "modeler_real_coverage_pct_mean",
                 "volume_ratio_pct_mean",
                 "volume_cap_pass_pct",
+                "feature_fail_pct",
                 "over_shrink_fail_pct",
                 "over_wide_fail_pct",
                 "both_fail_pct",
@@ -944,6 +962,158 @@ def _save_fi_stats_csv(
         )
 
     summary_path = os.path.join(stats_root, f"fi_primary_problem_summary_{ts}.csv")
+    grouped.to_csv(summary_path, index=False, encoding="utf-8-sig")
+    return detail_path, summary_path
+
+
+def _optimizer_goal_hit(*, best_objective: float, goal: float | None, objective_sense: str) -> bool:
+    if goal is None:
+        return False
+    try:
+        best = float(best_objective)
+        target = float(goal)
+    except Exception:
+        return False
+    if not pd.notna(best) or not pd.notna(target):
+        return False
+    sense = str(objective_sense or "min").strip().lower()
+    if sense == "max":
+        return bool(best >= target)
+    return bool(best <= target)
+
+
+def _save_optimizer_stats_csv(
+    *,
+    detail_rows: list[dict[str, Any]],
+) -> tuple[str, str]:
+    stats_root = os.path.join(PROJECT_ROOT, "result", "explorer_strategy_stats")
+    os.makedirs(stats_root, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    detail_columns = [
+        "run",
+        "repeat",
+        "problem",
+        "seed",
+        "strategy",
+        "executed_strategy",
+        "objective_sense",
+        "optimizer_goal",
+        "optimizer_best_objective",
+        "optimizer_best_objective_raw",
+        "optimizer_goal_hit",
+        "optimizer_n_iterations",
+        "modeler_all_real_only",
+        "modeler_selected_features",
+        "selected_feature_count",
+        "modeler_selected_real_count",
+        "modeler_selected_dummy_count",
+        "modeler_real_coverage_pct",
+        "survivor_optimum_included",
+        "volume_ratio",
+        "volume_ratio_pct",
+        "volume_cap_pass",
+        "explorer_bounds_pass",
+        "explorer_joint_pass",
+        "optimizer_final_pass",
+        "optimizer_csv",
+        "optimizer_metadata",
+        "explorer_metadata",
+        "selected_bounds_path",
+        "run_root",
+    ]
+    detail_df = pd.DataFrame(detail_rows)
+    if detail_df.empty:
+        detail_df = pd.DataFrame(columns=detail_columns)
+    else:
+        for col in detail_columns:
+            if col not in detail_df.columns:
+                detail_df[col] = None
+        detail_df = detail_df[detail_columns]
+
+    detail_path = os.path.join(stats_root, f"optimizer_try_stats_{ts}.csv")
+    detail_df.to_csv(detail_path, index=False, encoding="utf-8-sig")
+
+    summary_df = detail_df.copy()
+    if not summary_df.empty:
+        for col in [
+            "optimizer_goal_hit",
+            "modeler_all_real_only",
+            "survivor_optimum_included",
+            "volume_cap_pass",
+            "explorer_bounds_pass",
+            "explorer_joint_pass",
+            "optimizer_final_pass",
+        ]:
+            summary_df[col + "_num"] = summary_df[col].astype(bool).astype(int)
+
+        grouped = (
+            summary_df
+            .groupby(["strategy", "problem"], as_index=False)
+            .agg(
+                tries=("strategy", "count"),
+                optimizer_final_pass_pct=("optimizer_final_pass_num", "mean"),
+                optimizer_goal_hit_pct=("optimizer_goal_hit_num", "mean"),
+                explorer_joint_pass_pct=("explorer_joint_pass_num", "mean"),
+                explorer_bounds_pass_pct=("explorer_bounds_pass_num", "mean"),
+                modeler_all_real_only_pct=("modeler_all_real_only_num", "mean"),
+                survivor_optimum_included_pct=("survivor_optimum_included_num", "mean"),
+                volume_cap_pass_pct=("volume_cap_pass_num", "mean"),
+                optimizer_best_objective_mean=("optimizer_best_objective", "mean"),
+                optimizer_best_objective_median=("optimizer_best_objective", "median"),
+                optimizer_n_iterations_mean=("optimizer_n_iterations", "mean"),
+            )
+        )
+        overall = (
+            summary_df
+            .groupby(["strategy"], as_index=False)
+            .agg(
+                tries=("strategy", "count"),
+                optimizer_final_pass_pct=("optimizer_final_pass_num", "mean"),
+                optimizer_goal_hit_pct=("optimizer_goal_hit_num", "mean"),
+                explorer_joint_pass_pct=("explorer_joint_pass_num", "mean"),
+                explorer_bounds_pass_pct=("explorer_bounds_pass_num", "mean"),
+                modeler_all_real_only_pct=("modeler_all_real_only_num", "mean"),
+                survivor_optimum_included_pct=("survivor_optimum_included_num", "mean"),
+                volume_cap_pass_pct=("volume_cap_pass_num", "mean"),
+                optimizer_best_objective_mean=("optimizer_best_objective", "mean"),
+                optimizer_best_objective_median=("optimizer_best_objective", "median"),
+                optimizer_n_iterations_mean=("optimizer_n_iterations", "mean"),
+            )
+        )
+        overall.insert(1, "problem", "__overall__")
+        grouped = pd.concat([grouped, overall], ignore_index=True)
+        pct_cols = [
+            "optimizer_final_pass_pct",
+            "optimizer_goal_hit_pct",
+            "explorer_joint_pass_pct",
+            "explorer_bounds_pass_pct",
+            "modeler_all_real_only_pct",
+            "survivor_optimum_included_pct",
+            "volume_cap_pass_pct",
+        ]
+        for col in pct_cols:
+            grouped[col] = grouped[col] * 100.0
+    else:
+        grouped = pd.DataFrame(
+            columns=[
+                "strategy",
+                "problem",
+                "tries",
+                "optimizer_final_pass_pct",
+                "optimizer_goal_hit_pct",
+                "explorer_joint_pass_pct",
+                "explorer_bounds_pass_pct",
+                "modeler_all_real_only_pct",
+                "survivor_optimum_included_pct",
+                "volume_cap_pass_pct",
+                "optimizer_best_objective_mean",
+                "optimizer_best_objective_median",
+                "optimizer_n_iterations_mean",
+            ]
+        )
+
+    summary_path = os.path.join(stats_root, f"optimizer_problem_summary_{ts}.csv")
     grouped.to_csv(summary_path, index=False, encoding="utf-8-sig")
     return detail_path, summary_path
 
@@ -1051,6 +1221,7 @@ def main() -> None:
     optimizer_failures: list[dict[str, Any]] = []
     explorer_detail_rows: list[dict[str, Any]] = []
     fi_detail_rows: list[dict[str, Any]] = []
+    optimizer_detail_rows: list[dict[str, Any]] = []
 
     print("===================================")
     print(" Batch Pipeline 실행 시작")
@@ -1209,6 +1380,10 @@ def main() -> None:
                                 f"(hits={hit_count}/{total_count})"
                             )
 
+                            volume_cap_pass = bool(vol_ratio_float is not None and vol_ratio_float <= 0.25)
+                            explorer_bounds_pass = bool(included and volume_cap_pass)
+                            explorer_joint_pass = bool(modeler_all_real_only and explorer_bounds_pass)
+
                             if run_optimizer:
                                 try:
                                     from Optimizer.run_Optimizer import run_optimizer as _run_optimizer
@@ -1234,9 +1409,51 @@ def main() -> None:
                                         config=opt_cfg,
                                         run_context=run_context,
                                     )
+                                    opt_best = float(opt_out.get("best_objective", float("nan")))
+                                    opt_goal_hit = _optimizer_goal_hit(
+                                        best_objective=opt_best,
+                                        goal=case.optimizer_goal,
+                                        objective_sense=case.objective_sense,
+                                    )
+                                    optimizer_final_pass = bool(explorer_joint_pass and opt_goal_hit)
+                                    optimizer_detail_rows.append(
+                                        {
+                                            "run": run_counter,
+                                            "repeat": rep + 1,
+                                            "problem": case.problem_name,
+                                            "seed": seed,
+                                            "strategy": requested_id,
+                                            "executed_strategy": strategy.strategy_id,
+                                            "objective_sense": str(case.objective_sense),
+                                            "optimizer_goal": case.optimizer_goal,
+                                            "optimizer_best_objective": opt_best,
+                                            "optimizer_best_objective_raw": float(opt_out.get("best_objective_raw", float("nan"))),
+                                            "optimizer_goal_hit": bool(opt_goal_hit),
+                                            "optimizer_n_iterations": int(opt_out.get("n_iterations", 0)),
+                                            "modeler_all_real_only": bool(modeler_all_real_only),
+                                            "modeler_selected_features": json.dumps(modeler_selected_features, ensure_ascii=False),
+                                            "selected_feature_count": selected_feature_count,
+                                            "modeler_selected_real_count": modeler_selected_real_count,
+                                            "modeler_selected_dummy_count": modeler_selected_dummy_count,
+                                            "modeler_real_coverage_pct": modeler_real_coverage_pct,
+                                            "survivor_optimum_included": bool(included),
+                                            "volume_ratio": vol_ratio_float,
+                                            "volume_ratio_pct": vol_pct,
+                                            "volume_cap_pass": bool(volume_cap_pass),
+                                            "explorer_bounds_pass": bool(explorer_bounds_pass),
+                                            "explorer_joint_pass": bool(explorer_joint_pass),
+                                            "optimizer_final_pass": bool(optimizer_final_pass),
+                                            "optimizer_csv": opt_out.get("csv"),
+                                            "optimizer_metadata": opt_out.get("metadata"),
+                                            "explorer_metadata": exp_out.get("metadata"),
+                                            "selected_bounds_path": exp_out.get("selected_bounds_path"),
+                                            "run_root": run_context.run_root,
+                                        }
+                                    )
                                     print(
                                         f"[Optimizer][{requested_id}] "
-                                        f"best={float(opt_out.get('best_objective', float('nan'))):.6f}"
+                                        f"best={opt_best:.6f} goal_hit={opt_goal_hit} "
+                                        f"final_pass={optimizer_final_pass}"
                                     )
                                 except Exception as opt_exc:
                                     payload = {
@@ -1278,6 +1495,8 @@ def main() -> None:
                                     "modeler_all_real_only": bool(modeler_all_real_only),
                                     "volume_ratio": vol_ratio_float,
                                     "volume_ratio_pct": vol_pct,
+                                    "explorer_bounds_pass": bool(explorer_bounds_pass),
+                                    "explorer_joint_pass": bool(explorer_joint_pass),
                                     "explorer_metadata": exp_out.get("metadata"),
                                     "selected_bounds_path": exp_out.get("selected_bounds_path"),
                                     "run_root": run_context.run_root,
@@ -1433,6 +1652,7 @@ def main() -> None:
 
     fi_detail_csv, fi_summary_csv = _save_fi_stats_csv(detail_rows=fi_detail_rows)
     detail_csv, summary_csv = _save_explorer_stats_csv(detail_rows=explorer_detail_rows)
+    optimizer_detail_csv, optimizer_summary_csv = _save_optimizer_stats_csv(detail_rows=optimizer_detail_rows)
 
     print("===================================")
     print(" Batch Pipeline 실행 완료")
@@ -1446,6 +1666,8 @@ def main() -> None:
     print(f"- fi_primary_problem_summary_csv={fi_summary_csv}")
     print(f"- explorer_try_stats_csv={detail_csv}")
     print(f"- explorer_problem_summary_csv={summary_csv}")
+    print(f"- optimizer_try_stats_csv={optimizer_detail_csv}")
+    print(f"- optimizer_problem_summary_csv={optimizer_summary_csv}")
     if failures:
         print("- failure_details:")
         for item in failures:

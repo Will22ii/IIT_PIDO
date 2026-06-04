@@ -279,11 +279,12 @@ Explorer/user/override selected bounds 있음:
   objective archive < focus1 target:
     focus1 추가
 
-  n_samples >= focus2_min_total_budget and focus2_enabled:
-    focus2 추가
-
   항상:
     focus3 추가
+
+  Focus2는 auto로 추가하지 않음.
+  외부 selected bounds는 downstream contract로 신뢰하고,
+  Optimizer는 그 bounds 안에서 final Focus3만 수행한다.
 
 selected bounds 없음(bounds_source=cae):
   focus0/focus1로 objective archive 보강
@@ -316,7 +317,8 @@ focus1 budget:
 focus2 budget:
   n_samples * focus2_budget_fraction
   단 focus3 minimum budget을 침범하지 않음
-  auto에서는 n_samples >= focus2_min_total_budget일 때만 stage 후보가 됨
+  auto에서는 selected bounds가 없고 n_samples >= focus2_min_total_budget일 때만 stage 후보가 됨
+  selected bounds가 있어도 focus_pipeline에 focus2를 명시하면 실행 가능
 
 focus3 budget:
   focus0/focus1/focus2 이후 남은 budget
