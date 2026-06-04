@@ -55,6 +55,7 @@ def _align_df_schema(
         ignore_cols = {
             "id",
             target_col,
+            "objective_raw",
             "feasible",
             "feasible_pre",
             "feasible_post",
@@ -280,6 +281,7 @@ def prepare_modeler_data_policy(
         ignore_cols = {
             "id",
             target_col,
+            "objective_raw",
             "feasible",
             "feasible_pre",
             "feasible_post",

@@ -686,6 +686,8 @@ class ExplorerOrchestrator:
         doe_problem_name = input_bundle.problem_name
         cae_variables = input_bundle.cae_variables
         cae_objective_sense = input_bundle.objective_sense
+        internal_objective_sense = input_bundle.objective_sense
+        raw_objective_sense = input_bundle.raw_objective_sense
         doe_csv_path = input_bundle.input_csv_path
         doe_df = input_bundle.input_df
         modeler_pkl_path = input_bundle.model_path
@@ -937,7 +939,10 @@ class ExplorerOrchestrator:
             user_snapshot = {
                 "problem": doe_problem_name,
                 "seed": int(rng_seed),
-                "objective_sense": objective_sense,
+                "objective_sense": raw_objective_sense,
+                "raw_objective_sense": raw_objective_sense,
+                "canonical_objective_sense": internal_objective_sense,
+                "objective_transform": "negate" if raw_objective_sense == "max" else "identity",
                 "task": "Explorer",
             }
             if design_bounds:

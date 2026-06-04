@@ -21,8 +21,10 @@ from Optimizer.executor.evaluation_core import (
     build_pre_constraint_debug_fields,
     evaluate_pre_constraints_raw,
     objective_best_index,
+    objective_from_minimize,
     objective_initial_best,
     objective_is_better,
+    objective_to_minimize,
 )
 from Optimizer.executor.goal_monitor import GoalMonitor
 from Optimizer.executor.history_core import update_goal_and_build_evaluation_row
@@ -5646,6 +5648,29 @@ def run_bo_engine(
     if len(selected_features) == 0:
         raise RuntimeError("selected_features is empty.")
 
+    external_objective_sense = str(objective_sense or "min").strip().lower()
+    if external_objective_sense not in {"min", "max"}:
+        raise ValueError("objective_sense must be 'min' or 'max'.")
+    # FocusBO is implemented as a canonical minimizer. Keep user-facing raw
+    # objective values for outputs/goal checks, but train GP/acquisition/best
+    # state on this internal min score.
+    objective_sense = "min"
+
+    def _to_optimizer_objective(value: float | np.ndarray):
+        raw_arr = np.asarray(value, dtype=float)
+        internal = np.asarray(
+            objective_to_minimize(raw_arr, external_objective_sense),
+            dtype=float,
+        )
+        internal = internal.copy()
+        internal[~np.isfinite(raw_arr)] = float("inf")
+        if np.isscalar(value):
+            return float(internal.reshape(-1)[0])
+        return internal
+
+    def _from_optimizer_objective(value: float | np.ndarray):
+        return objective_from_minimize(value, external_objective_sense)
+
     rng = np.random.default_rng(int(seed))
     p_dim = len(selected_features)
     lb = np.asarray([selected_bounds[f][0] for f in selected_features], dtype=float)
@@ -5722,7 +5747,7 @@ def run_bo_engine(
                         y_obj = y_obj[finite_y]
                         if X_obj.shape[0] > 0:
                             X_archive = X_obj.copy()
-                            y_archive = y_obj.copy()
+                            y_archive = np.asarray(y_obj, dtype=float).reshape(-1)
                             has_doe_objective = True
 
     gp_train_cap = 0
@@ -5794,9 +5819,9 @@ def run_bo_engine(
     goal_monitor = GoalMonitor.from_goal(
         goal=goal,
         system_config=system,
-        objective_sense=objective_sense,
+        objective_sense=external_objective_sense,
     )
-    goal_monitor.initialize(best_objective=float(best_y_raw))
+    goal_monitor.initialize(best_objective=float(_from_optimizer_objective(best_y_raw)))
     full_lb = lb.copy()
     full_ub = ub.copy()
     external_selected_bounds = str(bounds_source or "").strip().lower() in {"explorer", "path", "override"}
@@ -7067,7 +7092,8 @@ def run_bo_engine(
         prev_best_y_raw = float(best_y_raw)
         prev_best_y_eff = float(best_y_eff)
         t0 = _timer_start()
-        y_next = float(evaluate_objective(x_next))
+        y_next_raw = float(evaluate_objective(x_next))
+        y_next = float(_to_optimizer_objective(y_next_raw))
         _timer_add("objective_eval", t0)
         objective_source = "cae_eval"
 
@@ -7083,7 +7109,12 @@ def run_bo_engine(
             p_feasible_min=post_p_feasible_min,
             hard_penalty=post_p_feasible_hard_penalty,
         )
-        pred_error_raw = float(y_next - pred_mean) if math.isfinite(float(pred_mean)) else float("nan")
+        pred_mean_raw = (
+            float(_from_optimizer_objective(pred_mean))
+            if math.isfinite(float(pred_mean))
+            else float("nan")
+        )
+        pred_error_raw = float(y_next_raw - pred_mean_raw) if math.isfinite(float(pred_mean_raw)) else float("nan")
         pred_abs_error_raw = float(abs(pred_error_raw)) if math.isfinite(pred_error_raw) else float("nan")
         if objective_sense == "max":
             raw_improvement = float(y_next - prev_best_y_raw)
@@ -7124,7 +7155,7 @@ def run_bo_engine(
                         _apply_post_penalty_to_objective(
                             y_raw=acq_effective,
                             p_feasible=p_feasible,
-                            objective_sense="min",
+                            objective_sense=objective_sense,
                             penalty_lambda=post_penalty_lambda,
                             score_mode=post_score_mode,
                             p_feasible_min=post_p_feasible_min,
@@ -7174,17 +7205,17 @@ def run_bo_engine(
         row, goal_state = update_goal_and_build_evaluation_row(
             goal_monitor=goal_monitor,
             iteration=int(i + 1),
-            best_objective=float(best_y_raw),
+            best_objective=float(_from_optimizer_objective(best_y_raw)),
             improved=bool(raw_improved),
             allow_early_stop=goal_early_stop_allowed,
             segment=str(segment),
             opt_focus_level=int(opt_focus_level),
             source_mode=str(source_mode),
             x_values={fname: float(value) for fname, value in zip(selected_features, x_next)},
-            objective_raw=float(y_next),
-            objective_effective=float(y_next_effective),
-            previous_best_objective_raw=float(prev_best_y_raw),
-            objective_sense=objective_sense,
+            objective_raw=float(y_next_raw),
+            objective_effective=float(_from_optimizer_objective(y_next_effective)),
+            previous_best_objective_raw=float(_from_optimizer_objective(prev_best_y_raw)),
+            objective_sense=external_objective_sense,
             pre_feasible=bool(pre_feasible_next),
             pre_margin=float(pre_margin_next),
             algorithm_id="focus_bo",
@@ -7265,7 +7296,8 @@ def run_bo_engine(
             "kappa": float(row_kappa),
             "acq_base": float(acq_base),
             "acq_effective": float(acq_effective),
-            "pred_mean": float(pred_mean),
+            "pred_mean": float(pred_mean_raw),
+            "pred_mean_internal": float(pred_mean),
             "pred_std": float(pred_std),
             "pred_error_raw": float(pred_error_raw),
             "pred_abs_error_raw": float(pred_abs_error_raw),
@@ -7561,7 +7593,7 @@ def run_bo_engine(
                     f"f1:{focus1_eval_count}/{focus1_budget}, "
                     f"f2:{focus2_eval_count}/{focus2_budget}, "
                     f"f3:{focus3_eval_count}/{focus3_available_budget}}} "
-                    f"y={float(y_next):.6g} best={float(best_y_raw):.6g}"
+                    f"y={float(y_next_raw):.6g} best={float(_from_optimizer_objective(best_y_raw)):.6g}"
                     f"{_timing_brief()}",
                     flush=True,
                 )
@@ -7570,7 +7602,7 @@ def run_bo_engine(
                 "[Optimizer][GoalStop] "
                 f"iter={int(i + 1)}/{int(n_samples)} "
                 f"goal={float(goal_monitor.goal):.6g} "
-                f"best={float(best_y_raw):.6g} "
+                f"best={float(_from_optimizer_objective(best_y_raw)):.6g} "
                 f"first_hit_iter={int(goal_monitor.first_hit_iter or 0)} "
                 f"patience={int(goal_monitor.patience)}",
                 flush=True,
@@ -7638,10 +7670,14 @@ def run_bo_engine(
             p_feasible_min=post_p_feasible_min,
             hard_penalty=post_p_feasible_hard_penalty,
         )
+        y_raw_out = float(_from_optimizer_objective(y))
+        y_eff_out = float(_from_optimizer_objective(y_eff))
         item = {
-            "objective": float(y_eff),
-            "objective_raw": float(y),
-            "objective_effective": float(y_eff),
+            "objective": float(y_eff_out),
+            "objective_raw": float(y_raw_out),
+            "objective_effective": float(y_eff_out),
+            "objective_internal": float(y),
+            "objective_effective_internal": float(y_eff),
             "p_feasible": float(p),
         }
         for fname, value in zip(selected_features, x):
@@ -7699,8 +7735,18 @@ def run_bo_engine(
             if not isinstance(region, dict):
                 continue
             out_region = dict(region)
+            for obj_key in ("best_objective", "archive_best_objective"):
+                if obj_key in out_region:
+                    obj_val = float(out_region.get(obj_key, float("nan")))
+                    out_region[f"{obj_key}_internal"] = obj_val
+                    out_region[obj_key] = (
+                        float(_from_optimizer_objective(obj_val))
+                        if math.isfinite(obj_val)
+                        else float("nan")
+                    )
             state = state_by_id.get(str(out_region.get("region_id")))
             if isinstance(state, dict):
+                state_best_internal = float(state.get("best_objective", float("nan")))
                 out_region["turbo_lite_state"] = {
                     "status": str(state.get("status", "active")),
                     "success_count": int(state.get("success_count", 0)),
@@ -7732,7 +7778,12 @@ def run_bo_engine(
                     },
                     "last_skip_reason": str(state.get("last_skip_reason", "")),
                     "eval_count": int(state.get("eval_count", 0)),
-                    "best_objective": float(state.get("best_objective", float("nan"))),
+                    "best_objective": (
+                        float(_from_optimizer_objective(state_best_internal))
+                        if math.isfinite(state_best_internal)
+                        else float("nan")
+                    ),
+                    "best_objective_internal": float(state_best_internal),
                 }
             regions_for_output.append(out_region)
         focus2_regions_summary["regions"] = regions_for_output
@@ -7777,9 +7828,9 @@ def run_bo_engine(
         history_df=history_df,
         archive_df=archive_df,
         best_point=best_point,
-        best_objective=float(best_y_eff),
+        best_objective=float(_from_optimizer_objective(best_y_eff)),
         best_point_raw=best_point_raw,
-        best_objective_raw=float(best_y_raw),
+        best_objective_raw=float(_from_optimizer_objective(best_y_raw)),
         post_penalty_active=bool(post_penalty_active),
         post_penalty_lambda=float(post_penalty_lambda if post_penalty_active else 0.0),
         post_score_mode=str(post_score_mode),
@@ -7793,6 +7844,9 @@ def run_bo_engine(
         goal_summary=goal_monitor.summary(),
         algorithm_summary_extra={
             "goal_early_stop_min_focus": int(max(int(getattr(system, "goal_early_stop_min_focus", 2)), 0)),
+            "objective_sense": str(external_objective_sense),
+            "internal_objective_sense": "min",
+            "internal_objective_transform": "negate" if external_objective_sense == "max" else "identity",
         },
         focus2_summary=focus2_summary,
         focus_pipeline_summary=focus_pipeline_plan.as_dict(),

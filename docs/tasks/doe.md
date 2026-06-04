@@ -22,10 +22,17 @@ DOE/artifacts/public/doe_results.csv
 Public DOE CSV는 downstream에 필요한 compact column만 포함한다.
 
 - `id`
-- `objective`
+- `objective`: canonical minimization score. 작을수록 좋다.
+- `objective_raw`: CAE/CAD가 반환한 원래 objective.
 - `feasible`
 - `success`
 - CAE design variable columns
+
+`objective_sense=max` 문제에서는 `objective = -objective_raw`로 저장한다. `objective_sense=min` 문제에서는 `objective = objective_raw`로 저장한다.
+
+Constraint, goal, report/UI는 raw 기준을 사용한다. Downstream ranking, surrogate training, Explorer bounds selection, Optimizer warm-start는 `objective` 기준으로 동작한다.
+
+Invalid/failed CAE 결과는 방향과 무관하게 `objective = inf`로 저장해야 한다. `max` 문제에서 실패값을 `-inf`로 만들면 downstream에서 best sample로 선택될 수 있다.
 
 Public CSV에 아래 내부/debug field는 넣지 않는다.
 

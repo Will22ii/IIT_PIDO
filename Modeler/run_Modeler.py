@@ -83,7 +83,8 @@ def run_modeler(
             "use_primary_selection=False → Secondary Selection도 비활성화됩니다."
         )
         use_secondary_selection = False
-    objective_sense = str(cae_objective_sense)
+    raw_objective_sense = str(cae_objective_sense)
+    objective_sense = "min"
     use_timestamp = (
         config.cae.system.use_timestamp if config.cae is not None else False
     )
@@ -133,7 +134,7 @@ def run_modeler(
         project_root=project_root,
         problem_name=problem_name,
         base_seed=int(base_seed),
-        objective_sense=objective_sense,
+        objective_sense=raw_objective_sense,
         variables=variables,
         cae_metadata_path=cae_metadata_path,
     )
@@ -373,6 +374,8 @@ def run_modeler(
         config_system=config.system,
         config_user=config.user,
         problem_name=problem_name,
+        raw_objective_sense=raw_objective_sense,
+        internal_objective_sense=objective_sense,
         model_name=model_name,
         doe_meta=doe_meta or {},
         selected_df=selected_df,

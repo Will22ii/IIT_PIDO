@@ -12,6 +12,7 @@ from DOE.executor.constraint_filter import validate_constraint_defs
 from Explorer.config import ExplorerConfig
 from Explorer.executor.explorer_utils import resolve_bounds, resolve_selected_features
 from pipeline.run_context import RunContext, get_task_metadata_path
+from utils.objective_sense import canonicalize_objective_columns
 
 
 @dataclass
@@ -23,6 +24,7 @@ class ExplorerInputBundle:
     pre_constraint_defs: list[dict]
     post_constraint_defs: list[dict]
     objective_sense: str
+    raw_objective_sense: str
     seed: int
     input_csv_path: str
     input_df: pd.DataFrame
@@ -312,6 +314,11 @@ def resolve_explorer_inputs(
     if not os.path.exists(input_csv_path):
         raise FileNotFoundError(f"Explorer input CSV not found: {input_csv_path}")
     input_df = pd.read_csv(input_csv_path)
+    input_df = canonicalize_objective_columns(
+        input_df,
+        objective_sense=cae_objective_sense,
+        objective_col="objective",
+    )
     print(f"[Explorer] Input CSV: {input_csv_path}")
     if "objective" not in input_df.columns:
         raise RuntimeError("Explorer input CSV must include an 'objective' column.")
@@ -387,7 +394,8 @@ def resolve_explorer_inputs(
         constraint_defs=constraint_defs,
         pre_constraint_defs=pre_constraint_defs,
         post_constraint_defs=post_constraint_defs,
-        objective_sense=cae_objective_sense,
+        objective_sense="min",
+        raw_objective_sense=str(cae_objective_sense),
         seed=int(cae_seed),
         input_csv_path=input_csv_path,
         input_df=input_df,

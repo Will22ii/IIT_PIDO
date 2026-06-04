@@ -115,9 +115,53 @@ Optimizer/run_Optimizer.py
 
 외부 CSV는 허용한다. 단, 현재 CAE 문제 정의와 맞는지 검증해야 한다.
 
+### Objective column contract
+
+Pipeline 내부 task는 objective를 항상 minimization score로 해석한다.
+
+- `objective`: task 내부 계산용 canonical minimization score. 작을수록 좋다.
+- `objective_raw`: 사용자/CAE/CAD가 낸 원래 objective 값.
+- `objective_sense`: CAE context의 원래 문제 방향. `min` 또는 `max`.
+- `canonical_objective_sense`: `min`.
+- `objective_transform`: `identity` 또는 `negate`.
+
+사용자가 제공하는 constraint, goal, report/UI에 노출되는 objective는 모두 raw 기준이다.
+계산용 ranking, surrogate training, acquisition, bounds selection은 `objective` 기준이다.
+
+`max` 문제에서 CAE/CAD가 raw objective `y`를 반환하면 ingestion boundary에서 아래와 같이 저장한다.
+
+```text
+objective_raw = y
+objective     = -y
+```
+
+`min` 문제에서는 `objective_raw = objective = y`다.
+
+실패 또는 invalid objective는 방향과 무관하게 `objective = inf`로 저장한다. `max` 문제라고 해서 실패값 `inf`를 `-inf`로 뒤집으면 best point처럼 보이는 치명적인 오류가 된다.
+
+### External CSV objective policy
+
+서비스/API/backend가 직접 넣는 external CSV는 raw objective를 보내는 것을 원칙으로 한다.
+Pipeline 입구는 CAE context의 `objective_sense`를 보고 canonical `objective`를 만든다.
+
+권장 external CSV schema:
+
+- active feature column 전체
+- `objective_raw`
+- optional `objective`
+- optional `success`
+- optional `feasible`
+
+외부 CSV에 `objective_raw`가 있으면 `objective_raw`가 source of truth다. 이때 `objective`가 없거나 현재 CAE context의 `objective_sense`와 맞지 않으면 pipeline은 `objective_raw`에서 `objective`를 다시 계산해야 한다.
+
+외부 CSV에 `objective`만 있고 `objective_raw`가 없으면 legacy/raw CSV로 간주한다. 현재 CAE context가 `max`이면 ingestion boundary에서 `objective_raw = objective`, `objective = -objective_raw`로 변환한다. 현재 CAE context가 `min`이면 `objective_raw = objective`로 둔다.
+
+이미 canonicalized된 external CSV를 넣고 싶다면 반드시 `objective_raw`와 metadata/flag로 그 사실을 명시해야 한다. raw인지 canonical인지 알 수 없는 `objective`만 있는 CSV를 그대로 downstream에 전달하면 `max` 문제에서 방향이 뒤집힐 수 있다.
+
 Explorer에 필요한 column:
 
 - `objective`
+- `objective_raw` 권장
 - active feature column 전체
 
 Explorer에서 optional인 column:
@@ -128,6 +172,82 @@ Explorer에서 optional인 column:
 `success` 또는 `feasible`이 없으면 기본적으로 row가 usable하다고 본다. column이 있으면 task logic에서 filtering에 사용할 수 있다.
 
 CSV의 constraint column은 schema 입력으로 쓰지 않는다. constraint 정의는 CSV가 아니라 `CAE_tool_interface`에서 온다.
+
+### Future public CSV / DB contract
+
+현재 public CSV는 task별 구현 이력이 섞여 있어 `objective`의 의미가 완전히 동일하지 않을 수 있다.
+예를 들어 DOE public CSV의 `objective`는 canonical minimization score이고, Optimizer public CSV의 `objective`는 user-facing effective objective에 가깝다. Downstream ingestion은 `objective_raw`를 source of truth로 다시 canonicalize하므로 계산상 문제는 없지만, 사람이 CSV를 직접 읽거나 backend가 그대로 DB에 적재하기에는 혼동될 수 있다.
+
+향후 public CSV는 "유저가 다운로드한 뒤 다시 업로드할 수 있는 wide form"을 목표로 정리한다. Public CSV의 기본 source of truth는 raw objective다.
+
+권장 public evaluation CSV:
+
+```text
+eval_id
+task
+iter
+source
+success
+feasible
+objective_raw
+objective_internal
+objective_effective_raw
+objective_sense
+x1
+x2
+...
+xn
+```
+
+Column 의미:
+
+- `objective_raw`: CAE/CAD/사용자 기준 원래 objective. UI/goal/constraint 기준.
+- `objective_internal`: pipeline 계산용 canonical minimization score. `objective_sense=max`이면 `-objective_raw`.
+- `objective_effective_raw`: post penalty 등을 raw scale에서 반영한 user-facing objective. penalty가 없으면 `objective_raw`와 같다.
+- `objective_sense`: CAE context의 원래 문제 방향. `min` 또는 `max`.
+- `x1...xn`: active design variable wide columns. 유저 upload/download 편의용.
+
+Public CSV에서는 `objective`처럼 의미가 모호한 이름을 새 계약의 핵심 컬럼으로 쓰지 않는 방향을 선호한다. 하위 호환을 위해 남기더라도 `objective_raw` 또는 `objective_internal` 중 어느 것의 alias인지 metadata에 명확히 기록해야 한다.
+
+Backend/DB 저장은 wide CSV를 그대로 테이블로 만들지 않는다. 변수 개수와 constraint 개수가 문제마다 달라지므로 normalized form을 기본으로 한다.
+
+권장 DB 구조:
+
+```text
+evaluation
+- eval_id
+- run_id
+- task
+- iter
+- source
+- success
+- feasible
+- objective_raw
+- objective_internal
+- objective_effective_raw
+- objective_sense
+
+evaluation_variable
+- eval_id
+- variable_name
+- value
+
+evaluation_constraint
+- eval_id
+- constraint_id
+- scope
+- value
+- feasible
+- margin
+```
+
+사용자 외부 입력 CSV는 public CSV보다 더 단순해도 된다. 최소 입력은 active feature column 전체와 raw objective다.
+
+```text
+x1,x2,...,xn,objective_raw
+```
+
+호환 입력으로 `y`, `obj`, `objective` 같은 alias를 받을 수는 있지만, ingestion boundary에서 반드시 `objective_raw`로 표준화하고 CAE metadata의 `objective_sense`를 기준으로 `objective_internal`을 다시 계산한다. 사용자가 준 `objective_internal`은 기본적으로 신뢰하지 않는다.
 
 ## Downstream 입력 우선순위
 

@@ -15,6 +15,7 @@ from Optimizer.executor.evaluation_core import (
     objective_best_index,
     objective_initial_best,
 )
+from utils.objective_sense import canonical_objective_for_result, objective_from_minimize
 from Optimizer.executor.goal_monitor import GoalMonitor
 from Optimizer.executor.history_core import update_goal_and_build_evaluation_row
 from Optimizer.executor.input_workflow import ResolvedOptimizerInputs
@@ -59,7 +60,8 @@ class OptimizerRuntime:
         self.resolved = resolved
         self.algorithm_id = str(algorithm_id or getattr(config.system, "algorithm_id", "custom"))
         self.problem_name = str(resolved.problem_name)
-        self.objective_sense = normalize_objective_sense(str(resolved.objective_sense))
+        self.raw_objective_sense = normalize_objective_sense(str(resolved.objective_sense))
+        self.objective_sense = "min"
 
         self.selected_features = list(resolved.selected_features)
         if not self.selected_features:
@@ -87,7 +89,7 @@ class OptimizerRuntime:
         self.goal_monitor = GoalMonitor.from_goal(
             goal=goal,
             system_config=config.system,
-            objective_sense=self.objective_sense,
+            objective_sense=self.raw_objective_sense,
         )
 
         self._history_rows: list[dict[str, Any]] = []
@@ -96,7 +98,9 @@ class OptimizerRuntime:
         self._best_x: np.ndarray | None = None
         self._best_y = objective_initial_best(self.objective_sense)
         self._load_initial_archive()
-        self.goal_monitor.initialize(best_objective=float(self._best_y))
+        self.goal_monitor.initialize(
+            best_objective=float(objective_from_minimize(self._best_y, self.raw_objective_sense))
+        )
 
     def _to_array(self, x: np.ndarray | list[float] | tuple[float, ...] | dict[str, float]) -> np.ndarray:
         return self._mapper.to_selected_array(x)
@@ -123,6 +127,11 @@ class OptimizerRuntime:
             try:
                 x = np.asarray([float(row[f]) for f in self.selected_features], dtype=float)
                 y = float(row[objective_col])
+                y_raw = (
+                    float(row["objective_raw"])
+                    if "objective_raw" in row and np.isfinite(float(row["objective_raw"]))
+                    else float(objective_from_minimize(y, self.raw_objective_sense))
+                )
             except Exception:
                 continue
             if x.shape[0] != len(self.selected_features) or not np.isfinite(y):
@@ -134,7 +143,7 @@ class OptimizerRuntime:
                     "segment": "initial_archive",
                     "source_mode": "input_csv",
                     "objective": float(y),
-                    "objective_raw": float(y),
+                    "objective_raw": float(y_raw),
                     "success": True,
                     "feasible": True,
                     "pre_feasible": True,
@@ -145,7 +154,7 @@ class OptimizerRuntime:
         self._archive_rows.extend(rows)
         self._initial_archive_count = len(rows)
         if rows:
-            y_arr = np.asarray([float(r["objective_raw"]) for r in rows], dtype=float)
+            y_arr = np.asarray([float(r["objective"]) for r in rows], dtype=float)
             best_idx = objective_best_index(y_arr, self.objective_sense)
             self._best_y = float(y_arr[best_idx])
             self._best_x = np.asarray(
@@ -232,13 +241,17 @@ class OptimizerRuntime:
 
         constraints, pre_feasible, pre_margin = self._evaluate_pre_constraints(x_arr)
         y_raw = self._evaluate_objective(x_arr)
-        y_effective = float(y_raw)
+        y_effective = canonical_objective_for_result(
+            raw_objective=float(y_raw),
+            objective_sense=self.raw_objective_sense,
+            success=True,
+        )
         previous_best = float(self._best_y)
         best_update = update_best_point(
             best_x=self._best_x if self._best_x is not None else x_arr,
             best_y=previous_best,
             x_next=x_arr,
-            y_next=float(y_raw),
+            y_next=float(y_effective),
             objective_sense=self.objective_sense,
         )
         improved = bool(best_update.improved or self._best_x is None)
@@ -250,16 +263,16 @@ class OptimizerRuntime:
         row, goal_state = update_goal_and_build_evaluation_row(
             goal_monitor=self.goal_monitor,
             iteration=iteration,
-            best_objective=float(self._best_y),
+            best_objective=float(objective_from_minimize(self._best_y, self.raw_objective_sense)),
             improved=bool(improved),
             segment=str(segment),
             opt_focus_level=-1,
             source_mode=str(source_mode),
             x_values={f: float(v) for f, v in zip(self.selected_features, x_arr)},
             objective_raw=float(y_raw),
-            objective_effective=float(y_effective),
-            previous_best_objective_raw=float(previous_best),
-            objective_sense=self.objective_sense,
+            objective_effective=float(objective_from_minimize(y_effective, self.raw_objective_sense)),
+            previous_best_objective_raw=float(objective_from_minimize(previous_best, self.raw_objective_sense)),
+            objective_sense=self.raw_objective_sense,
             pre_feasible=bool(pre_feasible),
             pre_margin=float(pre_margin),
             algorithm_id=str(self.algorithm_id),
@@ -286,7 +299,7 @@ class OptimizerRuntime:
             pre_feasible=bool(pre_feasible),
             pre_margin=float(pre_margin),
             improved=bool(improved),
-            best_objective=float(self._best_y),
+            best_objective=float(objective_from_minimize(self._best_y, self.raw_objective_sense)),
             best_point=self.best_point,
             goal_hit=bool(goal_state.get("goal_hit", False)),
             should_stop=bool(self.should_stop),
@@ -311,11 +324,13 @@ class OptimizerRuntime:
         archive_df = self.archive_df
         best_point = self.best_point
         best_objective = float(self._best_y)
+        best_objective_raw = float(objective_from_minimize(best_objective, self.raw_objective_sense))
         return build_optimizer_algorithm_result(
             history_df=history_df,
             archive_df=archive_df,
             best_point=best_point,
-            best_objective=best_objective,
+            best_objective=best_objective_raw,
+            best_objective_raw=best_objective_raw,
             algorithm_id=str(algorithm_id or self.algorithm_id),
             engine="optimizer_runtime",
             feasibility_status="runtime_pre_constraints_only",

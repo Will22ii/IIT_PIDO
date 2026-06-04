@@ -40,6 +40,11 @@ def build_explorer_report_payload(
     strategy_alias_requested = context["strategy_alias_requested"]
     strategy_mode = context["strategy_mode"]
     vol_ratio = context["vol_ratio"]
+    raw_objective_sense = str(context.get("raw_objective_sense", context["objective_sense"]))
+    internal_objective_sense = str(
+        context.get("internal_objective_sense", context["objective_sense"])
+    )
+    objective_transform = "negate" if raw_objective_sense == "max" else "identity"
 
     previous: dict[str, str] = {}
     data_csv_ref = _rel_or_abs(context.get("doe_csv_path"), task_dir=task_dir)
@@ -156,6 +161,10 @@ def build_explorer_report_payload(
         "constraint_aware_probe_count": context["constraint_aware_probe_count"],
         "constraint_aware_anchor_count": context["constraint_aware_anchor_count"],
         "constraint_aware_shifted_dims": context["constraint_aware_shifted_dims"],
+        "objective_sense": raw_objective_sense,
+        "raw_objective_sense": raw_objective_sense,
+        "canonical_objective_sense": internal_objective_sense,
+        "objective_transform": objective_transform,
     }
 
     routed_v2_decision = context["routed_v2_decision"]
@@ -163,7 +172,11 @@ def build_explorer_report_payload(
         "run_id": run_context.run_id if run_context is not None else None,
         "problem": context["doe_problem_name"],
         "seed": int(context["rng_seed"]),
-        "objective_sense": context["objective_sense"],
+        "objective_sense": raw_objective_sense,
+        "raw_objective_sense": raw_objective_sense,
+        "canonical_objective_sense": internal_objective_sense,
+        "internal_objective_sense": internal_objective_sense,
+        "objective_transform": objective_transform,
         "strategy_id": strategy_id,
         "strategy_alias": strategy_alias,
         "strategy_alias_requested": strategy_alias_requested,

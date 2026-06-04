@@ -7,13 +7,11 @@ import numpy as np
 from CAE_tool_interface.executor.configurator import select_cae_by_name
 from DOE.executor.constraint_filter import evaluate_constraints_point
 from DOE.executor.eval_sanitizer import sanitize_evaluate_output
-
-
-def normalize_objective_sense(objective_sense: str) -> str:
-    sense = str(objective_sense or "min").strip().lower()
-    if sense not in {"min", "max"}:
-        raise ValueError("Optimizer objective_sense must be 'min' or 'max'.")
-    return sense
+from utils.objective_sense import (
+    objective_from_minimize,
+    objective_to_minimize,
+    normalize_objective_sense,
+)
 
 
 def objective_is_better(*, y_new: float, y_best: float, objective_sense: str) -> bool:

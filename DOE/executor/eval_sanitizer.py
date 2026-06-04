@@ -5,6 +5,21 @@ from typing import Any
 import numpy as np
 
 
+def _coerce_success(value: Any) -> bool:
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"false", "f", "0", "0.0", "no", "n", "fail", "failed", "nan", "none", ""}:
+            return False
+        return True
+    try:
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            numeric = float(value)
+            return bool(np.isfinite(numeric) and numeric != 0.0)
+    except Exception:
+        pass
+    return bool(value)
+
+
 def sanitize_evaluate_output(
     out: Any,
 ) -> tuple[bool, float, dict, str | None, str | None]:
@@ -22,7 +37,7 @@ def sanitize_evaluate_output(
     if not isinstance(outputs, dict):
         outputs = {}
 
-    success = bool(out.get("success", True))
+    success = _coerce_success(out.get("success", True))
     if not success:
         return False, float("inf"), outputs, None, None
 

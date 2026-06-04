@@ -11,6 +11,7 @@ from pipeline.run_context import (
     get_task_metadata_path,
     update_run_index,
 )
+from utils.objective_sense import canonicalize_objective_columns
 from utils.result_loader import ResultLoader
 
 
@@ -191,6 +192,12 @@ def resolve_modeler_input(
         raise RuntimeError("CAE metadata에 problem 정보가 없습니다.")
 
     base_seed = int(cae_seed)
+    target_col = str(getattr(config.user, "target_col", "objective") or "objective").strip() or "objective"
+    df = canonicalize_objective_columns(
+        df,
+        objective_sense=cae_objective_sense,
+        objective_col=target_col,
+    )
 
     if csv_path:
         print(f"- DOE CSV: {csv_path}")

@@ -13,6 +13,7 @@ import pandas as pd
 class StoredRow:
     x: np.ndarray
     objective: float
+    objective_raw: float
     constraints: Optional[Dict]
     feasible_pre: bool
     feasible_post: bool
@@ -119,6 +120,7 @@ class DatasetStore:
         success: bool,
         margin_pre: float,
         margin_post: float,
+        objective_raw: float | None = None,
         source: Optional[str] = None,       
         round_idx: Optional[int] = None,     
         exec_scope: Optional[str] = None,    
@@ -131,6 +133,7 @@ class DatasetStore:
             StoredRow(
                 x=x,
                 objective=float(objective),
+                objective_raw=float(objective if objective_raw is None else objective_raw),
                 constraints=constraints,
                 feasible_pre=bool(feasible_pre),
                 feasible_post=bool(feasible_post),
@@ -157,6 +160,7 @@ class DatasetStore:
             for j in range(self.dim)
         }
         data["objective"] = [r.objective for r in rows]
+        data["objective_raw"] = [r.objective_raw for r in rows]
         data["feasible_pre"] = [r.feasible_pre for r in rows]
         data["feasible_post"] = [r.feasible_post for r in rows]
         data["feasible"] = [r.feasible for r in rows]

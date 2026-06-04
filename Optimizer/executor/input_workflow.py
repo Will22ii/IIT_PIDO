@@ -10,6 +10,7 @@ import pandas as pd
 
 from Optimizer.config import OptimizerConfig
 from pipeline.run_context import RunContext, get_task_metadata_path
+from utils.objective_sense import canonicalize_objective_columns
 from utils.result_loader import ResultLoader
 
 
@@ -433,6 +434,12 @@ def resolve_optimizer_inputs(
             raise RuntimeError(f"Invalid bounds for feature '{feature}': ({lb}, {ub})")
 
     if doe_df is not None:
+        objective_col = str(config.system.objective_col).strip()
+        doe_df = canonicalize_objective_columns(
+            doe_df,
+            objective_sense=objective_sense,
+            objective_col=objective_col,
+        )
         doe_cols = {str(c) for c in doe_df.columns}
         matched_features = [f for f in selected_features if f in doe_cols]
         if len(matched_features) == 0:
@@ -453,9 +460,10 @@ def resolve_optimizer_inputs(
                 selected_bounds = {f: selected_bounds[f] for f in selected_features}
 
             keep = list(selected_features)
-            objective_col = str(config.system.objective_col).strip()
             if objective_col in doe_df.columns:
                 keep.append(objective_col)
+            if "objective_raw" in doe_df.columns and "objective_raw" not in keep:
+                keep.append("objective_raw")
             doe_df = doe_df[keep].copy()
             doe_df = doe_df.dropna(subset=selected_features).reset_index(drop=True)
             if doe_df.empty:

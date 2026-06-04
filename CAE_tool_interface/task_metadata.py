@@ -76,6 +76,9 @@ def save_cae_task(
     }
     resolved_params = {
         "objective_sense": objective_sense,
+        "raw_objective_sense": objective_sense,
+        "canonical_objective_sense": "min",
+        "objective_transform": "negate" if objective_sense == "max" else "identity",
         "n_variables": int(len(variables)),
     }
     results = {
@@ -112,4 +115,3 @@ def load_cae_metadata_from_context(*, run_context: RunContext) -> dict | None:
         return None
     except Exception:
         return None
-

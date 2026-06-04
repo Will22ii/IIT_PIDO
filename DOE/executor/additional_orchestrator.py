@@ -13,6 +13,7 @@ from sklearn.gaussian_process import GaussianProcessRegressor
 
 from utils.boundary_sampling import sample_boundary_corners, sample_boundary_corners_random, sample_boundary_partial
 from utils.bounds_utils import compute_spans_lbs, clamp_to_bounds
+from utils.objective_sense import canonical_objective_for_result
 from DOE.executor.anchor_refiner import (
     AcquisitionOptimizer,
     fit_gp_with_fallback,
@@ -1282,6 +1283,10 @@ class AdditionalDOEOrchestrator:
         base_seed: int,     # reserved for deterministic pipelines
         objective_sense: str,
     ):
+        self.raw_objective_sense = str(objective_sense or "min").strip().lower()
+        if self.raw_objective_sense not in {"min", "max"}:
+            self.raw_objective_sense = "min"
+        objective_sense = "min"
         # --------------------------------------------
         # Phase 0: Initial DOE (user-selected sampler)
         # --------------------------------------------
@@ -3478,7 +3483,12 @@ class AdditionalDOEOrchestrator:
                 return False
 
             out = self.evaluate_func(x)
-            success, objective, outputs, invalid_reason, raw_obj_repr = sanitize_evaluate_output(out)
+            success, objective_raw, outputs, invalid_reason, raw_obj_repr = sanitize_evaluate_output(out)
+            objective = canonical_objective_for_result(
+                raw_objective=float(objective_raw),
+                objective_sense=getattr(self, "raw_objective_sense", "min"),
+                success=bool(success),
+            )
             if invalid_reason is not None:
                 print(
                     "[AdditionalDOE][INVALID_OBJECTIVE] "
@@ -3516,7 +3526,7 @@ class AdditionalDOEOrchestrator:
                         var_names=self.var_names,
                         constraint_defs=self.constraint_defs,
                         scope="post",
-                        env_extra={**outputs, "objective": objective},
+                        env_extra={**outputs, "objective": objective_raw, "objective_raw": objective_raw},
                         fail_fast_output_missing=True,
                     )
                 except Exception as exc:
@@ -3532,6 +3542,7 @@ class AdditionalDOEOrchestrator:
             self.store.add(
                 x=x,
                 objective=objective,
+                objective_raw=float(objective_raw),
                 constraints=constraints,
                 feasible_pre=bool(feasible_pre),
                 feasible_post=bool(feasible_post),
@@ -3638,6 +3649,7 @@ class AdditionalDOEOrchestrator:
                     "id": i,
                     "x": r.x.tolist(),
                     "objective": float(r.objective),
+                    "objective_raw": float(r.objective_raw),
                     "constraints": r.constraints,
                     "margin_pre": float(r.margin_pre),
                     "margin_post": float(r.margin_post),

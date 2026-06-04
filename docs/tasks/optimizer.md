@@ -77,12 +77,17 @@ DOE output과 외부 CSV는 Optimizer 관점에서 initial guess 또는 warm-sta
 필수에 가까운 column:
 
 - active feature columns
-- `objective`
+- `objective`: canonical minimization score
+- `objective_raw`: 권장. 사용자/CAE/CAD가 낸 원래 objective
 
 `objective`가 있으면:
 
 - BO 초기 archive로 사용할 수 있다.
 - top-k warm-start와 source mixture의 `topk` source에 사용할 수 있다.
+
+현재 pipeline이 생성한 DOE CSV에서는 `objective`가 이미 min score다. `objective_sense=max` 문제의 DOE CSV는 `objective = -objective_raw`를 저장한다.
+
+외부 CSV에서는 `objective_raw`가 source of truth다. `objective_raw`가 있으면 CAE context의 `objective_sense`를 기준으로 Optimizer 입력 전 `objective`를 재계산해야 한다. `objective`만 있는 legacy CSV는 raw objective로 간주하고, `objective_sense=max`이면 ingestion boundary에서 부호를 뒤집어 canonical `objective`를 만든다.
 
 `objective`가 없으면:
 

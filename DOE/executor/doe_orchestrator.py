@@ -11,6 +11,7 @@ import pandas as pd
 from DOE.config import DOESystemConfig, build_additional_cfg_from_system
 from utils.boundary_sampling import sample_boundary_corners_random
 from utils.feasibility import evaluate_feasibility
+from utils.objective_sense import canonical_objective_for_result
 from utils.result_saver import ResultSaver
 from DOE.executor.constraint_filter import (
     clamp_ratio,
@@ -159,9 +160,12 @@ def _save_doe_results(
     rows_public = []
     rows_internal = []
     for r in results:
+        objective_raw = float(r.get("objective_raw", r["objective"]))
+        objective_internal = float(r["objective"])
         row_public = {
             "id": r["id"],
-            "objective": r["objective"],
+            "objective": objective_internal,
+            "objective_raw": objective_raw,
             "feasible": r.get("feasible", True),
             "success": r["success"],
         }
@@ -227,6 +231,9 @@ def _save_doe_results(
     resolved_params = {
         "seed": seed,
         "objective_sense": objective_sense,
+        "raw_objective_sense": objective_sense,
+        "canonical_objective_sense": "min",
+        "objective_transform": "negate" if str(objective_sense).strip().lower() == "max" else "identity",
         "additional_doe": additional_doe,
         "workflow_info": workflow_info,
     }
@@ -502,7 +509,12 @@ def run_doe_orchestrator(
 
         for i, x in enumerate(X):
             y = evaluate_func(x)
-            success, objective, outputs, invalid_reason, raw_obj_repr = sanitize_evaluate_output(y)
+            success, objective_raw, outputs, invalid_reason, raw_obj_repr = sanitize_evaluate_output(y)
+            objective = canonical_objective_for_result(
+                raw_objective=float(objective_raw),
+                objective_sense=objective_sense,
+                success=bool(success),
+            )
             if invalid_reason is not None:
                 print(
                     "[DOE][INVALID_OBJECTIVE] "
@@ -523,7 +535,7 @@ def run_doe_orchestrator(
                     var_names=var_names,
                     constraint_defs=constraint_defs,
                     scope="post",
-                    env_extra={**outputs, "objective": objective},
+                    env_extra={**outputs, "objective": objective_raw, "objective_raw": objective_raw},
                     fail_fast_output_missing=True,
                 )
             except Exception as exc:
@@ -542,6 +554,7 @@ def run_doe_orchestrator(
                 "id": i,
                 "x": x.tolist(),
                 "objective": objective,
+                "objective_raw": float(objective_raw),
                 "constraints": constraints,
                 "margin_pre": float(margin_pre),
                 "margin_post": float(margin_post),
@@ -647,7 +660,7 @@ def run_doe_orchestrator(
     gate1 = Gate1TopKStability(
         k_ratio=cfg["gate1_ratio"],
         pass_ratio=cfg["gate1_pass_ratio"],
-        objective_sense=objective_sense,
+        objective_sense="min",
     )
 
     gate2 = Gate2Uncertainty(
