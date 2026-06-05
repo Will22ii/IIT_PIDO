@@ -1439,6 +1439,73 @@ def _apply_focus3_source_performance_to_quotas(
     return quotas_out, info
 
 
+def _apply_focus3_local_probe_quota_floor(
+    *,
+    quotas: dict[str, int],
+    system: OptimizerSystemConfig,
+    total: int,
+    active: bool,
+    has_constraints: bool,
+    no_improve_count: int,
+) -> tuple[dict[str, int], dict[str, object]]:
+    quotas_out = {str(k): int(v) for k, v in quotas.items()}
+    info: dict[str, object] = {
+        "enabled": bool(getattr(system, "focus3_local_probe_enabled", True)),
+        "applied": False,
+        "reason": "not_active",
+        "target_quota": int(quotas_out.get("local_probe", 0)),
+        "quota_before": int(quotas_out.get("local_probe", 0)),
+        "quota_after": int(quotas_out.get("local_probe", 0)),
+        "shift_from_random": 0,
+        "shift_from_boundary": 0,
+        "shift_from_topk": 0,
+        "shift_from_best_local": 0,
+    }
+    if not bool(info["enabled"]):
+        info["reason"] = "disabled"
+        return quotas_out, info
+    if bool(has_constraints):
+        info["reason"] = "constraints_present"
+        return quotas_out, info
+    if not bool(active):
+        return quotas_out, info
+
+    total_i = int(max(int(total), 1))
+    late_no_improve = int(max(int(getattr(system, "focus3_local_probe_late_no_improve", 300)), 0))
+    floor_fraction = float(np.clip(float(getattr(system, "focus3_local_probe_refine_floor_fraction", 0.16)), 0.0, 1.0))
+    late_fraction = float(np.clip(float(getattr(system, "focus3_local_probe_late_refine_floor_fraction", 0.24)), 0.0, 1.0))
+    target_fraction = late_fraction if int(no_improve_count) >= late_no_improve else floor_fraction
+    target = int(min(total_i, max(1, math.ceil(total_i * target_fraction))))
+    current = int(max(quotas_out.get("local_probe", 0), 0))
+    info["target_quota"] = int(target)
+    if current >= target:
+        info["reason"] = "already_at_floor"
+        return quotas_out, info
+
+    needed = int(target - current)
+    taken_total = 0
+    for source in ("random", "boundary", "topk", "best_local"):
+        available = int(max(quotas_out.get(source, 0), 0))
+        if available <= 0 or needed <= 0:
+            continue
+        take = int(min(available, needed))
+        quotas_out[source] = int(available - take)
+        info[f"shift_from_{source}"] = int(take)
+        taken_total += int(take)
+        needed -= int(take)
+    if taken_total <= 0:
+        info["reason"] = "no_quota_available"
+        return quotas_out, info
+
+    quotas_out["local_probe"] = int(current + taken_total)
+    info.update({
+        "applied": True,
+        "reason": "recover_local_probe_floor",
+        "quota_after": int(quotas_out.get("local_probe", 0)),
+    })
+    return quotas_out, info
+
+
 def _apply_focus3_boundary_score_penalty(
     *,
     system: OptimizerSystemConfig,
@@ -4690,8 +4757,8 @@ def _build_focus3_plan_refine_starts(
     elif no_improve_count < local_probe_min_no_improve:
         local_probe_info["reason"] = "insufficient_no_improve_count"
     else:
-        requested_probe = float(np.clip(float(getattr(system, "focus3_local_probe_prob", 0.12)), 0.0, 1.0))
-        max_probe = float(np.clip(float(getattr(system, "focus3_local_probe_max_prob", 0.18)), 0.0, 1.0))
+        requested_probe = float(np.clip(float(getattr(system, "focus3_local_probe_prob", 0.16)), 0.0, 1.0))
+        max_probe = float(np.clip(float(getattr(system, "focus3_local_probe_max_prob", 0.25)), 0.0, 1.0))
         p_local_probe = float(min(requested_probe, max_probe))
         local_probe_info.update({
             "active": bool(p_local_probe > 0.0),
@@ -4748,7 +4815,8 @@ def _build_focus3_plan_refine_starts(
         if source == "best_local":
             source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_best_local_pool_ratio", 0.50)), 0.05, 1.0)))))
         elif source == "local_probe":
-            source_pool_size = int(max(2 * lb.shape[0] + 1, min(n_pool, 128)))
+            local_probe_pool_max = int(max(2 * lb.shape[0] + 1, int(getattr(system, "focus3_local_probe_pool_max", 256))))
+            source_pool_size = int(max(2 * lb.shape[0] + 1, min(n_pool, local_probe_pool_max)))
         elif source == "random" and not bool(has_constraints):
             source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_no_constraint_random_pool_ratio", 0.55)), 0.05, 1.0)))))
         pool = _build_source_pool_starts(
@@ -4841,6 +4909,18 @@ def _build_focus3_plan_refine_starts(
         p_best_local=float(p_best_local),
         total=int(n_refine),
     )
+    quotas, local_probe_quota_info = _apply_focus3_local_probe_quota_floor(
+        quotas=quotas,
+        system=system,
+        total=int(n_refine),
+        active=bool(p_local_probe > 0.0),
+        has_constraints=bool(has_constraints),
+        no_improve_count=int(no_improve_count),
+    )
+    local_probe_info["quota_floor_applied"] = bool(local_probe_quota_info.get("applied", False))
+    local_probe_info["quota_floor_reason"] = str(local_probe_quota_info.get("reason", ""))
+    local_probe_info["quota_before"] = int(local_probe_quota_info.get("quota_before", quotas.get("local_probe", 0)))
+    local_probe_info["quota_after"] = int(local_probe_quota_info.get("quota_after", quotas.get("local_probe", 0)))
 
     for source in source_order:
         pool = candidate_parts.get(source, np.empty((0, lb.shape[0]), dtype=float))
@@ -4882,6 +4962,7 @@ def _build_focus3_plan_refine_starts(
         "random_refine_gate": dict(random_refine_gate_info),
         "source_performance": dict(source_performance_info or {}),
         "local_probe": dict(local_probe_info),
+        "local_probe_quota": dict(local_probe_quota_info),
         "boundary_score_penalty": dict(boundary_score_penalty_info),
         "best_plan_source": min(
             [
@@ -4977,7 +5058,8 @@ def _build_focus3_plan_discrete_candidate(
         if source == "best_local":
             source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_best_local_pool_ratio", 0.50)), 0.05, 1.0)))))
         elif source == "local_probe":
-            source_pool_size = int(max(2 * lb.shape[0] + 1, min(n_pool, 128)))
+            local_probe_pool_max = int(max(2 * lb.shape[0] + 1, int(getattr(system, "focus3_local_probe_pool_max", 256))))
+            source_pool_size = int(max(2 * lb.shape[0] + 1, min(n_pool, local_probe_pool_max)))
         elif source == "random" and not bool(has_constraints):
             source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_no_constraint_random_pool_ratio", 0.55)), 0.05, 1.0)))))
         pool = _build_source_pool_starts(
@@ -5187,8 +5269,8 @@ def _build_focus3_local_probe_pool(
     order_local = finite[np.argsort(-y_arr[finite] if objective_sense == "max" else y_arr[finite])]
     best = arr[int(order_local[0])].reshape(-1)
     span = np.maximum(ub - lb, 1e-12)
-    step_ratio = float(max(float(getattr(system, "focus3_local_probe_step_ratio", 0.035)), 1e-9))
-    min_step_ratio = float(max(float(getattr(system, "focus3_local_probe_min_step_ratio", 0.006)), 1e-9))
+    step_ratio = float(max(float(getattr(system, "focus3_local_probe_step_ratio", 0.030)), 1e-9))
+    min_step_ratio = float(max(float(getattr(system, "focus3_local_probe_min_step_ratio", 0.003)), 1e-9))
     elite_count = int(max(2, min(int(getattr(system, "focus3_best_local_top_count", 5)), int(order_local.size))))
     elite = arr[order_local[:elite_count]]
     if elite.shape[0] >= 2:
@@ -5197,7 +5279,10 @@ def _build_focus3_local_probe_pool(
     else:
         step_per_dim = np.full(n_dim, step_ratio, dtype=float)
     step = np.maximum(step_per_dim, min_step_ratio) * span
-    scales = _parse_float_list(getattr(system, "focus3_local_probe_scales", "1.0,0.5,0.25,1.75"), [1.0, 0.5, 0.25, 1.75])
+    scales = _parse_float_list(
+        getattr(system, "focus3_local_probe_scales", "1.0,0.5,0.25,0.1,0.05,1.75,2.5"),
+        [1.0, 0.5, 0.25, 0.1, 0.05, 1.75, 2.5],
+    )
 
     starts: list[np.ndarray] = [np.clip(best, lb, ub)]
     for scale in scales:
@@ -5214,7 +5299,7 @@ def _build_focus3_local_probe_pool(
             if norm <= 1e-12:
                 continue
             unit = direction / max(norm, 1e-12)
-            for scale in (0.5, 1.0):
+            for scale in (0.1, 0.25, 0.5, 1.0):
                 starts.append(np.clip(best + unit * step_ratio * float(scale) * span, lb, ub))
                 starts.append(np.clip(best - unit * step_ratio * float(scale) * span, lb, ub))
 
@@ -6077,7 +6162,7 @@ def run_bo_engine(
             "enabled": bool(getattr(system, "focus3_refine_source_filter_enabled", True)),
             "skipped": False,
             "reason": "",
-            "allowed_sources": str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local")),
+            "allowed_sources": str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local,local_probe")),
         }
         focus3_refine_cooldown_info: dict[str, object] = {
             "enabled": bool(getattr(system, "focus3_refine_cooldown_enabled", True)),
@@ -6890,7 +6975,7 @@ def run_bo_engine(
                     ):
                         allowed_sources = {
                             item.strip()
-                            for item in str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local")).split(",")
+                            for item in str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local,local_probe")).split(",")
                             if item.strip()
                         }
                         refine_allowed = best_plan_source_for_filter in allowed_sources
@@ -6907,7 +6992,7 @@ def run_bo_engine(
                             "skipped": False,
                             "reason": "not_applicable",
                             "best_plan_source": str(best_plan_source_for_filter),
-                            "allowed_sources": str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local")),
+                            "allowed_sources": str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local,local_probe")),
                         }
                     if focus3_plan_mode == "discrete" and refine_starts.shape[0] > 0:
                         x_next = refine_starts[0].copy()

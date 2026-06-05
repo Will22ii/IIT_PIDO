@@ -208,7 +208,7 @@ class OptimizerSystemConfig:
     # Refine 후보가 boundary/random 중심이면 비싼 L-BFGS-B를 생략하고 GP scoring 결과를
     # 그대로 사용한다. RB/GP처럼 budget이 큰 무제약 run에서 runtime을 크게 줄이기 위한 장치다.
     focus3_refine_source_filter_enabled: bool = True
-    focus3_refine_allowed_sources: str = "topk,best_local"
+    focus3_refine_allowed_sources: str = "topk,best_local,local_probe"
     # Random start는 local refine에서 개선 기여가 낮게 관측되었다. 무제약 Focus3에서는
     # random source의 best acquisition score가 topk/best_local보다 충분히 좋을 때만
     # L-BFGS-B refine start quota를 유지한다.
@@ -340,11 +340,15 @@ class OptimizerSystemConfig:
     # 단순 best-local gaussian이 놓치는 좁은 valley 방향을 보완한다.
     focus3_local_probe_enabled: bool = True
     focus3_local_probe_min_no_improve: int = 120
-    focus3_local_probe_prob: float = 0.12
-    focus3_local_probe_max_prob: float = 0.18
-    focus3_local_probe_step_ratio: float = 0.035
-    focus3_local_probe_min_step_ratio: float = 0.006
-    focus3_local_probe_scales: str = "1.0,0.5,0.25,1.75"
+    focus3_local_probe_prob: float = 0.16
+    focus3_local_probe_max_prob: float = 0.25
+    focus3_local_probe_refine_floor_fraction: float = 0.16
+    focus3_local_probe_late_no_improve: int = 300
+    focus3_local_probe_late_refine_floor_fraction: float = 0.24
+    focus3_local_probe_pool_max: int = 256
+    focus3_local_probe_step_ratio: float = 0.030
+    focus3_local_probe_min_step_ratio: float = 0.003
+    focus3_local_probe_scales: str = "1.0,0.5,0.25,0.1,0.05,1.75,2.5"
 
     # ------------------------------------------------------------------
     # Focus2: region manager / TuRBO-lite
