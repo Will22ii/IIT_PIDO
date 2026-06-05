@@ -46,7 +46,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         optimizer_goal=1.2,
         n_samples=450,
         optimizer_n_samples=1050,
-        repeats=10,
+        repeats=50,
     ),
     "cantilever_beam": ProblemCase(
         problem_name="cantilever_beam",
@@ -54,7 +54,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         optimizer_goal=114.66,
         n_samples=90,
         optimizer_n_samples=60,
-        repeats=10,
+        repeats=50,
     ),
     "goldstein_price": ProblemCase(
         problem_name="goldstein_price",
@@ -62,7 +62,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         optimizer_goal=3.6,
         n_samples=150,
         optimizer_n_samples=350,
-        repeats=10,
+        repeats=50,
     ),
     "six_hump_camel": ProblemCase(
         problem_name="six_hump_camel",
@@ -73,7 +73,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         optimizer_goal=-0.86,
         n_samples=50,
         optimizer_n_samples=50,
-        repeats=10,
+        repeats=50,
     ),
     "rosenbrock_nodummy": ProblemCase(
         problem_name="rosenbrock_nodummy",
