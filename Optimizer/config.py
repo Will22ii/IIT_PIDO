@@ -224,6 +224,11 @@ class OptimizerSystemConfig:
     focus3_source_performance_poor_improve_rate: float = 0.003
     focus3_source_performance_random_penalty_fraction: float = 0.75
     focus3_source_performance_random_min_quota_fraction: float = 0.06
+    focus3_source_performance_local_probe_enabled: bool = True
+    focus3_source_performance_local_probe_min_count: int = 12
+    focus3_source_performance_local_probe_poor_improve_rate: float = 0.006
+    focus3_source_performance_local_probe_penalty_fraction: float = 0.70
+    focus3_source_performance_local_probe_min_quota_fraction: float = 0.02
     focus3_refine_cooldown_enabled: bool = True
     focus3_refine_cooldown_window: int = 50
     focus3_refine_cooldown_worse_count: int = 12
@@ -340,12 +345,12 @@ class OptimizerSystemConfig:
     # 단순 best-local gaussian이 놓치는 좁은 valley 방향을 보완한다.
     focus3_local_probe_enabled: bool = True
     focus3_local_probe_min_no_improve: int = 120
-    focus3_local_probe_prob: float = 0.16
-    focus3_local_probe_max_prob: float = 0.25
-    focus3_local_probe_refine_floor_fraction: float = 0.16
-    focus3_local_probe_late_no_improve: int = 300
-    focus3_local_probe_late_refine_floor_fraction: float = 0.24
-    focus3_local_probe_pool_max: int = 256
+    focus3_local_probe_prob: float = 0.10
+    focus3_local_probe_max_prob: float = 0.16
+    focus3_local_probe_refine_floor_fraction: float = 0.06
+    focus3_local_probe_late_no_improve: int = 450
+    focus3_local_probe_late_refine_floor_fraction: float = 0.10
+    focus3_local_probe_pool_max: int = 192
     focus3_local_probe_step_ratio: float = 0.030
     focus3_local_probe_min_step_ratio: float = 0.003
     focus3_local_probe_scales: str = "1.0,0.5,0.25,0.1,0.05,1.75,2.5"

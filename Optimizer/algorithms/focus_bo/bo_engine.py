@@ -1313,6 +1313,11 @@ def _resolve_focus3_source_performance_policy(
     poor_rate = float(max(float(getattr(system, "focus3_source_performance_poor_improve_rate", 0.003)), 0.0))
     penalty_fraction = float(np.clip(float(getattr(system, "focus3_source_performance_random_penalty_fraction", 0.75)), 0.0, 1.0))
     min_quota_fraction = float(np.clip(float(getattr(system, "focus3_source_performance_random_min_quota_fraction", 0.06)), 0.0, 1.0))
+    local_probe_perf_enabled = bool(getattr(system, "focus3_source_performance_local_probe_enabled", True))
+    local_probe_min_count = int(max(int(getattr(system, "focus3_source_performance_local_probe_min_count", 12)), 1))
+    local_probe_poor_rate = float(max(float(getattr(system, "focus3_source_performance_local_probe_poor_improve_rate", 0.006)), 0.0))
+    local_probe_penalty_fraction = float(np.clip(float(getattr(system, "focus3_source_performance_local_probe_penalty_fraction", 0.70)), 0.0, 1.0))
+    local_probe_min_quota_fraction = float(np.clip(float(getattr(system, "focus3_source_performance_local_probe_min_quota_fraction", 0.02)), 0.0, 1.0))
     info: dict[str, object] = {
         "enabled": bool(enabled),
         "applied": False,
@@ -1325,10 +1330,18 @@ def _resolve_focus3_source_performance_policy(
         "poor_improve_rate": float(poor_rate),
         "penalty_fraction": float(penalty_fraction),
         "random_min_quota_fraction": float(min_quota_fraction),
+        "local_probe_performance_enabled": bool(local_probe_perf_enabled),
+        "local_probe_min_source_count": int(local_probe_min_count),
+        "local_probe_poor_improve_rate": float(local_probe_poor_rate),
+        "local_probe_penalty_fraction": float(local_probe_penalty_fraction),
+        "local_probe_min_quota_fraction": float(local_probe_min_quota_fraction),
         "penalized_sources": "",
         "random_refine_count": 0,
         "random_refine_improved_count": 0,
         "random_refine_improve_rate": float("nan"),
+        "local_probe_refine_count": 0,
+        "local_probe_refine_improved_count": 0,
+        "local_probe_refine_improve_rate": float("nan"),
         "best_local_refine_count": 0,
         "best_local_refine_improve_rate": float("nan"),
         "topk_refine_count": 0,
@@ -1339,6 +1352,10 @@ def _resolve_focus3_source_performance_policy(
         "quota_random_after": 0,
         "quota_shift_to_best_local": 0,
         "quota_shift_to_topk": 0,
+        "quota_local_probe_before": 0,
+        "quota_local_probe_after": 0,
+        "quota_shift_local_probe_to_best_local": 0,
+        "quota_shift_local_probe_to_topk": 0,
     }
     if not enabled:
         return info
@@ -1364,7 +1381,7 @@ def _resolve_focus3_source_performance_policy(
             return bool(val)
         return str(val).strip().lower() in {"true", "1", "yes"}
 
-    for src in ("random", "best_local", "topk", "boundary"):
+    for src in ("random", "local_probe", "best_local", "topk", "boundary"):
         src_rows = [r for r in recent if str(r.get("focus3_nearest_refine_source", "")).strip() == src]
         count = int(len(src_rows))
         imp = int(sum(1 for r in src_rows if _improved(r)))
@@ -1373,19 +1390,38 @@ def _resolve_focus3_source_performance_policy(
         info[f"{src}_refine_improved_count"] = int(imp)
         info[f"{src}_refine_improve_rate"] = float(rate)
 
+    penalized: list[str] = []
+    reasons: list[str] = []
     random_count = int(info.get("random_refine_count", 0))
     random_rate = float(info.get("random_refine_improve_rate", float("nan")))
-    if random_count < min_count:
-        info["reason"] = "random_count_below_threshold"
-        return info
-    if math.isfinite(random_rate) and random_rate <= poor_rate:
+    if random_count >= min_count and math.isfinite(random_rate) and random_rate <= poor_rate:
+        penalized.append("random")
+        reasons.append("random_refine_recently_unproductive")
+    elif random_count < min_count:
+        reasons.append("random_count_below_threshold")
+    else:
+        reasons.append("random_refine_performance_ok")
+
+    local_probe_count = int(info.get("local_probe_refine_count", 0))
+    local_probe_rate = float(info.get("local_probe_refine_improve_rate", float("nan")))
+    if not bool(local_probe_perf_enabled):
+        reasons.append("local_probe_perf_disabled")
+    elif local_probe_count >= local_probe_min_count and math.isfinite(local_probe_rate) and local_probe_rate <= local_probe_poor_rate:
+        penalized.append("local_probe")
+        reasons.append("local_probe_refine_recently_unproductive")
+    elif local_probe_count < local_probe_min_count:
+        reasons.append("local_probe_count_below_threshold")
+    else:
+        reasons.append("local_probe_refine_performance_ok")
+
+    if penalized:
         info.update({
             "applied": True,
-            "reason": "random_refine_recently_unproductive",
-            "penalized_sources": "random",
+            "reason": "+".join(reasons),
+            "penalized_sources": ",".join(penalized),
         })
     else:
-        info["reason"] = "random_refine_performance_ok"
+        info["reason"] = "+".join(reasons)
     return info
 
 
@@ -1402,40 +1438,69 @@ def _apply_focus3_source_performance_to_quotas(
     info.setdefault("quota_random_after", int(quotas_out.get("random", 0)))
     info.setdefault("quota_shift_to_best_local", 0)
     info.setdefault("quota_shift_to_topk", 0)
+    info.setdefault("quota_local_probe_before", int(quotas_out.get("local_probe", 0)))
+    info.setdefault("quota_local_probe_after", int(quotas_out.get("local_probe", 0)))
+    info.setdefault("quota_shift_local_probe_to_best_local", 0)
+    info.setdefault("quota_shift_local_probe_to_topk", 0)
     if not bool(info.get("applied", False)):
         return quotas_out, info
     penalized = {item.strip() for item in str(info.get("penalized_sources", "")).split(",") if item.strip()}
-    if "random" not in penalized:
-        return quotas_out, info
 
-    old_random = int(max(quotas_out.get("random", 0), 0))
-    info["quota_random_before"] = int(old_random)
-    if old_random <= 0:
-        info["reason"] = str(info.get("reason", "")) + "+no_random_quota"
-        return quotas_out, info
+    if "random" in penalized:
+        old_random = int(max(quotas_out.get("random", 0), 0))
+        info["quota_random_before"] = int(old_random)
+        if old_random <= 0:
+            info["reason"] = str(info.get("reason", "")) + "+no_random_quota"
+        else:
+            penalty_fraction = float(np.clip(float(info.get("penalty_fraction", 0.75)), 0.0, 1.0))
+            min_fraction = float(np.clip(float(info.get("random_min_quota_fraction", 0.06)), 0.0, 1.0))
+            min_quota = int(math.ceil(max(int(total), 1) * min_fraction))
+            target_random = int(max(min_quota, math.ceil(old_random * (1.0 - penalty_fraction))))
+            target_random = int(min(target_random, old_random))
+            shift = int(max(old_random - target_random, 0))
+            quotas_out["random"] = int(target_random)
+            info["quota_random_after"] = int(target_random)
+            if shift <= 0:
+                info["reason"] = str(info.get("reason", "")) + "+random_at_floor"
+            else:
+                if float(p_best_local) > 0.0:
+                    to_best = int(math.ceil(shift * 0.65))
+                    to_topk = int(max(shift - to_best, 0))
+                else:
+                    to_best = 0
+                    to_topk = int(shift)
+                quotas_out["best_local"] = int(quotas_out.get("best_local", 0)) + int(to_best)
+                quotas_out["topk"] = int(quotas_out.get("topk", 0)) + int(to_topk)
+                info["quota_shift_to_best_local"] = int(to_best)
+                info["quota_shift_to_topk"] = int(to_topk)
 
-    penalty_fraction = float(np.clip(float(info.get("penalty_fraction", 0.75)), 0.0, 1.0))
-    min_fraction = float(np.clip(float(info.get("random_min_quota_fraction", 0.06)), 0.0, 1.0))
-    min_quota = int(math.ceil(max(int(total), 1) * min_fraction))
-    target_random = int(max(min_quota, math.ceil(old_random * (1.0 - penalty_fraction))))
-    target_random = int(min(target_random, old_random))
-    shift = int(max(old_random - target_random, 0))
-    quotas_out["random"] = int(target_random)
-    info["quota_random_after"] = int(target_random)
-    if shift <= 0:
-        info["reason"] = str(info.get("reason", "")) + "+random_at_floor"
-        return quotas_out, info
-
-    if float(p_best_local) > 0.0:
-        to_best = int(math.ceil(shift * 0.65))
-        to_topk = int(max(shift - to_best, 0))
-    else:
-        to_best = 0
-        to_topk = int(shift)
-    quotas_out["best_local"] = int(quotas_out.get("best_local", 0)) + int(to_best)
-    quotas_out["topk"] = int(quotas_out.get("topk", 0)) + int(to_topk)
-    info["quota_shift_to_best_local"] = int(to_best)
-    info["quota_shift_to_topk"] = int(to_topk)
+    if "local_probe" in penalized:
+        old_local = int(max(quotas_out.get("local_probe", 0), 0))
+        info["quota_local_probe_before"] = int(old_local)
+        if old_local <= 0:
+            info["reason"] = str(info.get("reason", "")) + "+no_local_probe_quota"
+        else:
+            penalty_fraction = float(np.clip(float(info.get("local_probe_penalty_fraction", 0.70)), 0.0, 1.0))
+            min_fraction = float(np.clip(float(info.get("local_probe_min_quota_fraction", 0.02)), 0.0, 1.0))
+            min_quota = int(math.ceil(max(int(total), 1) * min_fraction))
+            target_local = int(max(min_quota, math.ceil(old_local * (1.0 - penalty_fraction))))
+            target_local = int(min(target_local, old_local))
+            shift = int(max(old_local - target_local, 0))
+            quotas_out["local_probe"] = int(target_local)
+            info["quota_local_probe_after"] = int(target_local)
+            if shift <= 0:
+                info["reason"] = str(info.get("reason", "")) + "+local_probe_at_floor"
+            else:
+                if float(p_best_local) > 0.0:
+                    to_best = int(math.ceil(shift * 0.75))
+                    to_topk = int(max(shift - to_best, 0))
+                else:
+                    to_best = 0
+                    to_topk = int(shift)
+                quotas_out["best_local"] = int(quotas_out.get("best_local", 0)) + int(to_best)
+                quotas_out["topk"] = int(quotas_out.get("topk", 0)) + int(to_topk)
+                info["quota_shift_local_probe_to_best_local"] = int(to_best)
+                info["quota_shift_local_probe_to_topk"] = int(to_topk)
     return quotas_out, info
 
 
@@ -1471,9 +1536,9 @@ def _apply_focus3_local_probe_quota_floor(
         return quotas_out, info
 
     total_i = int(max(int(total), 1))
-    late_no_improve = int(max(int(getattr(system, "focus3_local_probe_late_no_improve", 300)), 0))
-    floor_fraction = float(np.clip(float(getattr(system, "focus3_local_probe_refine_floor_fraction", 0.16)), 0.0, 1.0))
-    late_fraction = float(np.clip(float(getattr(system, "focus3_local_probe_late_refine_floor_fraction", 0.24)), 0.0, 1.0))
+    late_no_improve = int(max(int(getattr(system, "focus3_local_probe_late_no_improve", 450)), 0))
+    floor_fraction = float(np.clip(float(getattr(system, "focus3_local_probe_refine_floor_fraction", 0.06)), 0.0, 1.0))
+    late_fraction = float(np.clip(float(getattr(system, "focus3_local_probe_late_refine_floor_fraction", 0.10)), 0.0, 1.0))
     target_fraction = late_fraction if int(no_improve_count) >= late_no_improve else floor_fraction
     target = int(min(total_i, max(1, math.ceil(total_i * target_fraction))))
     current = int(max(quotas_out.get("local_probe", 0), 0))
@@ -4757,8 +4822,8 @@ def _build_focus3_plan_refine_starts(
     elif no_improve_count < local_probe_min_no_improve:
         local_probe_info["reason"] = "insufficient_no_improve_count"
     else:
-        requested_probe = float(np.clip(float(getattr(system, "focus3_local_probe_prob", 0.16)), 0.0, 1.0))
-        max_probe = float(np.clip(float(getattr(system, "focus3_local_probe_max_prob", 0.25)), 0.0, 1.0))
+        requested_probe = float(np.clip(float(getattr(system, "focus3_local_probe_prob", 0.10)), 0.0, 1.0))
+        max_probe = float(np.clip(float(getattr(system, "focus3_local_probe_max_prob", 0.16)), 0.0, 1.0))
         p_local_probe = float(min(requested_probe, max_probe))
         local_probe_info.update({
             "active": bool(p_local_probe > 0.0),
@@ -4815,7 +4880,7 @@ def _build_focus3_plan_refine_starts(
         if source == "best_local":
             source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_best_local_pool_ratio", 0.50)), 0.05, 1.0)))))
         elif source == "local_probe":
-            local_probe_pool_max = int(max(2 * lb.shape[0] + 1, int(getattr(system, "focus3_local_probe_pool_max", 256))))
+            local_probe_pool_max = int(max(2 * lb.shape[0] + 1, int(getattr(system, "focus3_local_probe_pool_max", 192))))
             source_pool_size = int(max(2 * lb.shape[0] + 1, min(n_pool, local_probe_pool_max)))
         elif source == "random" and not bool(has_constraints):
             source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_no_constraint_random_pool_ratio", 0.55)), 0.05, 1.0)))))
@@ -4909,11 +4974,16 @@ def _build_focus3_plan_refine_starts(
         p_best_local=float(p_best_local),
         total=int(n_refine),
     )
+    local_probe_perf_penalized = "local_probe" in {
+        item.strip()
+        for item in str((source_performance_info or {}).get("penalized_sources", "")).split(",")
+        if item.strip()
+    }
     quotas, local_probe_quota_info = _apply_focus3_local_probe_quota_floor(
         quotas=quotas,
         system=system,
         total=int(n_refine),
-        active=bool(p_local_probe > 0.0),
+        active=bool(p_local_probe > 0.0 and not local_probe_perf_penalized),
         has_constraints=bool(has_constraints),
         no_improve_count=int(no_improve_count),
     )
@@ -4921,6 +4991,7 @@ def _build_focus3_plan_refine_starts(
     local_probe_info["quota_floor_reason"] = str(local_probe_quota_info.get("reason", ""))
     local_probe_info["quota_before"] = int(local_probe_quota_info.get("quota_before", quotas.get("local_probe", 0)))
     local_probe_info["quota_after"] = int(local_probe_quota_info.get("quota_after", quotas.get("local_probe", 0)))
+    local_probe_info["performance_penalized"] = bool(local_probe_perf_penalized)
 
     for source in source_order:
         pool = candidate_parts.get(source, np.empty((0, lb.shape[0]), dtype=float))
@@ -5058,7 +5129,7 @@ def _build_focus3_plan_discrete_candidate(
         if source == "best_local":
             source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_best_local_pool_ratio", 0.50)), 0.05, 1.0)))))
         elif source == "local_probe":
-            local_probe_pool_max = int(max(2 * lb.shape[0] + 1, int(getattr(system, "focus3_local_probe_pool_max", 256))))
+            local_probe_pool_max = int(max(2 * lb.shape[0] + 1, int(getattr(system, "focus3_local_probe_pool_max", 192))))
             source_pool_size = int(max(2 * lb.shape[0] + 1, min(n_pool, local_probe_pool_max)))
         elif source == "random" and not bool(has_constraints):
             source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_no_constraint_random_pool_ratio", 0.55)), 0.05, 1.0)))))
@@ -7492,6 +7563,7 @@ def run_bo_engine(
             "focus3_local_probe_active": bool(focus3_local_probe_info.get("active", False)) if focus3_local_probe_info else False,
             "focus3_local_probe_reason": str(focus3_local_probe_info.get("reason", "")) if focus3_local_probe_info else "",
             "focus3_local_probe_prob": float(focus3_local_probe_info.get("prob", 0.0)) if focus3_local_probe_info else 0.0,
+            "focus3_local_probe_performance_penalized": bool(focus3_local_probe_info.get("performance_penalized", False)) if focus3_local_probe_info else False,
             "focus3_random_cover_enabled": bool(focus3_random_cover_info.get("enabled", False)),
             "focus3_random_cover_candidate_count": int(focus3_random_cover_info.get("candidate_count", 0)),
             "focus3_random_cover_acq_threshold": float(focus3_random_cover_info.get("acq_threshold", float("nan"))),
@@ -7529,6 +7601,9 @@ def run_bo_engine(
             "focus3_source_perf_random_count": int(focus3_source_perf_info.get("random_refine_count", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_random_improved_count": int(focus3_source_perf_info.get("random_refine_improved_count", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_random_improve_rate": float(focus3_source_perf_info.get("random_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
+            "focus3_source_perf_local_probe_count": int(focus3_source_perf_info.get("local_probe_refine_count", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_local_probe_improved_count": int(focus3_source_perf_info.get("local_probe_refine_improved_count", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_local_probe_improve_rate": float(focus3_source_perf_info.get("local_probe_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
             "focus3_source_perf_best_local_count": int(focus3_source_perf_info.get("best_local_refine_count", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_best_local_improve_rate": float(focus3_source_perf_info.get("best_local_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
             "focus3_source_perf_topk_count": int(focus3_source_perf_info.get("topk_refine_count", 0)) if focus3_source_perf_info else 0,
@@ -7537,6 +7612,10 @@ def run_bo_engine(
             "focus3_source_perf_quota_random_after": int(focus3_source_perf_info.get("quota_random_after", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_quota_shift_to_best_local": int(focus3_source_perf_info.get("quota_shift_to_best_local", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_quota_shift_to_topk": int(focus3_source_perf_info.get("quota_shift_to_topk", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_quota_local_probe_before": int(focus3_source_perf_info.get("quota_local_probe_before", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_quota_local_probe_after": int(focus3_source_perf_info.get("quota_local_probe_after", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_quota_shift_local_probe_to_best_local": int(focus3_source_perf_info.get("quota_shift_local_probe_to_best_local", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_quota_shift_local_probe_to_topk": int(focus3_source_perf_info.get("quota_shift_local_probe_to_topk", 0)) if focus3_source_perf_info else 0,
             "focus3_boundary_score_penalty_enabled": bool(focus3_boundary_score_penalty_info.get("enabled", False)) if focus3_boundary_score_penalty_info else False,
             "focus3_boundary_score_penalty_applied": bool(focus3_boundary_score_penalty_info.get("applied", False)) if focus3_boundary_score_penalty_info else False,
             "focus3_boundary_score_penalty_reason": str(focus3_boundary_score_penalty_info.get("reason", "")) if focus3_boundary_score_penalty_info else "",
