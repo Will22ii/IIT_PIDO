@@ -233,7 +233,7 @@ class OptimizerSystemConfig:
     focus3_source_performance_local_probe_min_quota_fraction: float = 0.02
     focus3_source_performance_boundary_enabled: bool = True
     focus3_source_performance_boundary_min_count: int = 12
-    focus3_source_performance_boundary_poor_improve_rate: float = 0.006
+    focus3_source_performance_boundary_poor_improve_rate: float = 0.003
     focus3_source_performance_boundary_penalty_fraction: float = 0.85
     focus3_source_performance_boundary_min_quota_fraction: float = 0.01
     focus3_refine_cooldown_enabled: bool = True

@@ -1612,6 +1612,55 @@ def _apply_focus3_source_performance_to_quotas(
     return quotas_out, info
 
 
+def _focus3_penalized_sources(
+    *,
+    source_performance_info: dict[str, object] | None,
+    has_constraints: bool,
+) -> set[str]:
+    if bool(has_constraints) or not isinstance(source_performance_info, dict):
+        return set()
+    return {
+        item.strip()
+        for item in str(source_performance_info.get("penalized_sources", "")).split(",")
+        if item.strip()
+    }
+
+
+def _filter_focus3_penalized_best_rows(
+    *,
+    best_rows: list[tuple[str, np.ndarray, float]],
+    penalized_sources: set[str],
+) -> tuple[list[tuple[str, np.ndarray, float]], dict[str, object]]:
+    removable = {"random", "boundary"}.intersection(set(penalized_sources))
+    info: dict[str, object] = {
+        "enabled": True,
+        "applied": False,
+        "reason": "no_penalized_best_plan_sources" if not removable else "not_applied",
+        "penalized_sources": ",".join(sorted(removable)),
+        "removed_count": 0,
+        "before_count": int(len(best_rows)),
+        "after_count": int(len(best_rows)),
+    }
+    if not removable:
+        return best_rows, info
+    filtered = [row for row in best_rows if str(row[0]) not in removable]
+    removed_count = int(len(best_rows) - len(filtered))
+    if removed_count <= 0:
+        info["reason"] = "no_penalized_candidate_rows"
+        return best_rows, info
+    if not filtered:
+        info["reason"] = "would_remove_all_candidates"
+        info["removed_count"] = int(removed_count)
+        return best_rows, info
+    info.update({
+        "applied": True,
+        "reason": "penalized_source_removed_from_best_plan",
+        "removed_count": int(removed_count),
+        "after_count": int(len(filtered)),
+    })
+    return filtered, info
+
+
 def _apply_focus3_local_probe_quota_floor(
     *,
     quotas: dict[str, int],
@@ -5082,11 +5131,11 @@ def _build_focus3_plan_refine_starts(
         p_best_local=float(p_best_local),
         total=int(n_refine),
     )
-    local_probe_perf_penalized = "local_probe" in {
-        item.strip()
-        for item in str((source_performance_info or {}).get("penalized_sources", "")).split(",")
-        if item.strip()
-    }
+    penalized_sources = _focus3_penalized_sources(
+        source_performance_info=source_performance_info,
+        has_constraints=bool(has_constraints),
+    )
+    local_probe_perf_penalized = "local_probe" in penalized_sources
     quotas, local_probe_quota_info = _apply_focus3_local_probe_quota_floor(
         quotas=quotas,
         system=system,
@@ -5131,6 +5180,49 @@ def _build_focus3_plan_refine_starts(
     if starts.shape[0] > n_refine:
         starts = starts[:n_refine]
         selected_labels = selected_labels[:n_refine]
+    gate_excluded_sources = {
+        s
+        for s, applied in (
+            ("boundary", bool(boundary_gate_info.get("applied", False))),
+            ("random", bool(random_refine_gate_info.get("applied", False))),
+        )
+        if applied
+    }
+    finite_best_score_sources = [
+        s
+        for s in best_scores.keys()
+        if math.isfinite(float(best_scores[s]))
+    ]
+    best_plan_sources_before_perf = [
+        s for s in finite_best_score_sources if s not in gate_excluded_sources
+    ]
+    perf_removable_sources = {"random", "boundary"}.intersection(penalized_sources)
+    best_plan_sources = [
+        s
+        for s in best_plan_sources_before_perf
+        if s not in perf_removable_sources
+    ]
+    perf_removed_count = int(len(best_plan_sources_before_perf) - len(best_plan_sources))
+    perf_filter_applied = bool(perf_removed_count > 0 and len(best_plan_sources) > 0)
+    if not perf_removable_sources:
+        perf_filter_reason = "no_penalized_best_plan_sources"
+    elif perf_removed_count <= 0:
+        perf_filter_reason = "no_penalized_candidate_rows"
+    elif not best_plan_sources:
+        perf_filter_reason = "would_remove_all_candidates"
+    else:
+        perf_filter_reason = "penalized_source_removed_from_best_plan"
+    source_perf_best_plan_filter_info = {
+        "enabled": True,
+        "applied": bool(perf_filter_applied),
+        "reason": str(perf_filter_reason),
+        "penalized_sources": ",".join(sorted(perf_removable_sources)),
+        "removed_count": int(perf_removed_count),
+        "before_count": int(len(best_plan_sources_before_perf)),
+        "after_count": int(len(best_plan_sources)),
+    }
+    if not best_plan_sources:
+        best_plan_sources = [s for s in finite_best_score_sources if s not in gate_excluded_sources]
     diag = {
         "quotas": {k: int(v) for k, v in quotas.items()},
         "best_scores": best_scores,
@@ -5140,24 +5232,15 @@ def _build_focus3_plan_refine_starts(
         "boundary_gate": dict(boundary_gate_info),
         "random_refine_gate": dict(random_refine_gate_info),
         "source_performance": dict(source_performance_info or {}),
+        "source_perf_best_plan_filter": dict(source_perf_best_plan_filter_info),
         "local_probe": dict(local_probe_info),
         "local_probe_quota": dict(local_probe_quota_info),
         "boundary_score_penalty": dict(boundary_score_penalty_info),
         "best_plan_source": min(
-            [
-                s
-                for s in best_scores.keys()
-                if not (s == "boundary" and bool(boundary_gate_info.get("applied", False)))
-                and not (s == "random" and bool(random_refine_gate_info.get("applied", False)))
-            ],
+            best_plan_sources,
             key=lambda s: best_scores[s] if math.isfinite(float(best_scores[s])) else float("inf"),
         )
-        if best_scores and [
-            s
-            for s in best_scores.keys()
-            if not (s == "boundary" and bool(boundary_gate_info.get("applied", False)))
-            and not (s == "random" and bool(random_refine_gate_info.get("applied", False)))
-        ]
+        if best_scores and best_plan_sources
         else "",
     }
     return np.asarray(starts, dtype=float), pool_counts, selected_counts, diag
@@ -5188,6 +5271,7 @@ def _build_focus3_plan_discrete_candidate(
     post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
     post_penalty_lambda: float,
     has_constraints: bool,
+    source_performance_info: dict[str, object] | None = None,
     recover_info: dict[str, object] | None = None,
 ) -> tuple[np.ndarray | None, dict[str, int], dict[str, int], dict[str, object]]:
     n_pool = int(max(plan_pool_per_source, 1))
@@ -5197,6 +5281,19 @@ def _build_focus3_plan_discrete_candidate(
     best_rows: list[tuple[str, np.ndarray, float]] = []
     boundary_score_penalty_info: dict[str, object] = {}
     plan_acq = _normalize_focus3_acq_type(acq_type)
+    penalized_sources = _focus3_penalized_sources(
+        source_performance_info=source_performance_info,
+        has_constraints=bool(has_constraints),
+    )
+    source_perf_best_plan_filter_info: dict[str, object] = {
+        "enabled": True,
+        "applied": False,
+        "reason": "not_evaluated",
+        "penalized_sources": ",".join(sorted({"random", "boundary"}.intersection(penalized_sources))),
+        "removed_count": 0,
+        "before_count": 0,
+        "after_count": 0,
+    }
 
     local_probe_info: dict[str, object] = {
         "enabled": bool(getattr(system, "focus3_local_probe_enabled", True)),
@@ -5314,6 +5411,11 @@ def _build_focus3_plan_discrete_candidate(
         best_rows = [row for row in best_rows if str(row[0]) != "random"]
         random_discrete_gate_info = dict(recover_random_discrete_gate_info)
 
+    best_rows, source_perf_best_plan_filter_info = _filter_focus3_penalized_best_rows(
+        best_rows=best_rows,
+        penalized_sources=penalized_sources,
+    )
+
     if not best_rows:
         return None, pool_counts, selected_counts, {
             "mode": "discrete",
@@ -5323,6 +5425,8 @@ def _build_focus3_plan_discrete_candidate(
             "best_plan_source": "",
             "boundary_gate": dict(boundary_gate_info),
             "random_discrete_gate": dict(random_discrete_gate_info),
+            "source_performance": dict(source_performance_info or {}),
+            "source_perf_best_plan_filter": dict(source_perf_best_plan_filter_info),
             "local_probe": dict(local_probe_info),
             "boundary_score_penalty": dict(boundary_score_penalty_info),
             "random_cover": {
@@ -5358,6 +5462,8 @@ def _build_focus3_plan_discrete_candidate(
         "best_plan_score": float(score_best),
         "boundary_gate": dict(boundary_gate_info),
         "random_discrete_gate": dict(random_discrete_gate_info),
+        "source_performance": dict(source_performance_info or {}),
+        "source_perf_best_plan_filter": dict(source_perf_best_plan_filter_info),
         "local_probe": dict(local_probe_info),
         "boundary_score_penalty": dict(boundary_score_penalty_info),
         "random_cover": random_cover_info,
@@ -6333,6 +6439,7 @@ def run_bo_engine(
         focus3_random_discrete_gate_info: dict[str, object] = {}
         focus3_boundary_score_penalty_info: dict[str, object] = {}
         focus3_source_perf_info: dict[str, object] = {}
+        focus3_source_perf_best_plan_filter_info: dict[str, object] = {}
         focus3_recover_info: dict[str, object] = {}
         focus3_source_cap_info: dict[str, object] = {}
         focus3_best_local_info: dict[str, object] = {}
@@ -7108,6 +7215,7 @@ def run_bo_engine(
                             post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                             post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
                             has_constraints=bool(constraint_defs),
+                            source_performance_info=focus3_source_perf_info,
                             recover_info=focus3_recover_info,
                         )
                         refine_starts = x_discrete.reshape(1, -1) if x_discrete is not None else np.empty((0, p_dim), dtype=float)
@@ -7143,6 +7251,9 @@ def run_bo_engine(
                     source_perf = focus3_plan_diag.get("source_performance", {})
                     if isinstance(source_perf, dict) and source_perf:
                         focus3_source_perf_info = dict(source_perf)
+                    source_perf_best_plan_filter = focus3_plan_diag.get("source_perf_best_plan_filter", {})
+                    if isinstance(source_perf_best_plan_filter, dict):
+                        focus3_source_perf_best_plan_filter_info = dict(source_perf_best_plan_filter)
                     local_probe = focus3_plan_diag.get("local_probe", {})
                     if isinstance(local_probe, dict):
                         focus3_local_probe_info = dict(local_probe)
@@ -7714,6 +7825,10 @@ def run_bo_engine(
             "focus3_source_perf_recovery_active": bool(focus3_source_perf_info.get("recovery_active", False)) if focus3_source_perf_info else False,
             "focus3_source_perf_window": int(focus3_source_perf_info.get("window", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_penalized_sources": str(focus3_source_perf_info.get("penalized_sources", "")) if focus3_source_perf_info else "",
+            "focus3_source_perf_best_plan_filter_applied": bool(focus3_source_perf_best_plan_filter_info.get("applied", False)) if focus3_source_perf_best_plan_filter_info else False,
+            "focus3_source_perf_best_plan_filter_reason": str(focus3_source_perf_best_plan_filter_info.get("reason", "")) if focus3_source_perf_best_plan_filter_info else "",
+            "focus3_source_perf_best_plan_filter_penalized_sources": str(focus3_source_perf_best_plan_filter_info.get("penalized_sources", "")) if focus3_source_perf_best_plan_filter_info else "",
+            "focus3_source_perf_best_plan_filter_removed_count": int(focus3_source_perf_best_plan_filter_info.get("removed_count", 0)) if focus3_source_perf_best_plan_filter_info else 0,
             "focus3_source_perf_random_count": int(focus3_source_perf_info.get("random_refine_count", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_random_improved_count": int(focus3_source_perf_info.get("random_refine_improved_count", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_random_improve_rate": float(focus3_source_perf_info.get("random_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
