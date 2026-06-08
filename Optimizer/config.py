@@ -213,17 +213,19 @@ class OptimizerSystemConfig:
     # random source의 best acquisition score가 topk/best_local보다 충분히 좋을 때만
     # L-BFGS-B refine start quota를 유지한다.
     focus3_no_constraint_random_refine_gate_enabled: bool = True
-    focus3_no_constraint_random_refine_gate_margin_ratio: float = 0.03
+    focus3_no_constraint_random_refine_gate_margin_ratio: float = 0.08
+    focus3_no_constraint_random_discrete_gate_enabled: bool = True
+    focus3_no_constraint_random_discrete_gate_margin_ratio: float = 0.08
     # 최근 실제 source 성과를 보고 refine start quota를 보정한다. Acquisition score만으로
     # random을 계속 refine하는 현상을 막기 위한 장치이며, 무제약 Focus3에만 적용한다.
     focus3_source_performance_policy_enabled: bool = True
-    focus3_source_performance_recover_only: bool = True
+    focus3_source_performance_recover_only: bool = False
     focus3_source_performance_window: int = 120
-    focus3_source_performance_min_focus3_evals: int = 80
-    focus3_source_performance_min_source_count: int = 20
-    focus3_source_performance_poor_improve_rate: float = 0.003
-    focus3_source_performance_random_penalty_fraction: float = 0.75
-    focus3_source_performance_random_min_quota_fraction: float = 0.06
+    focus3_source_performance_min_focus3_evals: int = 60
+    focus3_source_performance_min_source_count: int = 12
+    focus3_source_performance_poor_improve_rate: float = 0.006
+    focus3_source_performance_random_penalty_fraction: float = 0.85
+    focus3_source_performance_random_min_quota_fraction: float = 0.03
     focus3_source_performance_local_probe_enabled: bool = True
     focus3_source_performance_local_probe_min_count: int = 12
     focus3_source_performance_local_probe_poor_improve_rate: float = 0.006
@@ -274,12 +276,12 @@ class OptimizerSystemConfig:
     # random gets the same pool size as structured sources, it can win simply
     # through broad coverage. Keep random available, but smaller in unconstrained
     # local search where topk/best_local have shown better improvement rates.
-    focus3_no_constraint_random_pool_ratio: float = 0.55
+    focus3_no_constraint_random_pool_ratio: float = 0.35
     # RB처럼 narrow valley를 가진 문제에서는 top-k 전체보다 현재 best 주변을 더 촘촘히
     # 파는 source가 필요하다. best_local은 topk quota 일부를 가져와 좁은 sigma로 후보를 만든다.
     focus3_best_local_enabled: bool = True
-    focus3_best_local_prob: float = 0.30
-    focus3_best_local_max_prob: float = 0.45
+    focus3_best_local_prob: float = 0.38
+    focus3_best_local_max_prob: float = 0.58
     focus3_best_local_min_focus3_evals: int = 3
     focus3_best_local_min_data_ratio: float = 5.0
     focus3_best_local_sigma: float = 0.015
@@ -287,7 +289,7 @@ class OptimizerSystemConfig:
     focus3_best_local_sigma_mid_eval: int = 80
     focus3_best_local_sigma_mid: float = 0.010
     focus3_best_local_sigma_late_eval: int = 250
-    focus3_best_local_sigma_late: float = 0.006
+    focus3_best_local_sigma_late: float = 0.004
     focus3_best_local_sigma_recover_strong_multiplier: float = 0.85
     focus3_best_local_top_count: int = 5
     focus3_best_local_pool_ratio: float = 0.90
@@ -344,16 +346,16 @@ class OptimizerSystemConfig:
     # Recovery 중에는 best 주변의 축/대각 probe 후보를 별도 source로 넣어
     # 단순 best-local gaussian이 놓치는 좁은 valley 방향을 보완한다.
     focus3_local_probe_enabled: bool = True
-    focus3_local_probe_min_no_improve: int = 120
-    focus3_local_probe_prob: float = 0.10
-    focus3_local_probe_max_prob: float = 0.16
-    focus3_local_probe_refine_floor_fraction: float = 0.06
-    focus3_local_probe_late_no_improve: int = 450
-    focus3_local_probe_late_refine_floor_fraction: float = 0.10
+    focus3_local_probe_min_no_improve: int = 80
+    focus3_local_probe_prob: float = 0.12
+    focus3_local_probe_max_prob: float = 0.20
+    focus3_local_probe_refine_floor_fraction: float = 0.10
+    focus3_local_probe_late_no_improve: int = 320
+    focus3_local_probe_late_refine_floor_fraction: float = 0.16
     focus3_local_probe_pool_max: int = 192
     focus3_local_probe_step_ratio: float = 0.030
-    focus3_local_probe_min_step_ratio: float = 0.003
-    focus3_local_probe_scales: str = "1.0,0.5,0.25,0.1,0.05,1.75,2.5"
+    focus3_local_probe_min_step_ratio: float = 0.0015
+    focus3_local_probe_scales: str = "1.0,0.5,0.25,0.1,0.05,0.025,0.01,1.75,2.5"
 
     # ------------------------------------------------------------------
     # Focus2: region manager / TuRBO-lite

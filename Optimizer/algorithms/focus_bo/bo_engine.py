@@ -1237,6 +1237,55 @@ def _focus3_no_constraint_random_refine_gate(
     return info
 
 
+def _focus3_no_constraint_random_discrete_gate(
+    *,
+    system: OptimizerSystemConfig,
+    best_scores: dict[str, float],
+    has_constraints: bool,
+) -> dict[str, object]:
+    enabled = bool(getattr(system, "focus3_no_constraint_random_discrete_gate_enabled", True))
+    r_score = float(best_scores.get("random", float("nan")))
+    info: dict[str, object] = {
+        "enabled": bool(enabled),
+        "applied": False,
+        "allowed": True,
+        "reason": "disabled" if not enabled else "",
+        "recovery_active": False,
+        "margin": float("nan"),
+        "random_score": float(r_score),
+        "structured_best": float("nan"),
+    }
+    if not enabled:
+        return info
+    if bool(has_constraints):
+        info["reason"] = "constraints_present"
+        return info
+    structured = [
+        float(best_scores.get(src, float("nan")))
+        for src in ("topk", "best_local", "local_probe")
+        if math.isfinite(float(best_scores.get(src, float("nan"))))
+    ]
+    if not math.isfinite(r_score):
+        info.update({"allowed": False, "applied": True, "reason": "random_score_nan"})
+        return info
+    if not structured:
+        info["reason"] = "no_structured_candidate"
+        return info
+    s_best = float(min(structured))
+    margin_ratio = float(max(float(getattr(system, "focus3_no_constraint_random_discrete_gate_margin_ratio", 0.08)), 0.0))
+    margin = float(max(abs(s_best), abs(r_score), 1.0) * margin_ratio)
+    allowed = bool(r_score <= s_best - margin)
+    info.update({
+        "allowed": bool(allowed),
+        "applied": bool(not allowed),
+        "reason": "random_not_sufficiently_better" if not allowed else "random_sufficiently_better",
+        "margin": float(margin),
+        "random_score": float(r_score),
+        "structured_best": float(s_best),
+    })
+    return info
+
+
 def _focus3_recover_random_discrete_gate(
     *,
     system: OptimizerSystemConfig,
@@ -5189,14 +5238,22 @@ def _build_focus3_plan_discrete_candidate(
     )
     if bool(boundary_gate_info.get("applied", False)):
         best_rows = [row for row in best_rows if str(row[0]) != "boundary"]
-    random_discrete_gate_info = _focus3_recover_random_discrete_gate(
+    random_discrete_gate_info = _focus3_no_constraint_random_discrete_gate(
+        system=system,
+        best_scores=best_scores,
+        has_constraints=bool(has_constraints),
+    )
+    if bool(random_discrete_gate_info.get("applied", False)):
+        best_rows = [row for row in best_rows if str(row[0]) != "random"]
+    recover_random_discrete_gate_info = _focus3_recover_random_discrete_gate(
         system=system,
         best_scores=best_scores,
         has_constraints=bool(has_constraints),
         recover_info=recover_info,
     )
-    if bool(random_discrete_gate_info.get("applied", False)):
+    if bool(recover_random_discrete_gate_info.get("applied", False)):
         best_rows = [row for row in best_rows if str(row[0]) != "random"]
+        random_discrete_gate_info = dict(recover_random_discrete_gate_info)
 
     if not best_rows:
         return None, pool_counts, selected_counts, {

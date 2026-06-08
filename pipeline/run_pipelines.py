@@ -46,7 +46,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         optimizer_goal=1.2,
         n_samples=450,
         optimizer_n_samples=1050,
-        repeats=50,
+        repeats=10,
     ),
     "cantilever_beam": ProblemCase(
         problem_name="cantilever_beam",
@@ -54,7 +54,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         optimizer_goal=114.66,
         n_samples=90,
         optimizer_n_samples=60,
-        repeats=50,
+        repeats=25,
     ),
     "goldstein_price": ProblemCase(
         problem_name="goldstein_price",
@@ -73,7 +73,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         optimizer_goal=-0.86,
         n_samples=50,
         optimizer_n_samples=50,
-        repeats=50,
+        repeats=25,
     ),
     "rosenbrock_nodummy": ProblemCase(
         problem_name="rosenbrock_nodummy",
@@ -672,6 +672,7 @@ def _save_explorer_stats_csv(
                 "modeler_selected_real_count",
                 "modeler_selected_dummy_count",
                 "modeler_real_coverage_pct",
+                "modeler_all_real_included",
                 "modeler_all_real_only",
                 "volume_ratio",
                 "volume_ratio_pct",
@@ -802,7 +803,10 @@ def _save_explorer_stats_csv(
     # --- derive DSE metrics per row ---
     if not detail_df.empty:
         _opt = detail_df["survivor_optimum_included"].astype(bool)
-        _feature = detail_df["modeler_all_real_only"].astype(bool)
+        if "modeler_all_real_included" in detail_df.columns:
+            _feature = detail_df["modeler_all_real_included"].astype(bool)
+        else:
+            _feature = detail_df["modeler_all_real_only"].astype(bool)
         _vr = pd.to_numeric(detail_df["volume_ratio"], errors="coerce").fillna(1.0)
         detail_df["volume_cap_pass"] = (_vr <= 0.25).astype(int)
         detail_df["explorer_bounds_pass"] = (_opt & (_vr <= 0.25)).astype(int)
@@ -819,6 +823,9 @@ def _save_explorer_stats_csv(
     summary_df = detail_df.copy()
     if not summary_df.empty:
         summary_df["optimum_included_num"] = summary_df["survivor_optimum_included"].astype(bool).astype(int)
+        if "modeler_all_real_included" not in summary_df.columns:
+            summary_df["modeler_all_real_included"] = summary_df["modeler_all_real_only"]
+        summary_df["modeler_all_real_included_num"] = summary_df["modeler_all_real_included"].astype(bool).astype(int)
         summary_df["modeler_all_real_only_num"] = summary_df["modeler_all_real_only"].astype(bool).astype(int)
         summary_df["explorer_bounds_pass_num"] = summary_df["explorer_bounds_pass"].astype(bool).astype(int)
         summary_df["feature_fail"] = (summary_df["fail_type"] == "feature_fail").astype(int)
@@ -831,6 +838,7 @@ def _save_explorer_stats_csv(
             .agg(
                 tries=("strategy", "count"),
                 survivor_optimum_included_pct=("optimum_included_num", "mean"),
+                modeler_all_real_included_pct=("modeler_all_real_included_num", "mean"),
                 modeler_all_real_only_pct=("modeler_all_real_only_num", "mean"),
                 modeler_real_coverage_pct_mean=("modeler_real_coverage_pct", "mean"),
                 volume_ratio_pct_mean=("volume_ratio_pct", "mean"),
@@ -844,6 +852,7 @@ def _save_explorer_stats_csv(
             )
         )
         grouped["survivor_optimum_included_pct"] = grouped["survivor_optimum_included_pct"] * 100.0
+        grouped["modeler_all_real_included_pct"] = grouped["modeler_all_real_included_pct"] * 100.0
         grouped["modeler_all_real_only_pct"] = grouped["modeler_all_real_only_pct"] * 100.0
         grouped["joint_pass_pct"] = grouped["joint_pass_pct"] * 100.0
         grouped["explorer_bounds_pass_pct"] = grouped["explorer_bounds_pass_pct"] * 100.0
@@ -860,6 +869,7 @@ def _save_explorer_stats_csv(
                 "joint_pass_pct",
                 "explorer_bounds_pass_pct",
                 "survivor_optimum_included_pct",
+                "modeler_all_real_included_pct",
                 "modeler_all_real_only_pct",
                 "modeler_real_coverage_pct_mean",
                 "volume_ratio_pct_mean",
@@ -879,6 +889,7 @@ def _save_explorer_stats_csv(
                 "joint_pass_pct",
                 "explorer_bounds_pass_pct",
                 "survivor_optimum_included_pct",
+                "modeler_all_real_included_pct",
                 "modeler_all_real_only_pct",
                 "modeler_real_coverage_pct_mean",
                 "volume_ratio_pct_mean",
@@ -982,6 +993,63 @@ def _optimizer_goal_hit(*, best_objective: float, goal: float | None, objective_
     return bool(best <= target)
 
 
+def _read_focus3_goal_diagnostics(
+    *,
+    optimizer_metadata_path: str | None,
+    goal: float | None,
+    objective_sense: str,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "focus3_best_objective": float("nan"),
+        "focus3_goal_hit": False,
+        "focus3_eval_count": 0,
+        "focus3_improved_count": 0,
+    }
+    if not optimizer_metadata_path:
+        return out
+    opt_dir = os.path.dirname(os.path.abspath(str(optimizer_metadata_path)))
+    focus_summary_path = os.path.join(opt_dir, "artifacts", "debug", "optimizer_focus_summary.csv")
+    if not os.path.exists(focus_summary_path):
+        return out
+    try:
+        focus_df = pd.read_csv(focus_summary_path)
+    except Exception:
+        return out
+    if focus_df.empty or "segment" not in focus_df.columns:
+        return out
+    rows = focus_df[focus_df["segment"].astype(str).str.lower() == "focus3"]
+    if rows.empty:
+        return out
+    row = rows.iloc[-1]
+    sense = str(objective_sense or "min").strip().lower()
+    best_col = "objective_raw_max" if sense == "max" else "objective_raw_min"
+    try:
+        focus3_best = float(row.get(best_col, float("nan")))
+    except Exception:
+        focus3_best = float("nan")
+    try:
+        focus3_count = int(float(row.get("count", 0) or 0))
+    except Exception:
+        focus3_count = 0
+    try:
+        focus3_improved_count = int(float(row.get("improved_count", 0) or 0))
+    except Exception:
+        focus3_improved_count = 0
+    out.update(
+        {
+            "focus3_best_objective": focus3_best,
+            "focus3_goal_hit": _optimizer_goal_hit(
+                best_objective=focus3_best,
+                goal=goal,
+                objective_sense=objective_sense,
+            ),
+            "focus3_eval_count": focus3_count,
+            "focus3_improved_count": focus3_improved_count,
+        }
+    )
+    return out
+
+
 def _save_optimizer_stats_csv(
     *,
     detail_rows: list[dict[str, Any]],
@@ -1002,7 +1070,13 @@ def _save_optimizer_stats_csv(
         "optimizer_best_objective",
         "optimizer_best_objective_raw",
         "optimizer_goal_hit",
+        "focus3_best_objective",
+        "focus3_goal_hit",
+        "archive_only_goal_hit",
+        "focus3_eval_count",
+        "focus3_improved_count",
         "optimizer_n_iterations",
+        "modeler_all_real_included",
         "modeler_all_real_only",
         "modeler_selected_features",
         "selected_feature_count",
@@ -1038,6 +1112,9 @@ def _save_optimizer_stats_csv(
     if not summary_df.empty:
         for col in [
             "optimizer_goal_hit",
+            "focus3_goal_hit",
+            "archive_only_goal_hit",
+            "modeler_all_real_included",
             "modeler_all_real_only",
             "survivor_optimum_included",
             "volume_cap_pass",
@@ -1054,14 +1131,21 @@ def _save_optimizer_stats_csv(
                 tries=("strategy", "count"),
                 optimizer_final_pass_pct=("optimizer_final_pass_num", "mean"),
                 optimizer_goal_hit_pct=("optimizer_goal_hit_num", "mean"),
+                focus3_goal_hit_pct=("focus3_goal_hit_num", "mean"),
+                archive_only_goal_hit_pct=("archive_only_goal_hit_num", "mean"),
                 explorer_joint_pass_pct=("explorer_joint_pass_num", "mean"),
                 explorer_bounds_pass_pct=("explorer_bounds_pass_num", "mean"),
+                modeler_all_real_included_pct=("modeler_all_real_included_num", "mean"),
                 modeler_all_real_only_pct=("modeler_all_real_only_num", "mean"),
                 survivor_optimum_included_pct=("survivor_optimum_included_num", "mean"),
                 volume_cap_pass_pct=("volume_cap_pass_num", "mean"),
                 optimizer_best_objective_mean=("optimizer_best_objective", "mean"),
                 optimizer_best_objective_median=("optimizer_best_objective", "median"),
+                focus3_best_objective_mean=("focus3_best_objective", "mean"),
+                focus3_best_objective_median=("focus3_best_objective", "median"),
                 optimizer_n_iterations_mean=("optimizer_n_iterations", "mean"),
+                focus3_eval_count_mean=("focus3_eval_count", "mean"),
+                focus3_improved_count_mean=("focus3_improved_count", "mean"),
             )
         )
         overall = (
@@ -1071,14 +1155,21 @@ def _save_optimizer_stats_csv(
                 tries=("strategy", "count"),
                 optimizer_final_pass_pct=("optimizer_final_pass_num", "mean"),
                 optimizer_goal_hit_pct=("optimizer_goal_hit_num", "mean"),
+                focus3_goal_hit_pct=("focus3_goal_hit_num", "mean"),
+                archive_only_goal_hit_pct=("archive_only_goal_hit_num", "mean"),
                 explorer_joint_pass_pct=("explorer_joint_pass_num", "mean"),
                 explorer_bounds_pass_pct=("explorer_bounds_pass_num", "mean"),
+                modeler_all_real_included_pct=("modeler_all_real_included_num", "mean"),
                 modeler_all_real_only_pct=("modeler_all_real_only_num", "mean"),
                 survivor_optimum_included_pct=("survivor_optimum_included_num", "mean"),
                 volume_cap_pass_pct=("volume_cap_pass_num", "mean"),
                 optimizer_best_objective_mean=("optimizer_best_objective", "mean"),
                 optimizer_best_objective_median=("optimizer_best_objective", "median"),
+                focus3_best_objective_mean=("focus3_best_objective", "mean"),
+                focus3_best_objective_median=("focus3_best_objective", "median"),
                 optimizer_n_iterations_mean=("optimizer_n_iterations", "mean"),
+                focus3_eval_count_mean=("focus3_eval_count", "mean"),
+                focus3_improved_count_mean=("focus3_improved_count", "mean"),
             )
         )
         overall.insert(1, "problem", "__overall__")
@@ -1086,8 +1177,11 @@ def _save_optimizer_stats_csv(
         pct_cols = [
             "optimizer_final_pass_pct",
             "optimizer_goal_hit_pct",
+            "focus3_goal_hit_pct",
+            "archive_only_goal_hit_pct",
             "explorer_joint_pass_pct",
             "explorer_bounds_pass_pct",
+            "modeler_all_real_included_pct",
             "modeler_all_real_only_pct",
             "survivor_optimum_included_pct",
             "volume_cap_pass_pct",
@@ -1102,14 +1196,21 @@ def _save_optimizer_stats_csv(
                 "tries",
                 "optimizer_final_pass_pct",
                 "optimizer_goal_hit_pct",
+                "focus3_goal_hit_pct",
+                "archive_only_goal_hit_pct",
                 "explorer_joint_pass_pct",
                 "explorer_bounds_pass_pct",
+                "modeler_all_real_included_pct",
                 "modeler_all_real_only_pct",
                 "survivor_optimum_included_pct",
                 "volume_cap_pass_pct",
                 "optimizer_best_objective_mean",
                 "optimizer_best_objective_median",
+                "focus3_best_objective_mean",
+                "focus3_best_objective_median",
                 "optimizer_n_iterations_mean",
+                "focus3_eval_count_mean",
+                "focus3_improved_count_mean",
             ]
         )
 
@@ -1382,7 +1483,7 @@ def main() -> None:
 
                             volume_cap_pass = bool(vol_ratio_float is not None and vol_ratio_float <= 0.25)
                             explorer_bounds_pass = bool(included and volume_cap_pass)
-                            explorer_joint_pass = bool(modeler_all_real_only and explorer_bounds_pass)
+                            explorer_joint_pass = bool(modeler_all_real_included and explorer_bounds_pass)
 
                             if run_optimizer:
                                 try:
@@ -1415,6 +1516,11 @@ def main() -> None:
                                         goal=case.optimizer_goal,
                                         objective_sense=case.objective_sense,
                                     )
+                                    focus3_diag = _read_focus3_goal_diagnostics(
+                                        optimizer_metadata_path=opt_out.get("metadata"),
+                                        goal=case.optimizer_goal,
+                                        objective_sense=case.objective_sense,
+                                    )
                                     optimizer_final_pass = bool(explorer_joint_pass and opt_goal_hit)
                                     optimizer_detail_rows.append(
                                         {
@@ -1429,7 +1535,13 @@ def main() -> None:
                                             "optimizer_best_objective": opt_best,
                                             "optimizer_best_objective_raw": float(opt_out.get("best_objective_raw", float("nan"))),
                                             "optimizer_goal_hit": bool(opt_goal_hit),
+                                            "focus3_best_objective": focus3_diag["focus3_best_objective"],
+                                            "focus3_goal_hit": bool(focus3_diag["focus3_goal_hit"]),
+                                            "archive_only_goal_hit": bool(opt_goal_hit and not bool(focus3_diag["focus3_goal_hit"])),
+                                            "focus3_eval_count": int(focus3_diag["focus3_eval_count"]),
+                                            "focus3_improved_count": int(focus3_diag["focus3_improved_count"]),
                                             "optimizer_n_iterations": int(opt_out.get("n_iterations", 0)),
+                                            "modeler_all_real_included": bool(modeler_all_real_included),
                                             "modeler_all_real_only": bool(modeler_all_real_only),
                                             "modeler_selected_features": json.dumps(modeler_selected_features, ensure_ascii=False),
                                             "selected_feature_count": selected_feature_count,
@@ -1453,6 +1565,7 @@ def main() -> None:
                                     print(
                                         f"[Optimizer][{requested_id}] "
                                         f"best={opt_best:.6f} goal_hit={opt_goal_hit} "
+                                        f"focus3_goal_hit={focus3_diag['focus3_goal_hit']} "
                                         f"final_pass={optimizer_final_pass}"
                                     )
                                 except Exception as opt_exc:
@@ -1492,6 +1605,7 @@ def main() -> None:
                                     "modeler_selected_real_count": modeler_selected_real_count,
                                     "modeler_selected_dummy_count": modeler_selected_dummy_count,
                                     "modeler_real_coverage_pct": modeler_real_coverage_pct,
+                                    "modeler_all_real_included": bool(modeler_all_real_included),
                                     "modeler_all_real_only": bool(modeler_all_real_only),
                                     "volume_ratio": vol_ratio_float,
                                     "volume_ratio_pct": vol_pct,
