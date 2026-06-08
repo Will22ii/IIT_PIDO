@@ -1628,20 +1628,56 @@ def _focus3_penalized_sources(
 
 def _filter_focus3_penalized_best_rows(
     *,
+    system: OptimizerSystemConfig,
     best_rows: list[tuple[str, np.ndarray, float]],
     penalized_sources: set[str],
+    y_best: float | None = None,
+    goal_internal: float | None = None,
 ) -> tuple[list[tuple[str, np.ndarray, float]], dict[str, object]]:
-    removable = {"random", "boundary"}.intersection(set(penalized_sources))
+    requested_removable = {"random", "boundary"}.intersection(set(penalized_sources))
+    removable = set(requested_removable)
+    near_goal_active = False
+    near_goal_threshold = float("nan")
+    protected_source = ""
+    if (
+        bool(getattr(system, "focus3_source_performance_best_plan_filter_enabled", True))
+        and bool(getattr(system, "focus3_source_performance_best_plan_filter_near_goal_enabled", True))
+        and bool(getattr(system, "focus3_source_performance_best_plan_filter_keep_one_when_both_penalized", True))
+        and requested_removable == {"random", "boundary"}
+        and y_best is not None
+        and goal_internal is not None
+    ):
+        y_best_f = float(y_best)
+        goal_f = float(goal_internal)
+        if math.isfinite(y_best_f) and math.isfinite(goal_f):
+            margin = float(max(float(getattr(system, "focus3_source_performance_best_plan_filter_near_goal_margin_ratio", 0.15)), 0.0))
+            near_goal_threshold = float(goal_f + margin * max(abs(goal_f), 1.0))
+            near_goal_active = bool(y_best_f <= near_goal_threshold)
+    if near_goal_active:
+        protect_candidates = [row for row in best_rows if str(row[0]) in requested_removable and math.isfinite(float(row[2]))]
+        if protect_candidates:
+            protected_source = str(min(protect_candidates, key=lambda row: float(row[2]))[0])
+            removable.discard(protected_source)
+    filter_enabled = bool(getattr(system, "focus3_source_performance_best_plan_filter_enabled", True))
     info: dict[str, object] = {
-        "enabled": True,
+        "enabled": bool(filter_enabled),
         "applied": False,
         "reason": "no_penalized_best_plan_sources" if not removable else "not_applied",
-        "penalized_sources": ",".join(sorted(removable)),
+        "penalized_sources": ",".join(sorted(requested_removable)),
+        "removable_sources": ",".join(sorted(removable)),
+        "protected_source": str(protected_source),
+        "near_goal_active": bool(near_goal_active),
+        "near_goal_threshold": float(near_goal_threshold),
         "removed_count": 0,
         "before_count": int(len(best_rows)),
         "after_count": int(len(best_rows)),
     }
+    if not filter_enabled:
+        info["reason"] = "disabled"
+        return best_rows, info
     if not removable:
+        if requested_removable and protected_source:
+            info["reason"] = "near_goal_keep_one_removed_none"
         return best_rows, info
     filtered = [row for row in best_rows if str(row[0]) not in removable]
     removed_count = int(len(best_rows) - len(filtered))
@@ -4958,6 +4994,7 @@ def _build_focus3_plan_refine_starts(
     has_constraints: bool,
     source_performance_info: dict[str, object] | None = None,
     recover_info: dict[str, object] | None = None,
+    goal_internal: float | None = None,
 ) -> tuple[np.ndarray, dict[str, int], dict[str, int], dict[str, object]]:
     n_pool = int(max(plan_pool_per_source, 1))
     n_refine = int(max(refine_starts, 1))
@@ -5196,7 +5233,36 @@ def _build_focus3_plan_refine_starts(
     best_plan_sources_before_perf = [
         s for s in finite_best_score_sources if s not in gate_excluded_sources
     ]
-    perf_removable_sources = {"random", "boundary"}.intersection(penalized_sources)
+    requested_perf_removable_sources = {"random", "boundary"}.intersection(penalized_sources)
+    perf_removable_sources = set(requested_perf_removable_sources)
+    near_goal_active = False
+    near_goal_threshold = float("nan")
+    protected_source = ""
+    if (
+        bool(getattr(system, "focus3_source_performance_best_plan_filter_enabled", True))
+        and bool(getattr(system, "focus3_source_performance_best_plan_filter_near_goal_enabled", True))
+        and bool(getattr(system, "focus3_source_performance_best_plan_filter_keep_one_when_both_penalized", True))
+        and requested_perf_removable_sources == {"random", "boundary"}
+        and goal_internal is not None
+    ):
+        y_best_f = float(y_best)
+        goal_f = float(goal_internal)
+        if math.isfinite(y_best_f) and math.isfinite(goal_f):
+            margin = float(max(float(getattr(system, "focus3_source_performance_best_plan_filter_near_goal_margin_ratio", 0.15)), 0.0))
+            near_goal_threshold = float(goal_f + margin * max(abs(goal_f), 1.0))
+            near_goal_active = bool(y_best_f <= near_goal_threshold)
+    if near_goal_active:
+        protect_candidates = [
+            s
+            for s in best_plan_sources_before_perf
+            if s in requested_perf_removable_sources and math.isfinite(float(best_scores.get(s, float("nan"))))
+        ]
+        if protect_candidates:
+            protected_source = str(min(protect_candidates, key=lambda s: float(best_scores[s])))
+            perf_removable_sources.discard(protected_source)
+    filter_enabled = bool(getattr(system, "focus3_source_performance_best_plan_filter_enabled", True))
+    if not filter_enabled:
+        perf_removable_sources = set()
     best_plan_sources = [
         s
         for s in best_plan_sources_before_perf
@@ -5204,19 +5270,25 @@ def _build_focus3_plan_refine_starts(
     ]
     perf_removed_count = int(len(best_plan_sources_before_perf) - len(best_plan_sources))
     perf_filter_applied = bool(perf_removed_count > 0 and len(best_plan_sources) > 0)
-    if not perf_removable_sources:
+    if not filter_enabled:
+        perf_filter_reason = "disabled"
+    elif not requested_perf_removable_sources:
         perf_filter_reason = "no_penalized_best_plan_sources"
     elif perf_removed_count <= 0:
-        perf_filter_reason = "no_penalized_candidate_rows"
+        perf_filter_reason = "near_goal_keep_one_removed_none" if protected_source else "no_penalized_candidate_rows"
     elif not best_plan_sources:
         perf_filter_reason = "would_remove_all_candidates"
     else:
         perf_filter_reason = "penalized_source_removed_from_best_plan"
     source_perf_best_plan_filter_info = {
-        "enabled": True,
+        "enabled": bool(filter_enabled),
         "applied": bool(perf_filter_applied),
         "reason": str(perf_filter_reason),
-        "penalized_sources": ",".join(sorted(perf_removable_sources)),
+        "penalized_sources": ",".join(sorted(requested_perf_removable_sources)),
+        "removable_sources": ",".join(sorted(perf_removable_sources)),
+        "protected_source": str(protected_source),
+        "near_goal_active": bool(near_goal_active),
+        "near_goal_threshold": float(near_goal_threshold),
         "removed_count": int(perf_removed_count),
         "before_count": int(len(best_plan_sources_before_perf)),
         "after_count": int(len(best_plan_sources)),
@@ -5273,6 +5345,7 @@ def _build_focus3_plan_discrete_candidate(
     has_constraints: bool,
     source_performance_info: dict[str, object] | None = None,
     recover_info: dict[str, object] | None = None,
+    goal_internal: float | None = None,
 ) -> tuple[np.ndarray | None, dict[str, int], dict[str, int], dict[str, object]]:
     n_pool = int(max(plan_pool_per_source, 1))
     pool_counts: dict[str, int] = {}
@@ -5412,8 +5485,11 @@ def _build_focus3_plan_discrete_candidate(
         random_discrete_gate_info = dict(recover_random_discrete_gate_info)
 
     best_rows, source_perf_best_plan_filter_info = _filter_focus3_penalized_best_rows(
+        system=system,
         best_rows=best_rows,
         penalized_sources=penalized_sources,
+        y_best=float(y_best),
+        goal_internal=goal_internal,
     )
 
     if not best_rows:
@@ -6194,6 +6270,11 @@ def run_bo_engine(
     gp_fallback_used = False
     var_names = list(selected_features)
     best_raw_history: list[float] = [float(best_y_raw)] if math.isfinite(float(best_y_raw)) else []
+    goal_internal = (
+        float(_to_optimizer_objective(float(goal)))
+        if goal is not None and math.isfinite(float(goal))
+        else None
+    )
     goal_monitor = GoalMonitor.from_goal(
         goal=goal,
         system_config=system,
@@ -7185,6 +7266,7 @@ def run_bo_engine(
                             has_constraints=bool(constraint_defs),
                             source_performance_info=focus3_source_perf_info,
                             recover_info=focus3_recover_info,
+                            goal_internal=goal_internal,
                         )
                         focus3_plan_mode = "refine"
                     else:
@@ -7217,6 +7299,7 @@ def run_bo_engine(
                             has_constraints=bool(constraint_defs),
                             source_performance_info=focus3_source_perf_info,
                             recover_info=focus3_recover_info,
+                            goal_internal=goal_internal,
                         )
                         refine_starts = x_discrete.reshape(1, -1) if x_discrete is not None else np.empty((0, p_dim), dtype=float)
                         focus3_plan_mode = "discrete"
@@ -7828,6 +7911,10 @@ def run_bo_engine(
             "focus3_source_perf_best_plan_filter_applied": bool(focus3_source_perf_best_plan_filter_info.get("applied", False)) if focus3_source_perf_best_plan_filter_info else False,
             "focus3_source_perf_best_plan_filter_reason": str(focus3_source_perf_best_plan_filter_info.get("reason", "")) if focus3_source_perf_best_plan_filter_info else "",
             "focus3_source_perf_best_plan_filter_penalized_sources": str(focus3_source_perf_best_plan_filter_info.get("penalized_sources", "")) if focus3_source_perf_best_plan_filter_info else "",
+            "focus3_source_perf_best_plan_filter_removable_sources": str(focus3_source_perf_best_plan_filter_info.get("removable_sources", "")) if focus3_source_perf_best_plan_filter_info else "",
+            "focus3_source_perf_best_plan_filter_protected_source": str(focus3_source_perf_best_plan_filter_info.get("protected_source", "")) if focus3_source_perf_best_plan_filter_info else "",
+            "focus3_source_perf_best_plan_filter_near_goal_active": bool(focus3_source_perf_best_plan_filter_info.get("near_goal_active", False)) if focus3_source_perf_best_plan_filter_info else False,
+            "focus3_source_perf_best_plan_filter_near_goal_threshold": float(focus3_source_perf_best_plan_filter_info.get("near_goal_threshold", float("nan"))) if focus3_source_perf_best_plan_filter_info else float("nan"),
             "focus3_source_perf_best_plan_filter_removed_count": int(focus3_source_perf_best_plan_filter_info.get("removed_count", 0)) if focus3_source_perf_best_plan_filter_info else 0,
             "focus3_source_perf_random_count": int(focus3_source_perf_info.get("random_refine_count", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_random_improved_count": int(focus3_source_perf_info.get("random_refine_improved_count", 0)) if focus3_source_perf_info else 0,

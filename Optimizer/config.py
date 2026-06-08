@@ -236,6 +236,14 @@ class OptimizerSystemConfig:
     focus3_source_performance_boundary_poor_improve_rate: float = 0.003
     focus3_source_performance_boundary_penalty_fraction: float = 0.85
     focus3_source_performance_boundary_min_quota_fraction: float = 0.01
+    # Source performance가 random/boundary를 둘 다 penalize하더라도, 현재 best가
+    # goal 근처까지 온 경우에는 둘 중 acquisition score가 더 좋은 source 하나는
+    # best-plan 후보에 남긴다. Rosenbrock처럼 valley를 타고 내려가는 문제에서
+    # near-goal 다양성을 완전히 끊지 않기 위한 완화 장치다.
+    focus3_source_performance_best_plan_filter_enabled: bool = True
+    focus3_source_performance_best_plan_filter_near_goal_enabled: bool = True
+    focus3_source_performance_best_plan_filter_near_goal_margin_ratio: float = 0.15
+    focus3_source_performance_best_plan_filter_keep_one_when_both_penalized: bool = True
     focus3_refine_cooldown_enabled: bool = True
     focus3_refine_cooldown_window: int = 50
     focus3_refine_cooldown_worse_count: int = 12

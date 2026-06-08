@@ -130,6 +130,10 @@ def _raise_if_success_rate_below_floor(
     )
 
 
+def _has_equality_constraints(constraint_defs: list[dict] | None) -> bool:
+    return any(str(c.get("type", "")).strip() == "==" for c in constraint_defs or [])
+
+
 def _save_doe_results(
     *,
     results: list[dict],
@@ -332,6 +336,14 @@ def run_doe_orchestrator(
     }
 
     if not use_additional:
+        if _has_equality_constraints(constraint_defs):
+            raise RuntimeError(
+                "UNSUPPORTED_PLAIN_DOE_EQUALITY_CONSTRAINT: "
+                "plain DOE supports pre inequality filtering only. "
+                "Use additional DOE for equality constraints, or replace equality "
+                "with an explicit relaxed inequality band."
+            )
+
         n_samples = int(run_cfg["n_samples"])
         n_baseline_reserved = 1 if (force_baseline and n_samples > 0) else 0
         n_regular_samples = n_samples - n_baseline_reserved
@@ -417,32 +429,62 @@ def run_doe_orchestrator(
 
         if has_pre_constraints:
             if n_sampler_target > 0:
-                n_probe = max(n_sampler_target, int(np.ceil(n_sampler_target * probe_multiplier)))
-                n_probe = int(np.ceil(n_probe * filter_safety))
-                X_probe = sampler(
-                    n_samples=n_probe,
-                    bounds=bounds,
-                    rng=rng,
-                    n_divisions=max(n_probe, 1),
+                max_attempts = min(
+                    max(2, int(np.ceil(1.0 / max(filter_r_floor, 1e-6)))),
+                    50,
                 )
-                feas_mask, constraint_payloads, margins_pre = evaluate_constraints_batch(
-                    X=X_probe,
-                    var_names=var_names,
-                    constraint_defs=constraint_defs,
-                    scope="pre",
-                )
-                n_feas = int(feas_mask.sum())
-                filter_gen_total += int(X_probe.shape[0])
-                filter_feas_total += int(n_feas)
-                if n_feas < n_sampler_target:
-                    raise RuntimeError(
-                        f"FAILED_FILTER_MIN: initial feasible points {n_feas} < target {n_sampler_target}"
+                pool_X: list[np.ndarray] = []
+                pool_constraints: list[dict] = []
+                pool_margins: list[float] = []
+                n_probe = 0
+
+                for _attempt in range(max_attempts):
+                    need = n_sampler_target - len(pool_X)
+                    if need <= 0:
+                        break
+                    n_probe_i = max(need, int(np.ceil(need * probe_multiplier)))
+                    n_probe_i = int(np.ceil(n_probe_i * filter_safety))
+                    n_probe += int(n_probe_i)
+                    X_probe = sampler(
+                        n_samples=n_probe_i,
+                        bounds=bounds,
+                        rng=rng,
+                        n_divisions=max(n_probe_i, 1),
                     )
-                feas_idx = np.where(feas_mask)[0]
-                pick_idx = rng.choice(feas_idx, size=n_sampler_target, replace=False)
-                X_regular = X_probe[pick_idx]
-                regular_constraints = [constraint_payloads[i] for i in pick_idx]
-                regular_margins = [float(margins_pre[i]) for i in pick_idx]
+                    feas_mask, constraint_payloads, margins_pre = evaluate_constraints_batch(
+                        X=X_probe,
+                        var_names=var_names,
+                        constraint_defs=constraint_defs,
+                        scope="pre",
+                    )
+                    n_feas = int(feas_mask.sum())
+                    filter_gen_total += int(X_probe.shape[0])
+                    filter_feas_total += int(n_feas)
+                    if n_feas <= 0:
+                        continue
+                    for j in np.where(feas_mask)[0].tolist():
+                        if len(pool_X) >= n_sampler_target:
+                            break
+                        pool_X.append(np.asarray(X_probe[j], dtype=float))
+                        pool_constraints.append(constraint_payloads[j])
+                        pool_margins.append(float(margins_pre[j]))
+
+                if len(pool_X) < n_sampler_target:
+                    raise RuntimeError(
+                        "FAILED_FILTER_MIN: plain DOE pre-constraint feasible "
+                        f"points {len(pool_X)} < target {n_sampler_target} "
+                        f"after {max_attempts} attempts and {filter_gen_total} generated candidates. "
+                        "Use additional DOE, relax constraints, or increase n_samples/constraint tolerance."
+                    )
+
+                X_pool = np.vstack([x.reshape(1, -1) for x in pool_X]).astype(float)
+                if X_pool.shape[0] > n_sampler_target:
+                    pick_idx = rng.choice(X_pool.shape[0], size=n_sampler_target, replace=False)
+                else:
+                    pick_idx = np.arange(X_pool.shape[0], dtype=int)
+                X_regular = X_pool[pick_idx]
+                regular_constraints = [pool_constraints[i] for i in pick_idx]
+                regular_margins = [float(pool_margins[i]) for i in pick_idx]
             else:
                 n_probe = 0
                 X_regular = np.empty((0, len(bounds)), dtype=float)

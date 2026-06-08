@@ -151,9 +151,10 @@ def _iter_constraint_defs(constraint_defs: list | None):
 def _eval_tolerance(cdef: dict, limit: float) -> float:
     if cdef.get("eps") is not None:
         return max(float(cdef["eps"]), 0.0)
-    eps_ratio = float(cdef.get("eps_ratio", 0.01))
+    eps_ratio = float(cdef.get("eps_ratio", 0.02))
     eps_min = float(cdef.get("eps_min", 1e-6))
-    return max(abs(limit) * eps_ratio, eps_min)
+    scale = max(abs(float(limit)), 1.0)
+    return max(scale * eps_ratio, eps_min)
 
 
 def _constraint_scale(*, value: float, limit: float) -> float:
