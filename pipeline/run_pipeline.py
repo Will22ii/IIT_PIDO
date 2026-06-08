@@ -6,6 +6,7 @@ from CAE_tool_interface.task_metadata import save_cae_task
 from DOE.run_DOE import run_doe
 from Explorer.executor.explorer_orchestrator import ExplorerOrchestrator
 from Modeler.run_Modeler import run_modeler
+from pipeline.aion_system_config import apply_aion_system_config
 from pipeline.config import PipelineConfig
 from pipeline.config_io import pipeline_config_from_dict, pipeline_config_from_json
 from pipeline.run_context import RunContext
@@ -170,6 +171,8 @@ def _resolve_existing_modeler_artifacts(run_root: str) -> dict[str, str | None]:
 
 
 def run_pipeline(*, config: PipelineConfig) -> dict:
+    apply_aion_system_config(config)
+
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if config.run_root:
         run_context, cae_out = _load_existing_run_context(config=config)

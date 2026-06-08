@@ -231,6 +231,11 @@ class OptimizerSystemConfig:
     focus3_source_performance_local_probe_poor_improve_rate: float = 0.006
     focus3_source_performance_local_probe_penalty_fraction: float = 0.70
     focus3_source_performance_local_probe_min_quota_fraction: float = 0.02
+    focus3_source_performance_boundary_enabled: bool = True
+    focus3_source_performance_boundary_min_count: int = 12
+    focus3_source_performance_boundary_poor_improve_rate: float = 0.006
+    focus3_source_performance_boundary_penalty_fraction: float = 0.85
+    focus3_source_performance_boundary_min_quota_fraction: float = 0.01
     focus3_refine_cooldown_enabled: bool = True
     focus3_refine_cooldown_window: int = 50
     focus3_refine_cooldown_worse_count: int = 12
@@ -261,13 +266,13 @@ class OptimizerSystemConfig:
     # Constraint가 없는 문제에서는 boundary source가 개선 효율이 낮을 수 있으므로
     # 최종 source mixture에 cap/floor를 적용한다. Constraint 문제에서는 적용하지 않는다.
     focus3_no_constraint_source_cap_enabled: bool = True
-    focus3_no_constraint_boundary_max: float = 0.10
+    focus3_no_constraint_boundary_max: float = 0.06
     focus3_no_constraint_topk_min: float = 0.62
-    focus3_no_constraint_random_min: float = 0.12
+    focus3_no_constraint_random_min: float = 0.06
     # 무제약 문제에서는 boundary source가 acquisition상 약간 좋아 보이는 정도로
     # 최종 후보를 이기지 못하게 한다. topk/random보다 이 margin 이상 좋을 때만 허용.
     focus3_no_constraint_boundary_gate_enabled: bool = True
-    focus3_no_constraint_boundary_gate_margin_ratio: float = 0.08
+    focus3_no_constraint_boundary_gate_margin_ratio: float = 0.10
     # 무제약 문제에서는 boundary score에 직접 penalty를 더해 GP uncertainty만으로
     # boundary가 best_plan을 과도하게 이기지 못하게 한다. 낮은 acquisition score가 우수하다.
     focus3_no_constraint_boundary_score_penalty_enabled: bool = True
@@ -339,7 +344,7 @@ class OptimizerSystemConfig:
     focus3_no_constraint_recover_best_local_max: float = 0.55
     focus3_no_constraint_recover_best_local_late_no_improve: int = 450
     focus3_no_constraint_recover_best_local_late_bonus: float = 0.06
-    focus3_no_constraint_recover_best_local_late_max: float = 0.62
+    focus3_no_constraint_recover_best_local_late_max: float = 0.68
     focus3_recover_random_discrete_gate_enabled: bool = True
     focus3_recover_random_discrete_gate_margin_ratio: float = 0.06
     focus3_recover_random_discrete_gate_min_no_improve: int = 180

@@ -9,6 +9,7 @@ from Explorer.config import ExplorerConfig, ExplorerSystemConfig, ExplorerUserCo
 from Explorer.strategy_presets import apply_explorer_strategy_preset
 from Modeler.config import ModelerConfig, ModelerSystemConfig, ModelerUserConfig
 from Optimizer.config import OptimizerConfig, OptimizerSystemConfig, OptimizerUserConfig
+from pipeline.aion_system_config import apply_aion_system_config
 from pipeline.config import PipelineConfig, PipelineReusePolicy, PipelineTasks
 from pipeline.config_io import load_json_object
 from pipeline.run_pipeline import run_pipeline
@@ -104,7 +105,7 @@ def build_aion_pipeline_config(*, config: AIONConfig) -> PipelineConfig:
         modeler_metadata_path=None,
     )
 
-    return PipelineConfig(
+    pipeline_config = PipelineConfig(
         cae=cae_cfg,
         doe=doe_cfg,
         modeler=modeler_cfg,
@@ -118,7 +119,9 @@ def build_aion_pipeline_config(*, config: AIONConfig) -> PipelineConfig:
         ),
         reuse=config.reuse,
         run_root=config.run_root,
+        aion_mode=True,
     )
+    return apply_aion_system_config(pipeline_config)
 
 
 def run_aion(*, config: AIONConfig) -> dict:

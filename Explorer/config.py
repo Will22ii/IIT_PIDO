@@ -143,6 +143,9 @@ class ExplorerSystemConfig:
     # Dual tilt disagreement reference (mean disagreement / ref, clipped to [0.8, 1.5])
     # 전략 파라미터에 값이 없으면 이 시스템 기본값을 사용
     dual_tilt_disagree_ref: float = 0.10
+    # AION-mode optional router signals. Default off so standalone/direct
+    # pipeline execution does not depend on DOE metadata diagnostics.
+    enable_doe_router_signals: bool = False
     strategy_params: dict[str, object] = field(default_factory=dict)
 
 

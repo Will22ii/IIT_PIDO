@@ -23,6 +23,7 @@ from Explorer.strategy_presets import EXPLORER_STRATEGIES, ExplorerStrategy
 from Explorer.strategy_presets import apply_explorer_strategy_preset
 from Explorer.strategy_presets import strategy_map
 from Modeler.config import ModelerConfig, ModelerSystemConfig, ModelerUserConfig
+from pipeline.aion_system_config import apply_aion_system_config
 from pipeline.config import PipelineConfig, PipelineTasks
 from pipeline.run_pipeline import run_pipeline
 
@@ -114,14 +115,14 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
 
 # Activate only the cases used in this run.
 ACTIVE_PROBLEM_CASES: list[str] = [
-    "cantilever_beam",
-    "rosenbrock",
-    "goldstein_price",
-    "six_hump_camel",
-    # "cantilever_beam_nodummy",
-    # "rosenbrock_nodummy",
-    # "goldstein_price_nodummy",
-    # "six_hump_camel_nodummy",
+    # "cantilever_beam",
+    # "rosenbrock",
+    # "goldstein_price",
+    # "six_hump_camel",
+    "cantilever_beam_nodummy",
+    "rosenbrock_nodummy",
+    "goldstein_price_nodummy",
+    "six_hump_camel_nodummy",
 ]
 
 PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIVE_PROBLEM_CASES]
@@ -129,9 +130,9 @@ PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIV
 # Batch runner local config. This file is an analysis runner, so the default
 # execution policy lives here instead of requiring CLI flags.
 BATCH_TASKS: dict[str, bool] = {
-    "doe": True,
-    "modeler": True,
-    "explorer": True,
+    "doe": False,
+    "modeler": False,
+    "explorer": False,
     "optimizer": True,
 }
 BATCH_DEFAULT_OPTIMIZER_N_SAMPLES = 80
@@ -141,6 +142,7 @@ BATCH_USE_PRIMARY_SELECTION = True
 BATCH_USE_TIMESTAMP = True
 BATCH_DEBUG_LEVEL = "on"
 BATCH_CONTINUE_ON_ERROR = False
+BATCH_AION_MODE = True
 
 # Keep the per-problem n_samples/repeats fixed for score experiments. These are
 # the target budgets, not a convenience runtime knob.
@@ -262,6 +264,7 @@ def _build_pipeline_config(
     use_primary_selection: bool,
     use_timestamp: bool,
     debug_level: str,
+    aion_mode: bool,
 ) -> PipelineConfig:
     cae_cfg = CAEConfig(
         user=CAEUserConfig(
@@ -323,7 +326,7 @@ def _build_pipeline_config(
             modeler_metadata_path=None,
         )
 
-    return PipelineConfig(
+    pipeline_cfg = PipelineConfig(
         cae=cae_cfg,
         doe=doe_cfg if run_doe else None,
         modeler=modeler_cfg if run_modeler else None,
@@ -335,7 +338,9 @@ def _build_pipeline_config(
             run_explorer=bool(run_explorer),
             run_optimizer=bool(run_optimizer),
         ),
+        aion_mode=bool(aion_mode),
     )
+    return apply_aion_system_config(pipeline_cfg)
 
 
 def _resolve_requested_strategies(raw: str) -> list[ExplorerStrategy]:
@@ -1389,6 +1394,7 @@ def main() -> None:
                 use_primary_selection=use_primary_selection,
                 use_timestamp=use_timestamp,
                 debug_level=debug_level,
+                aion_mode=BATCH_AION_MODE,
             )
 
             try:

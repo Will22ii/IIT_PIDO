@@ -52,3 +52,6 @@ class PipelineConfig:
     # 기존 run을 이어서 사용할 때 backend가 넘기는 run root.
     # None이면 새 run context를 생성한다.
     run_root: str | None = None
+    # AION mode enables pipeline-only integration features through
+    # pipeline/aion_system_config.py. Default off for direct/standalone runs.
+    aion_mode: bool = False

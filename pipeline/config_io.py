@@ -100,6 +100,7 @@ def pipeline_config_from_dict(payload: dict[str, Any]) -> PipelineConfig:
     debug_level = str(_pop_known(run, "debug_level", "on"))
     use_timestamp = bool(_pop_known(run, "use_timestamp", False))
     run_root = _pop_known(run, "run_root", None)
+    aion_mode = bool(_pop_known(run, "aion_mode", False))
     if run:
         raise RuntimeError(f"Unknown config key(s) in run: {sorted(run.keys())}")
 
@@ -181,6 +182,7 @@ def pipeline_config_from_dict(payload: dict[str, Any]) -> PipelineConfig:
         ),
         reuse=reuse_policy,
         run_root=run_root,
+        aion_mode=aion_mode,
     )
 
 

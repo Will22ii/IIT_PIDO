@@ -665,9 +665,9 @@ def _apply_focus3_no_constraint_source_cap(
         info["after"] = dict(info["before"])
         return p_topk, p_boundary, p_random, info
 
-    boundary_max = float(np.clip(float(getattr(system, "focus3_no_constraint_boundary_max", 0.18)), 0.0, 1.0))
-    topk_min = float(np.clip(float(getattr(system, "focus3_no_constraint_topk_min", 0.55)), 0.0, 1.0))
-    random_min = float(np.clip(float(getattr(system, "focus3_no_constraint_random_min", 0.10)), 0.0, 1.0))
+    boundary_max = float(np.clip(float(getattr(system, "focus3_no_constraint_boundary_max", 0.06)), 0.0, 1.0))
+    topk_min = float(np.clip(float(getattr(system, "focus3_no_constraint_topk_min", 0.62)), 0.0, 1.0))
+    random_min = float(np.clip(float(getattr(system, "focus3_no_constraint_random_min", 0.06)), 0.0, 1.0))
     if topk_min + random_min > 1.0:
         scale = 1.0 / max(topk_min + random_min, 1e-12)
         topk_min *= scale
@@ -1163,19 +1163,19 @@ def _focus3_no_constraint_boundary_gate(
         info["reason"] = "constraints_present"
         return info
     b_score = float(best_scores.get("boundary", float("nan")))
-    non_boundary = [
+    structured = [
         float(best_scores.get(src, float("nan")))
-        for src in ("topk", "random", "best_local")
+        for src in ("topk", "best_local", "local_probe")
         if math.isfinite(float(best_scores.get(src, float("nan"))))
     ]
     if not math.isfinite(b_score):
         info.update({"allowed": False, "applied": True, "reason": "boundary_score_nan"})
         return info
-    if not non_boundary:
-        info["reason"] = "no_non_boundary_candidate"
+    if not structured:
+        info["reason"] = "no_structured_candidate"
         return info
-    nb_best = float(min(non_boundary))
-    margin_ratio = float(max(float(getattr(system, "focus3_no_constraint_boundary_gate_margin_ratio", 0.02)), 0.0))
+    nb_best = float(min(structured))
+    margin_ratio = float(max(float(getattr(system, "focus3_no_constraint_boundary_gate_margin_ratio", 0.10)), 0.0))
     margin = float(max(abs(nb_best), abs(b_score), 1.0) * margin_ratio)
     allowed = bool(b_score <= nb_best - margin)
     info.update({
@@ -1367,6 +1367,11 @@ def _resolve_focus3_source_performance_policy(
     local_probe_poor_rate = float(max(float(getattr(system, "focus3_source_performance_local_probe_poor_improve_rate", 0.006)), 0.0))
     local_probe_penalty_fraction = float(np.clip(float(getattr(system, "focus3_source_performance_local_probe_penalty_fraction", 0.70)), 0.0, 1.0))
     local_probe_min_quota_fraction = float(np.clip(float(getattr(system, "focus3_source_performance_local_probe_min_quota_fraction", 0.02)), 0.0, 1.0))
+    boundary_perf_enabled = bool(getattr(system, "focus3_source_performance_boundary_enabled", True))
+    boundary_min_count = int(max(int(getattr(system, "focus3_source_performance_boundary_min_count", 12)), 1))
+    boundary_poor_rate = float(max(float(getattr(system, "focus3_source_performance_boundary_poor_improve_rate", 0.006)), 0.0))
+    boundary_penalty_fraction = float(np.clip(float(getattr(system, "focus3_source_performance_boundary_penalty_fraction", 0.85)), 0.0, 1.0))
+    boundary_min_quota_fraction = float(np.clip(float(getattr(system, "focus3_source_performance_boundary_min_quota_fraction", 0.01)), 0.0, 1.0))
     info: dict[str, object] = {
         "enabled": bool(enabled),
         "applied": False,
@@ -1384,6 +1389,11 @@ def _resolve_focus3_source_performance_policy(
         "local_probe_poor_improve_rate": float(local_probe_poor_rate),
         "local_probe_penalty_fraction": float(local_probe_penalty_fraction),
         "local_probe_min_quota_fraction": float(local_probe_min_quota_fraction),
+        "boundary_performance_enabled": bool(boundary_perf_enabled),
+        "boundary_min_source_count": int(boundary_min_count),
+        "boundary_poor_improve_rate": float(boundary_poor_rate),
+        "boundary_penalty_fraction": float(boundary_penalty_fraction),
+        "boundary_min_quota_fraction": float(boundary_min_quota_fraction),
         "penalized_sources": "",
         "random_refine_count": 0,
         "random_refine_improved_count": 0,
@@ -1396,6 +1406,7 @@ def _resolve_focus3_source_performance_policy(
         "topk_refine_count": 0,
         "topk_refine_improve_rate": float("nan"),
         "boundary_refine_count": 0,
+        "boundary_refine_improved_count": 0,
         "boundary_refine_improve_rate": float("nan"),
         "quota_random_before": 0,
         "quota_random_after": 0,
@@ -1405,6 +1416,10 @@ def _resolve_focus3_source_performance_policy(
         "quota_local_probe_after": 0,
         "quota_shift_local_probe_to_best_local": 0,
         "quota_shift_local_probe_to_topk": 0,
+        "quota_boundary_before": 0,
+        "quota_boundary_after": 0,
+        "quota_shift_boundary_to_best_local": 0,
+        "quota_shift_boundary_to_topk": 0,
     }
     if not enabled:
         return info
@@ -1463,6 +1478,18 @@ def _resolve_focus3_source_performance_policy(
     else:
         reasons.append("local_probe_refine_performance_ok")
 
+    boundary_count = int(info.get("boundary_refine_count", 0))
+    boundary_rate = float(info.get("boundary_refine_improve_rate", float("nan")))
+    if not bool(boundary_perf_enabled):
+        reasons.append("boundary_perf_disabled")
+    elif boundary_count >= boundary_min_count and math.isfinite(boundary_rate) and boundary_rate <= boundary_poor_rate:
+        penalized.append("boundary")
+        reasons.append("boundary_refine_recently_unproductive")
+    elif boundary_count < boundary_min_count:
+        reasons.append("boundary_count_below_threshold")
+    else:
+        reasons.append("boundary_refine_performance_ok")
+
     if penalized:
         info.update({
             "applied": True,
@@ -1491,6 +1518,10 @@ def _apply_focus3_source_performance_to_quotas(
     info.setdefault("quota_local_probe_after", int(quotas_out.get("local_probe", 0)))
     info.setdefault("quota_shift_local_probe_to_best_local", 0)
     info.setdefault("quota_shift_local_probe_to_topk", 0)
+    info.setdefault("quota_boundary_before", int(quotas_out.get("boundary", 0)))
+    info.setdefault("quota_boundary_after", int(quotas_out.get("boundary", 0)))
+    info.setdefault("quota_shift_boundary_to_best_local", 0)
+    info.setdefault("quota_shift_boundary_to_topk", 0)
     if not bool(info.get("applied", False)):
         return quotas_out, info
     penalized = {item.strip() for item in str(info.get("penalized_sources", "")).split(",") if item.strip()}
@@ -1550,6 +1581,34 @@ def _apply_focus3_source_performance_to_quotas(
                 quotas_out["topk"] = int(quotas_out.get("topk", 0)) + int(to_topk)
                 info["quota_shift_local_probe_to_best_local"] = int(to_best)
                 info["quota_shift_local_probe_to_topk"] = int(to_topk)
+
+    if "boundary" in penalized:
+        old_boundary = int(max(quotas_out.get("boundary", 0), 0))
+        info["quota_boundary_before"] = int(old_boundary)
+        if old_boundary <= 0:
+            info["reason"] = str(info.get("reason", "")) + "+no_boundary_quota"
+        else:
+            penalty_fraction = float(np.clip(float(info.get("boundary_penalty_fraction", 0.85)), 0.0, 1.0))
+            min_fraction = float(np.clip(float(info.get("boundary_min_quota_fraction", 0.01)), 0.0, 1.0))
+            min_quota = int(math.ceil(max(int(total), 1) * min_fraction))
+            target_boundary = int(max(min_quota, math.ceil(old_boundary * (1.0 - penalty_fraction))))
+            target_boundary = int(min(target_boundary, old_boundary))
+            shift = int(max(old_boundary - target_boundary, 0))
+            quotas_out["boundary"] = int(target_boundary)
+            info["quota_boundary_after"] = int(target_boundary)
+            if shift <= 0:
+                info["reason"] = str(info.get("reason", "")) + "+boundary_at_floor"
+            else:
+                if float(p_best_local) > 0.0:
+                    to_best = int(math.ceil(shift * 0.80))
+                    to_topk = int(max(shift - to_best, 0))
+                else:
+                    to_best = 0
+                    to_topk = int(shift)
+                quotas_out["best_local"] = int(quotas_out.get("best_local", 0)) + int(to_best)
+                quotas_out["topk"] = int(quotas_out.get("topk", 0)) + int(to_topk)
+                info["quota_shift_boundary_to_best_local"] = int(to_best)
+                info["quota_shift_boundary_to_topk"] = int(to_topk)
     return quotas_out, info
 
 
@@ -7661,6 +7720,9 @@ def run_bo_engine(
             "focus3_source_perf_local_probe_count": int(focus3_source_perf_info.get("local_probe_refine_count", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_local_probe_improved_count": int(focus3_source_perf_info.get("local_probe_refine_improved_count", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_local_probe_improve_rate": float(focus3_source_perf_info.get("local_probe_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
+            "focus3_source_perf_boundary_count": int(focus3_source_perf_info.get("boundary_refine_count", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_boundary_improved_count": int(focus3_source_perf_info.get("boundary_refine_improved_count", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_boundary_improve_rate": float(focus3_source_perf_info.get("boundary_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
             "focus3_source_perf_best_local_count": int(focus3_source_perf_info.get("best_local_refine_count", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_best_local_improve_rate": float(focus3_source_perf_info.get("best_local_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
             "focus3_source_perf_topk_count": int(focus3_source_perf_info.get("topk_refine_count", 0)) if focus3_source_perf_info else 0,
@@ -7673,6 +7735,10 @@ def run_bo_engine(
             "focus3_source_perf_quota_local_probe_after": int(focus3_source_perf_info.get("quota_local_probe_after", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_quota_shift_local_probe_to_best_local": int(focus3_source_perf_info.get("quota_shift_local_probe_to_best_local", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_quota_shift_local_probe_to_topk": int(focus3_source_perf_info.get("quota_shift_local_probe_to_topk", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_quota_boundary_before": int(focus3_source_perf_info.get("quota_boundary_before", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_quota_boundary_after": int(focus3_source_perf_info.get("quota_boundary_after", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_quota_shift_boundary_to_best_local": int(focus3_source_perf_info.get("quota_shift_boundary_to_best_local", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_quota_shift_boundary_to_topk": int(focus3_source_perf_info.get("quota_shift_boundary_to_topk", 0)) if focus3_source_perf_info else 0,
             "focus3_boundary_score_penalty_enabled": bool(focus3_boundary_score_penalty_info.get("enabled", False)) if focus3_boundary_score_penalty_info else False,
             "focus3_boundary_score_penalty_applied": bool(focus3_boundary_score_penalty_info.get("applied", False)) if focus3_boundary_score_penalty_info else False,
             "focus3_boundary_score_penalty_reason": str(focus3_boundary_score_penalty_info.get("reason", "")) if focus3_boundary_score_penalty_info else "",

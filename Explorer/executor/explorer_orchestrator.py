@@ -1,4 +1,5 @@
 ﻿import os
+import json
 import warnings
 from typing import Optional
 
@@ -75,6 +76,64 @@ from pipeline.run_context import (
     get_task_metadata_path,
     update_run_index,
 )
+
+
+_DOE_ROUTER_META_KEYS: dict[str, tuple[str, ...]] = {
+    "constraint_rate_hat": ("constraint_rate_hat", "constraint_r_hat"),
+    "constraint_r_hat": ("constraint_r_hat", "constraint_rate_hat"),
+    "doe_gate1_pass_rate": ("doe_gate1_pass_rate", "gate1_pass_rate"),
+    "doe_gate2_pass_rate": ("doe_gate2_pass_rate", "gate2_pass_rate"),
+    "doe_gate1_score_mean": ("doe_gate1_score_mean", "gate1_score_mean"),
+    "doe_gate2_score_mean": ("doe_gate2_score_mean", "gate2_score_mean"),
+    "doe_gate1_score_last": ("doe_gate1_score_last", "gate1_score_last"),
+    "doe_gate2_score_last": ("doe_gate2_score_last", "gate2_score_last"),
+    "doe_gate1_score_ema_mean": ("doe_gate1_score_ema_mean", "gate1_score_ema_mean"),
+    "doe_gate2_score_ema_mean": ("doe_gate2_score_ema_mean", "gate2_score_ema_mean"),
+    "doe_gate1_score_ema_last": ("doe_gate1_score_ema_last", "gate1_score_ema_last"),
+    "doe_gate2_score_ema_last": ("doe_gate2_score_ema_last", "gate2_score_ema_last"),
+    "phase2_entered": ("phase2_entered", "doe_phase2_entered"),
+    "phase2_transition_count": ("phase2_transition_count", "doe_phase2_transition_count"),
+    "doe_collapse_detected_count": ("doe_collapse_detected_count", "collapse_detected_count"),
+    "doe_diversity_injection_applied_count": (
+        "doe_diversity_injection_applied_count",
+        "diversity_injection_applied_count",
+    ),
+}
+
+
+def _load_optional_doe_router_meta(run_context: RunContext | None) -> dict[str, object]:
+    if run_context is None:
+        return {}
+    doe_meta_path = get_task_metadata_path(run_context, "DOE")
+    if not doe_meta_path or not os.path.exists(doe_meta_path):
+        return {}
+    try:
+        with open(doe_meta_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as exc:
+        print(f"[Explorer] AION DOE router signals skipped: metadata read failed: {exc}")
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    resolved = payload.get("resolved_params", {})
+    if not isinstance(resolved, dict):
+        resolved = {}
+    sources = (resolved, payload)
+    out: dict[str, object] = {}
+    for target_key, candidates in _DOE_ROUTER_META_KEYS.items():
+        for source in sources:
+            found = False
+            for key in candidates:
+                if key in source:
+                    out[target_key] = source[key]
+                    found = True
+                    break
+            if found:
+                break
+    if out:
+        out["doe_router_metadata_path"] = doe_meta_path
+    return out
 
 
 def _predict_ensemble(models: list, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -768,6 +827,16 @@ class ExplorerOrchestrator:
             "constraint_rate_hat": float(constraint_rate_hat),
             "constraint_r_hat": float(constraint_rate_hat),
         }
+        if bool(getattr(self.config.system, "enable_doe_router_signals", False)):
+            doe_router_meta = _load_optional_doe_router_meta(self.run_context)
+            if doe_router_meta:
+                explorer_data_meta.update(doe_router_meta)
+                print(
+                    "[Explorer] AION DOE router signals enabled: "
+                    + ", ".join(sorted(k for k in doe_router_meta.keys() if k != "doe_router_metadata_path"))
+                )
+            else:
+                print("[Explorer] AION DOE router signals enabled, but no DOE metadata signals found.")
 
         def _meta_get(key: str, default=None):
             return explorer_data_meta.get(key, default)
