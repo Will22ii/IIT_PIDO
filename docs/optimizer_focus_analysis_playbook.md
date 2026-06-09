@@ -2,6 +2,8 @@
 
 이 문서는 Optimizer 개선 실험을 분석할 때의 기준이다. 목적은 benchmark 정답을 코드 로직에 넣는 것이 아니라, 실행 결과를 일관되게 읽고 다음 개선 방향을 고르는 것이다.
 
+현재 고도화 목표는 optimizer-only `no_dummy` benchmark 기준 평균 95점이다. 이 목표를 위해 full pipeline/AION 결과가 아니라 standalone FocusBO 경로의 점수 병목을 먼저 제거한다. 특히 Rosenbrock 점수가 낮으면 평균 95점 달성이 어렵기 때문에, Rosenbrock은 "bounds가 맞는데도 Focus3가 못 파는지"를 최우선으로 본다.
+
 ## 기본 원칙
 
 - 분석 대상은 기본적으로 Optimizer task만 활성화한 FocusBO run이다.
@@ -106,6 +108,24 @@ Goldstein은 batch에 따라 흔들린다. local_probe가 Goldstein에서 강한
 
 최근 source 통계에서는 Rosenbrock에서 best_local 개선률이 가장 높고, local_probe는 작동은 하지만 아직 보조적이다. 따라서 local_probe는 무작정 늘리기보다 recovery 후반/near-hit 상황에서 refine으로 연결되게 하는 것이 맞다.
 
+2026-06-09 standalone `no_dummy` batch 기준 추가 관찰:
+
+- 분석 대상은 `result/run_*_nodummy_*` 중 `index.json` tasks가 `CAE`, `OPT`만 있고, `bounds_source=cae`, `has_selected_bounds=false`인 run이다. AION trusted-bounds 경로가 아니다.
+- Cantilever는 25/25 hit, Six-hump는 25/25 hit로 안정적이다.
+- Goldstein은 43/50 hit였고, Focus2 final bounds가 known optimum을 포함한 경우 42/46 hit, 포함하지 못한 경우 1/4 hit였다. 즉 Goldstein 실패는 주로 Focus2 generated bounds 품질 문제다.
+- Rosenbrock은 4/10 hit였고, 10/10 모두 Focus2 bounds 안에 known optimum이 있었다. 즉 Rosenbrock 실패는 Focus2 bounds 문제가 아니라 Focus3 exploitation 문제다.
+- Rosenbrock Focus3 best-plan 개선률은 best_local이 가장 높고, boundary는 best-plan에 많이 올라왔지만 개선이 없었다. near-goal boundary 보호가 점수를 갉아먹는 신호로 본다.
+- Rosenbrock miss에서는 local_probe도 많이 올라왔지만 개선 효율이 낮았다. local_probe는 보조 source로 유지하되, 최근 성능이 나쁘면 best_local/topk로 회수해야 한다.
+
+이 batch 이후 반영한 개선 방향:
+
+- standalone Focus3 best-plan filter에서 local_probe도 최근 성능이 나쁘면 제거 대상에 포함한다. AION profile에서는 기존 random/boundary 중심 정책을 유지한다.
+- near-goal 상태에서도 boundary를 무조건 보호하지 않고, standalone에서는 boundary 최근 개선률이 최소 기준을 넘을 때만 보호한다.
+- Rosenbrock valley exploitation을 강화하기 위해 best_local 기본 비중과 recovery 중 best_local 상한을 올린다.
+- Goldstein의 generated bounds 실패를 줄이기 위해 Focus2 final bounds minimum volume을 보수적으로 키운다.
+- 목표 95점까지는 위 조정만으로 부족할 수 있어, near-goal recovery에서는 LCB 강제 탐색을 풀고 MEAN exploitation으로 전환하는 정책을 추가했다.
+- Rosenbrock 5D curved valley 대응을 위해 `correlated_local` source를 추가했다. 이 source는 함수명이나 정답을 쓰지 않고 최근 elite archive의 covariance/PCA 방향으로 후보를 생성한다.
+
 ## 다음 분석에서 꼭 확인할 것
 
 다음 batch를 보면 아래를 우선 확인한다.
@@ -117,6 +137,9 @@ Goldstein은 batch에 따라 흔들린다. local_probe가 Goldstein에서 강한
 - local_probe가 늘면서 Goldstein hit rate를 해치지 않았는지
 - `focus3_local_probe_quota_floor_applied`가 실제로 켜졌는지
 - local_probe가 active인데도 `selected_local_probe`가 거의 0인 run이 있는지
+- `focus3_near_goal_exploitation_active`가 Rosenbrock full-budget miss 후반에 켜지는지
+- `focus3_selected_correlated_local`, `focus3_best_score_correlated_local`, `source_prob_correlated_local`이 실제로 나타나는지
+- `focus3_nearest_refine_source=correlated_local`의 개선률이 best_local보다 좋은지 또는 최소한 topk/local_probe보다 좋은지
 - Focus3 refine skip이 hit 실패와 상관되는지
 - 실패 run들이 full budget을 다 쓰는지, early stop이 잘못 작동하는지
 - bounds contains known optimum 조건별 hit rate가 어떻게 갈리는지

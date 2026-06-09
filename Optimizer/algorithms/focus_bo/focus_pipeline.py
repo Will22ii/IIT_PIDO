@@ -15,6 +15,7 @@ _BOUNDED_SOURCES = {"explorer", "path", "override"}
 class FocusPipelinePlan:
     stages: tuple[str, ...]
     mode: str
+    planner_profile: str
     bounds_source: str
     initial_objective_count: int
     p_dim: int
@@ -39,6 +40,7 @@ class FocusPipelinePlan:
         return {
             "stages": list(self.stages),
             "mode": str(self.mode),
+            "planner_profile": str(self.planner_profile),
             "bounds_source": str(self.bounds_source),
             "initial_objective_count": int(self.initial_objective_count),
             "p_dim": int(self.p_dim),
@@ -91,6 +93,17 @@ def _parse_pipeline(raw: object) -> tuple[str, ...] | None:
     if not stages:
         return None
     return tuple(stages)
+
+
+def _planner_profile(system: OptimizerSystemConfig) -> str:
+    raw = str(getattr(system, "focus_planner_profile", "standalone") or "standalone").strip().lower()
+    aliases = {
+        "trusted": "aion",
+        "trusted_bounds": "aion",
+        "trusted_external_bounds": "aion",
+        "default": "standalone",
+    }
+    return aliases.get(raw, raw) if aliases.get(raw, raw) in {"standalone", "aion"} else "standalone"
 
 
 def _target_count(*, ratio: float, p_dim: int, minimum: int = 0) -> int:
@@ -228,9 +241,13 @@ def _allocate_budgets(
             frac = float(getattr(system, "focus2_budget_fraction", 0.30))
         base = int(max(0, math.ceil(float(frac) * int(n_samples))))
         focus2_min_with_focus3 = 0
-        if "focus3" in stages and not bool(has_selected_bounds):
+        if "focus3" in stages:
+            if bool(has_selected_bounds):
+                min_budget_attr = "focus2_min_budget_selected_bounds_with_focus3"
+            else:
+                min_budget_attr = "focus2_min_budget_with_focus3"
             focus2_min_with_focus3 = int(min(
-                max(int(getattr(system, "focus2_min_budget_with_focus3", 1)), 0),
+                max(int(getattr(system, min_budget_attr, 1)), 0),
                 max(int(remaining), 0),
             ))
             if focus2_min_with_focus3 > 0:
@@ -288,8 +305,15 @@ def build_focus_pipeline_plan(
         p_dim=p,
         minimum=int(getattr(system, "focus0_min_points", 3)),
     )
+    archive_ratio = float(max(int(initial_objective_count), 0)) / float(p)
+    has_selected_bounds = source in _BOUNDED_SOURCES
+    profile = _planner_profile(system)
+    if profile == "aion" and has_selected_bounds:
+        focus1_ratio = float(getattr(system, "focus_aion_focus1_target_np_ratio", 5.0))
+    else:
+        focus1_ratio = float(getattr(system, "focus1_target_np_ratio", 10.0))
     focus1_target = _target_count(
-        ratio=float(getattr(system, "focus1_target_np_ratio", 10.0)),
+        ratio=focus1_ratio,
         p_dim=p,
         minimum=0,
     )
@@ -297,8 +321,6 @@ def build_focus_pipeline_plan(
         "focus0_objective_count": int(focus0_target),
         "focus1_objective_count": int(focus1_target),
     }
-    archive_ratio = float(max(int(initial_objective_count), 0)) / float(p)
-    has_selected_bounds = source in _BOUNDED_SOURCES
     explicit = _parse_pipeline(getattr(system, "focus_pipeline", "auto"))
     reasons: dict[str, str] = {}
     if explicit is not None:
@@ -307,30 +329,55 @@ def build_focus_pipeline_plan(
         for stage in stages:
             reasons[stage] = "explicit focus_pipeline"
     else:
-        if has_selected_bounds:
+        focus2_min_total = int(max(int(getattr(system, "focus2_min_total_budget", 10)), 0))
+        if profile == "aion" and has_selected_bounds:
             stages_list: list[str] = []
             if bool(getattr(system, "focus0_enabled", True)) and int(initial_objective_count) < focus0_target:
                 stages_list.append("focus0")
-                reasons["focus0"] = "initial objective archive below focus0 target"
+                reasons["focus0"] = "AION Explorer bounds available but objective archive below focus0 target"
             if bool(getattr(system, "focus1_enabled", True)) and int(initial_objective_count) < focus1_target:
                 stages_list.append("focus1")
-                reasons["focus1"] = "initial objective archive below focus1 target"
+                reasons["focus1"] = "AION Explorer bounds available but archive below trusted-bounds target"
             stages_list.append("focus3")
-            reasons["focus3"] = "external selected bounds available; trust bounds and run final Focus3"
+            reasons["focus3"] = "AION trusted Explorer bounds available; run final Focus3"
+            stages = tuple(dict.fromkeys(stages_list))
+        elif has_selected_bounds:
+            stages_list = []
+            if bool(getattr(system, "focus0_enabled", True)) and int(initial_objective_count) < focus0_target:
+                stages_list.append("focus0")
+                reasons["focus0"] = "standalone selected bounds but objective archive below focus0 target"
+            if bool(getattr(system, "focus1_enabled", True)):
+                stages_list.append("focus1")
+                reasons["focus1"] = "standalone selected bounds; validate objective archive before local bounds"
+            if bool(getattr(system, "focus2_enabled", True)) and n_total >= focus2_min_total:
+                stages_list.append("focus2")
+                reasons["focus2"] = "standalone selected bounds; validate/refine local region before Focus3"
+            elif bool(getattr(system, "focus2_enabled", True)):
+                reasons["focus2_skipped"] = f"n_samples below focus2_min_total_budget={focus2_min_total}"
+            stages_list.append("focus3")
+            reasons["focus3"] = "external selected bounds available; run final Focus3 after any validation budget"
             stages = tuple(dict.fromkeys(stages_list))
         else:
             stages_list = []
-            if bool(getattr(system, "focus0_enabled", True)):
+            if bool(getattr(system, "focus0_enabled", True)) and int(initial_objective_count) < focus0_target:
                 stages_list.append("focus0")
-                reasons["focus0"] = "no selected bounds; generate objective archive"
+                if profile == "aion":
+                    reasons["focus0"] = "AION fallback: no Explorer bounds and archive below focus0 target"
+                else:
+                    reasons["focus0"] = "no selected bounds and archive below focus0 target"
             if bool(getattr(system, "focus1_enabled", True)):
                 stages_list.append("focus1")
-                reasons["focus1"] = "no selected bounds; classify/global evidence only"
-            focus2_min_total = int(max(int(getattr(system, "focus2_min_total_budget", 10)), 0))
+                if profile == "aion":
+                    reasons["focus1"] = "AION fallback: no Explorer bounds; classify/global evidence only"
+                else:
+                    reasons["focus1"] = "no selected bounds; classify/global evidence only"
             if bool(getattr(system, "focus2_enabled", True)) and n_total >= focus2_min_total:
                 stages_list.append("focus2")
                 stages_list.append("focus3")
-                reasons["focus2"] = "no selected bounds; generate internal region bounds"
+                if profile == "aion":
+                    reasons["focus2"] = "AION fallback: no Explorer bounds; generate internal region bounds"
+                else:
+                    reasons["focus2"] = "no selected bounds; generate internal region bounds"
                 reasons["focus3"] = "use Focus2 generated bounds"
             elif bool(getattr(system, "focus2_enabled", True)):
                 reasons["focus2_skipped"] = f"n_samples below focus2_min_total_budget={focus2_min_total}"
@@ -402,11 +449,13 @@ def build_focus_pipeline_plan(
         "archive_ratio": float(archive_ratio),
         "bounds_source": str(source),
         "has_selected_bounds": bool(has_selected_bounds),
+        "planner_profile": str(profile),
     }
 
     return FocusPipelinePlan(
         stages=tuple(stages),
         mode=mode,
+        planner_profile=profile,
         bounds_source=source,
         initial_objective_count=int(max(int(initial_objective_count), 0)),
         p_dim=int(p),

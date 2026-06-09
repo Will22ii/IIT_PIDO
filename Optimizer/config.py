@@ -82,6 +82,12 @@ class OptimizerSystemConfig:
     # ------------------------------------------------------------------
     # auto | focus0,focus1,focus3 | list/tuple. 어떤 focus를 실행할지는 focus_pipeline이 결정한다.
     focus_pipeline: str | list[str] | tuple[str, ...] = "auto"
+    # auto planner profile:
+    # - standalone: user-provided/standalone evidence is treated conservatively;
+    #   external bounds may still be validated/refined by Focus2.
+    # - aion: AION Explorer bounds are trusted; Focus3 receives most budget
+    #   directly unless the objective archive is too sparse.
+    focus_planner_profile: str = "standalone"
     # Focus budget은 고정 fraction보다 archive/bounds/budget 상태를 보고 동적으로 배분한다.
     focus_budget_adaptive_enabled: bool = True
     focus_budget_selected_bounds_focus3_fraction: float = 0.70
@@ -103,6 +109,10 @@ class OptimizerSystemConfig:
     focus0_min_points: int = 3
     focus1_enabled: bool = True
     focus1_target_np_ratio: float = 10.0
+    # AION trusted-bounds mode only. If Explorer already produced bounds and
+    # objective archive density is at least this ratio, auto planner skips
+    # Focus1/2 and sends the remaining optimizer budget to Focus3.
+    focus_aion_focus1_target_np_ratio: float = 5.0
     focus1_max_budget_fraction: float = 0.50
     focus1_min_gp_points: int = 3
     focus1_batch_size: int = 10
@@ -157,6 +167,8 @@ class OptimizerSystemConfig:
     # ------------------------------------------------------------------
     # Focus3: final selected-bounds BO
     # ------------------------------------------------------------------
+    # Audit label only. Runtime behavior is controlled by the focus3_* knobs.
+    focus3_profile_id: str = "default"
     # Legacy source mixture 기본 확률 (topk / boundary / random).
     # Removal candidate: focus3_budget_policy_enabled=True가 고정되면
     # focus3_*_source_* 확률만 남기고 이 fallback trio는 제거한다.
@@ -208,7 +220,7 @@ class OptimizerSystemConfig:
     # Refine 후보가 boundary/random 중심이면 비싼 L-BFGS-B를 생략하고 GP scoring 결과를
     # 그대로 사용한다. RB/GP처럼 budget이 큰 무제약 run에서 runtime을 크게 줄이기 위한 장치다.
     focus3_refine_source_filter_enabled: bool = True
-    focus3_refine_allowed_sources: str = "topk,best_local,local_probe"
+    focus3_refine_allowed_sources: str = "topk,best_local,correlated_local,local_probe"
     # Random start는 local refine에서 개선 기여가 낮게 관측되었다. 무제약 Focus3에서는
     # random source의 best acquisition score가 topk/best_local보다 충분히 좋을 때만
     # L-BFGS-B refine start quota를 유지한다.
@@ -237,14 +249,18 @@ class OptimizerSystemConfig:
     focus3_source_performance_boundary_penalty_fraction: float = 0.85
     focus3_source_performance_boundary_min_quota_fraction: float = 0.01
     # Source performance가 random/boundary를 둘 다 penalize하더라도, 현재 best가
-    # goal 근처까지 온 경우에는 boundary 쪽만 제한적으로 보호한다. 직전 실험에서
-    # acquisition score 기준 보호가 random을 과도하게 살려 hit 안정성을 낮췄기
-    # 때문에 random 보호는 기본적으로 막는다.
+    # goal 근처까지 온 경우에는 productive한 source만 제한적으로 보호한다. 최근
+    # no_dummy standalone 결과에서 Rosenbrock boundary 보호는 개선 없이 best-plan을
+    # 많이 차지했으므로, standalone에서는 boundary 최근 개선률이 최소 기준을 넘을
+    # 때만 보호한다. AION trusted-bounds override는 별도 profile에서 유지된다.
     focus3_source_performance_best_plan_filter_enabled: bool = True
+    focus3_source_performance_best_plan_filter_local_probe_enabled: bool = True
     focus3_source_performance_best_plan_filter_near_goal_enabled: bool = True
     focus3_source_performance_best_plan_filter_near_goal_margin_ratio: float = 0.15
     focus3_source_performance_best_plan_filter_keep_one_when_both_penalized: bool = True
     focus3_source_performance_best_plan_filter_near_goal_preferred_source: str = "boundary"
+    focus3_source_performance_best_plan_filter_near_goal_boundary_require_ok: bool = True
+    focus3_source_performance_best_plan_filter_near_goal_boundary_min_improve_rate: float = 0.003
     focus3_source_performance_best_plan_filter_near_goal_random_fallback_enabled: bool = False
     focus3_source_performance_best_plan_filter_near_goal_random_min_advantage: float = 0.01
     focus3_refine_cooldown_enabled: bool = True
@@ -264,6 +280,13 @@ class OptimizerSystemConfig:
     focus3_auto_mean_min_data_ratio: float = 20.0
     focus3_auto_mean_max_volume_ratio: float = 0.20
     focus3_auto_mean_best_local_required: bool = True
+    # Goal 근처에서 recovery가 켜지면 더 넓게 찾는 LCB보다 exploitation을 우선한다.
+    # Rosenbrock no_dummy는 bounds 안에 optimum이 있어도 후반 LCB 탐색에 묶여
+    # 1.20 근처에서 멈추는 케이스가 많았다.
+    focus3_near_goal_exploitation_enabled: bool = True
+    focus3_near_goal_exploitation_margin_ratio: float = 0.20
+    focus3_near_goal_exploitation_acq: str = "MEAN"
+    focus3_near_goal_exploitation_min_focus3_evals: int = 60
     # Focus3 source ratio = budget class + data reliability + GP/recent improvement 보정.
     focus3_source_adaptive_enabled: bool = True
     focus3_data_ratio_low: float = 5.0
@@ -296,8 +319,8 @@ class OptimizerSystemConfig:
     # RB처럼 narrow valley를 가진 문제에서는 top-k 전체보다 현재 best 주변을 더 촘촘히
     # 파는 source가 필요하다. best_local은 topk quota 일부를 가져와 좁은 sigma로 후보를 만든다.
     focus3_best_local_enabled: bool = True
-    focus3_best_local_prob: float = 0.38
-    focus3_best_local_max_prob: float = 0.58
+    focus3_best_local_prob: float = 0.44
+    focus3_best_local_max_prob: float = 0.65
     focus3_best_local_min_focus3_evals: int = 3
     focus3_best_local_min_data_ratio: float = 5.0
     focus3_best_local_sigma: float = 0.015
@@ -313,6 +336,20 @@ class OptimizerSystemConfig:
     focus3_best_local_elite_std_scale: float = 0.75
     focus3_best_local_max_sigma: float = 0.08
     focus3_best_local_anchor_best_prob: float = 0.45
+    # best_local quota 일부를 elite covariance/PCA 방향 source로 분리한다.
+    # 함수명을 보지 않고 최근 elite archive의 형상만 사용해 curved valley를 따라간다.
+    focus3_correlated_local_enabled: bool = True
+    focus3_correlated_local_recover_only: bool = True
+    focus3_correlated_local_min_no_improve: int = 80
+    focus3_correlated_local_min_data_ratio: float = 8.0
+    focus3_correlated_local_best_local_fraction: float = 0.35
+    focus3_correlated_local_max_prob: float = 0.26
+    focus3_correlated_local_min_prob: float = 0.03
+    focus3_correlated_local_pool_ratio: float = 0.75
+    focus3_correlated_local_elite_count: int = 16
+    focus3_correlated_local_sigma_scale: float = 0.85
+    focus3_correlated_local_max_step_ratio: float = 0.18
+    focus3_correlated_local_jitter_ratio: float = 0.001
     # Focus2 fallback bounds는 evidence가 약하므로 boundary를 과신하지 않는다.
     focus3_fallback_bounds_source_policy_enabled: bool = True
     focus3_fallback_bounds_boundary_max: float = 0.03
@@ -350,12 +387,12 @@ class OptimizerSystemConfig:
     focus3_no_constraint_recover_random_scale: float = 0.15
     focus3_no_constraint_recover_topk_bonus: float = 0.18
     focus3_no_constraint_recover_strong_no_improve: int = 720
-    focus3_no_constraint_recover_best_local_mild_bonus: float = 0.10
-    focus3_no_constraint_recover_best_local_strong_bonus: float = 0.22
-    focus3_no_constraint_recover_best_local_max: float = 0.55
+    focus3_no_constraint_recover_best_local_mild_bonus: float = 0.16
+    focus3_no_constraint_recover_best_local_strong_bonus: float = 0.28
+    focus3_no_constraint_recover_best_local_max: float = 0.65
     focus3_no_constraint_recover_best_local_late_no_improve: int = 450
     focus3_no_constraint_recover_best_local_late_bonus: float = 0.06
-    focus3_no_constraint_recover_best_local_late_max: float = 0.68
+    focus3_no_constraint_recover_best_local_late_max: float = 0.75
     focus3_recover_random_discrete_gate_enabled: bool = True
     focus3_recover_random_discrete_gate_margin_ratio: float = 0.06
     focus3_recover_random_discrete_gate_min_no_improve: int = 180
@@ -382,6 +419,9 @@ class OptimizerSystemConfig:
     # Focus3가 Focus2 generated bounds에 의존하는 경우, Focus3 reserve가 Focus2
     # 예산을 0으로 밀어내지 못하게 보장할 최소 Focus2 샘플 수.
     focus2_min_budget_with_focus3: int = 1
+    # Standalone selected-bounds validation path also keeps at least a tiny
+    # Focus2 budget when Focus2 is part of the auto plan.
+    focus2_min_budget_selected_bounds_with_focus3: int = 1
     focus2_budget_fraction: float = 0.30
     focus2_kappa_min: float = 1.50
     focus2_kappa_start: float = 2.50
@@ -449,7 +489,7 @@ class OptimizerSystemConfig:
     # 기본은 center/width를 약하게만 보정한다.
     focus2_final_archive_trim_blend: float = 0.30
     focus2_final_bounds_expand_ratio: float = 1.20
-    focus2_final_bounds_min_volume_ratio: float = 0.25
+    focus2_final_bounds_min_volume_ratio: float = 0.45
     focus2_final_bounds_max_volume_ratio: float = 1.0
     # Focus2 fallback은 evidence가 약하다는 뜻이므로 final bounds를 더 보수적으로 유지한다.
     focus2_final_fallback_archive_trim_blend: float = 0.0

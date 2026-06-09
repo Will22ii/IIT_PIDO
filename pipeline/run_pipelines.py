@@ -23,7 +23,11 @@ from Explorer.strategy_presets import EXPLORER_STRATEGIES, ExplorerStrategy
 from Explorer.strategy_presets import apply_explorer_strategy_preset
 from Explorer.strategy_presets import strategy_map
 from Modeler.config import ModelerConfig, ModelerSystemConfig, ModelerUserConfig
-from pipeline.aion_system_config import AION_SYSTEM_CONFIG, apply_aion_system_config
+from pipeline.aion_system_config import (
+    AION_SYSTEM_CONFIG,
+    apply_aion_optimizer_system_config,
+    apply_aion_system_config,
+)
 from pipeline.config import PipelineConfig, PipelineTasks
 from pipeline.run_pipeline import run_pipeline
 
@@ -72,8 +76,8 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": -0.0898, "x2": 0.7126},
         ],
         optimizer_goal=-0.86,
-        n_samples=50,
-        optimizer_n_samples=50,
+        n_samples=45,
+        optimizer_n_samples=40,
         repeats=25,
     ),
     "rosenbrock_nodummy": ProblemCase(
@@ -142,7 +146,7 @@ BATCH_USE_PRIMARY_SELECTION = True
 BATCH_USE_TIMESTAMP = True
 BATCH_DEBUG_LEVEL = "on"
 BATCH_CONTINUE_ON_ERROR = False
-BATCH_AION_MODE = True
+BATCH_AION_MODE = False
 
 # Keep the per-problem n_samples/repeats fixed for score experiments. These are
 # the target budgets, not a convenience runtime knob.
@@ -199,10 +203,17 @@ def _case_has_pre_constraints(problem_name: str) -> bool:
     return False
 
 
-def _build_optimizer_system_config(*, debug_level: str, problem_name: str | None = None):
+def _build_optimizer_system_config(
+    *,
+    debug_level: str,
+    problem_name: str | None = None,
+    aion_mode: bool = False,
+):
     from Optimizer.config import OptimizerSystemConfig
 
     system_cfg = OptimizerSystemConfig(debug_level=str(debug_level))
+    if bool(aion_mode):
+        apply_aion_optimizer_system_config(system_cfg)
     if problem_name and _case_has_pre_constraints(str(problem_name)):
         system_cfg.enforce_pre_constraints = True
     for key, value in BATCH_OPTIMIZER_SYSTEM_OVERRIDES.items():
@@ -324,7 +335,11 @@ def _build_pipeline_config(
                 known_optimum=case.known_optimum,
                 goal=case.optimizer_goal,
             ),
-            system=_build_optimizer_system_config(debug_level=str(debug_level), problem_name=case.problem_name),
+            system=_build_optimizer_system_config(
+                debug_level=str(debug_level),
+                problem_name=case.problem_name,
+                aion_mode=bool(aion_mode),
+            ),
             cae=cae_cfg,
             cae_metadata_path=None,
             doe_metadata_path=None,
@@ -1510,7 +1525,11 @@ def main() -> None:
                                             known_optimum=case.known_optimum,
                                             goal=case.optimizer_goal,
                                         ),
-                                        system=_build_optimizer_system_config(debug_level=debug_level, problem_name=case.problem_name),
+                                        system=_build_optimizer_system_config(
+                                            debug_level=debug_level,
+                                            problem_name=case.problem_name,
+                                            aion_mode=BATCH_AION_MODE,
+                                        ),
                                         cae=cfg.cae,
                                         cae_metadata_path=None,
                                         doe_metadata_path=None,

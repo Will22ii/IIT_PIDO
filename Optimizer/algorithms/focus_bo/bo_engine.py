@@ -437,6 +437,68 @@ def _resolve_focus3_effective_acq_type(
     }
 
 
+def _resolve_focus3_near_goal_exploitation(
+    *,
+    system: OptimizerSystemConfig,
+    y_best: float,
+    goal_internal: float | None,
+    focus3_eval_count: int,
+    recover_info: dict[str, object] | None,
+    has_constraints: bool,
+) -> dict[str, object]:
+    enabled = bool(getattr(system, "focus3_near_goal_exploitation_enabled", True))
+    margin_ratio = float(max(float(getattr(system, "focus3_near_goal_exploitation_margin_ratio", 0.20)), 0.0))
+    min_evals = int(max(int(getattr(system, "focus3_near_goal_exploitation_min_focus3_evals", 60)), 0))
+    requested_acq = _normalize_focus3_acq_type(getattr(system, "focus3_near_goal_exploitation_acq", "MEAN"))
+    if requested_acq not in {"EI", "MEAN", "LCB"}:
+        requested_acq = "MEAN"
+    info: dict[str, object] = {
+        "enabled": bool(enabled),
+        "active": False,
+        "reason": "disabled" if not enabled else "",
+        "margin_ratio": float(margin_ratio),
+        "threshold": float("nan"),
+        "requested_acq": str(requested_acq),
+        "focus3_eval_count": int(focus3_eval_count),
+        "min_focus3_evals": int(min_evals),
+    }
+    if not enabled:
+        return info
+    if bool(has_constraints):
+        info["reason"] = "constraints_present"
+        return info
+    if not (isinstance(recover_info, dict) and bool(recover_info.get("active", False))):
+        info["reason"] = "not_recovering"
+        return info
+    if int(focus3_eval_count) < min_evals:
+        info["reason"] = "insufficient_focus3_evals"
+        return info
+    if goal_internal is None:
+        info["reason"] = "goal_missing"
+        return info
+    try:
+        y_best_f = float(y_best)
+        goal_f = float(goal_internal)
+    except Exception:
+        info["reason"] = "invalid_goal_or_best"
+        return info
+    if not (math.isfinite(y_best_f) and math.isfinite(goal_f)):
+        info["reason"] = "nonfinite_goal_or_best"
+        return info
+    threshold = float(goal_f + margin_ratio * max(abs(goal_f), 1.0))
+    info["threshold"] = float(threshold)
+    if y_best_f > threshold:
+        info["reason"] = "not_near_goal"
+        return info
+    info.update({
+        "active": True,
+        "reason": "near_goal_recovery_exploitation",
+        "best": float(y_best_f),
+        "goal": float(goal_f),
+    })
+    return info
+
+
 def _adapt_focus3_source_probs(
     *,
     system: OptimizerSystemConfig,
@@ -1018,6 +1080,77 @@ def _resolve_focus3_best_local_sigma(
     }
 
 
+def _resolve_focus3_correlated_local_policy(
+    *,
+    system: OptimizerSystemConfig,
+    p_best_local: float,
+    p_dim: int,
+    n_train: int,
+    has_constraints: bool,
+    recover_info: dict[str, object] | None,
+) -> tuple[float, dict[str, object]]:
+    enabled = bool(getattr(system, "focus3_correlated_local_enabled", True))
+    data_ratio = float(max(int(n_train), 0)) / float(max(int(p_dim), 1))
+    recover_active = bool(isinstance(recover_info, dict) and bool(recover_info.get("active", False)))
+    no_improve_count = int(max(int((recover_info or {}).get("no_improve_count", 0) or 0), 0)) if isinstance(recover_info, dict) else 0
+    min_no_improve = int(max(int(getattr(system, "focus3_correlated_local_min_no_improve", 80)), 0))
+    min_data_ratio = float(max(float(getattr(system, "focus3_correlated_local_min_data_ratio", 8.0)), 0.0))
+    recover_only = bool(getattr(system, "focus3_correlated_local_recover_only", True))
+    info: dict[str, object] = {
+        "enabled": bool(enabled),
+        "active": False,
+        "reason": "disabled" if not enabled else "",
+        "prob": 0.0,
+        "best_local_before": float(p_best_local),
+        "data_ratio": float(data_ratio),
+        "min_data_ratio": float(min_data_ratio),
+        "recover_only": bool(recover_only),
+        "recover_active": bool(recover_active),
+        "no_improve_count": int(no_improve_count),
+        "min_no_improve": int(min_no_improve),
+    }
+    if not enabled:
+        return 0.0, info
+    if bool(has_constraints):
+        info["reason"] = "constraints_present"
+        return 0.0, info
+    if float(p_best_local) <= 0.0:
+        info["reason"] = "best_local_inactive"
+        return 0.0, info
+    if data_ratio < min_data_ratio:
+        info["reason"] = "insufficient_data_ratio"
+        return 0.0, info
+    if recover_only and not recover_active:
+        info["reason"] = "not_recovering"
+        return 0.0, info
+    if recover_active and no_improve_count < min_no_improve:
+        info["reason"] = "insufficient_no_improve_count"
+        return 0.0, info
+
+    fraction = float(np.clip(float(getattr(system, "focus3_correlated_local_best_local_fraction", 0.35)), 0.0, 1.0))
+    max_prob = float(np.clip(float(getattr(system, "focus3_correlated_local_max_prob", 0.25)), 0.0, 1.0))
+    min_prob = float(np.clip(float(getattr(system, "focus3_correlated_local_min_prob", 0.03)), 0.0, 1.0))
+    p_corr = float(min(float(p_best_local) * fraction, max_prob))
+    if p_corr < min_prob:
+        info.update({
+            "reason": "below_min_prob",
+            "candidate_prob": float(p_corr),
+            "min_prob": float(min_prob),
+        })
+        return 0.0, info
+    p_corr = float(min(p_corr, float(p_best_local)))
+    info.update({
+        "active": True,
+        "reason": "correlated_local_from_best_local",
+        "prob": float(p_corr),
+        "fraction": float(fraction),
+        "max_prob": float(max_prob),
+        "min_prob": float(min_prob),
+        "best_local_after": float(max(float(p_best_local) - p_corr, 0.0)),
+    })
+    return p_corr, info
+
+
 def _resolve_focus3_refine_cooldown(
     *,
     system: OptimizerSystemConfig,
@@ -1403,6 +1536,8 @@ def _resolve_focus3_source_performance_policy(
         "local_probe_refine_improve_rate": float("nan"),
         "best_local_refine_count": 0,
         "best_local_refine_improve_rate": float("nan"),
+        "correlated_local_refine_count": 0,
+        "correlated_local_refine_improve_rate": float("nan"),
         "topk_refine_count": 0,
         "topk_refine_improve_rate": float("nan"),
         "boundary_refine_count": 0,
@@ -1445,7 +1580,7 @@ def _resolve_focus3_source_performance_policy(
             return bool(val)
         return str(val).strip().lower() in {"true", "1", "yes"}
 
-    for src in ("random", "local_probe", "best_local", "topk", "boundary"):
+    for src in ("random", "local_probe", "best_local", "correlated_local", "topk", "boundary"):
         src_rows = [r for r in recent if str(r.get("focus3_nearest_refine_source", "")).strip() == src]
         count = int(len(src_rows))
         imp = int(sum(1 for r in src_rows if _improved(r)))
@@ -1626,6 +1761,46 @@ def _focus3_penalized_sources(
     }
 
 
+def _focus3_is_aion_profile(system: OptimizerSystemConfig) -> bool:
+    profile = str(getattr(system, "focus_planner_profile", "standalone") or "standalone").strip().lower()
+    return profile in {"aion", "aion_trusted_bounds", "trusted_bounds"}
+
+
+def _focus3_best_plan_filter_sources(system: OptimizerSystemConfig) -> set[str]:
+    sources = {"random", "boundary"}
+    if (
+        not _focus3_is_aion_profile(system)
+        and bool(getattr(system, "focus3_source_performance_best_plan_filter_local_probe_enabled", True))
+    ):
+        sources.add("local_probe")
+    return sources
+
+
+def _focus3_boundary_protection_allowed(
+    *,
+    system: OptimizerSystemConfig,
+    source_performance_info: dict[str, object] | None,
+) -> tuple[bool, str]:
+    if _focus3_is_aion_profile(system):
+        return True, "aion_profile_boundary_default"
+    if not bool(getattr(
+        system,
+        "focus3_source_performance_best_plan_filter_near_goal_boundary_require_ok",
+        True,
+    )):
+        return True, "boundary_performance_requirement_disabled"
+    perf = dict(source_performance_info or {})
+    boundary_rate = float(perf.get("boundary_refine_improve_rate", float("nan")))
+    min_rate = float(max(float(getattr(
+        system,
+        "focus3_source_performance_best_plan_filter_near_goal_boundary_min_improve_rate",
+        0.003,
+    )), 0.0))
+    if math.isfinite(boundary_rate) and boundary_rate >= min_rate:
+        return True, "boundary_recent_performance_ok"
+    return False, "boundary_recent_performance_poor"
+
+
 def _focus3_near_goal_protected_penalized_source(
     *,
     system: OptimizerSystemConfig,
@@ -1653,10 +1828,15 @@ def _focus3_near_goal_protected_penalized_source(
 
     if preferred in {"boundary", "boundary_first", ""}:
         if "boundary" in candidates:
-            return "boundary", "preferred_boundary"
+            boundary_allowed, boundary_reason = _focus3_boundary_protection_allowed(
+                system=system,
+                source_performance_info=source_performance_info,
+            )
+            if boundary_allowed:
+                return "boundary", f"preferred_boundary:{boundary_reason}"
         if random_fallback_enabled and "random" in candidates:
             return "random", "random_fallback"
-        return "", "boundary_missing_random_fallback_disabled"
+        return "", "boundary_not_productive_random_fallback_disabled"
 
     if preferred in {"performance", "recent_performance"}:
         perf = dict(source_performance_info or {})
@@ -1674,10 +1854,15 @@ def _focus3_near_goal_protected_penalized_source(
         ):
             return "random", "random_recent_performance_advantage"
         if "boundary" in candidates:
-            return "boundary", "boundary_recent_performance_default"
+            boundary_allowed, boundary_reason = _focus3_boundary_protection_allowed(
+                system=system,
+                source_performance_info=source_performance_info,
+            )
+            if boundary_allowed:
+                return "boundary", f"boundary_recent_performance_default:{boundary_reason}"
         if random_fallback_enabled and "random" in candidates:
             return "random", "random_fallback"
-        return "", "boundary_missing_random_fallback_disabled"
+        return "", "boundary_not_productive_random_fallback_disabled"
 
     if preferred == "acq":
         if random_fallback_enabled:
@@ -1703,7 +1888,7 @@ def _filter_focus3_penalized_best_rows(
     y_best: float | None = None,
     goal_internal: float | None = None,
 ) -> tuple[list[tuple[str, np.ndarray, float]], dict[str, object]]:
-    requested_removable = {"random", "boundary"}.intersection(set(penalized_sources))
+    requested_removable = _focus3_best_plan_filter_sources(system).intersection(set(penalized_sources))
     removable = set(requested_removable)
     near_goal_active = False
     near_goal_threshold = float("nan")
@@ -1713,7 +1898,7 @@ def _filter_focus3_penalized_best_rows(
         bool(getattr(system, "focus3_source_performance_best_plan_filter_enabled", True))
         and bool(getattr(system, "focus3_source_performance_best_plan_filter_near_goal_enabled", True))
         and bool(getattr(system, "focus3_source_performance_best_plan_filter_keep_one_when_both_penalized", True))
-        and requested_removable == {"random", "boundary"}
+        and {"random", "boundary"}.issubset(requested_removable)
         and y_best is not None
         and goal_internal is not None
     ):
@@ -5106,12 +5291,23 @@ def _build_focus3_plan_refine_starts(
             "min_no_improve": int(local_probe_min_no_improve),
         })
 
+    p_correlated_local, correlated_local_info = _resolve_focus3_correlated_local_policy(
+        system=system,
+        p_best_local=float(p_best_local),
+        p_dim=int(lb.shape[0]),
+        n_train=int(X_train.shape[0]),
+        has_constraints=bool(has_constraints),
+        recover_info=recover_info,
+    )
+    p_best_local_for_plan = float(max(float(p_best_local) - float(p_correlated_local), 0.0))
     source_probs = {
         "topk": float(p_topk),
-        "best_local": float(p_best_local),
+        "best_local": float(p_best_local_for_plan),
         "boundary": float(p_boundary),
         "random": float(p_random),
     }
+    if p_correlated_local > 0.0:
+        source_probs["correlated_local"] = float(p_correlated_local)
     if p_local_probe > 0.0:
         source_probs["local_probe"] = float(p_local_probe)
     quotas = _allocate_source_quotas(total=n_refine, probs=source_probs)
@@ -5142,8 +5338,10 @@ def _build_focus3_plan_refine_starts(
     }
     plan_acq = _normalize_focus3_acq_type(acq_type)
     source_order_list = ["topk"]
-    if float(p_best_local) > 0.0:
+    if float(p_best_local_for_plan) > 0.0:
         source_order_list.append("best_local")
+    if float(p_correlated_local) > 0.0:
+        source_order_list.append("correlated_local")
     if p_local_probe > 0.0:
         source_order_list.append("local_probe")
     source_order_list.extend(["boundary", "random"])
@@ -5152,6 +5350,8 @@ def _build_focus3_plan_refine_starts(
         source_pool_size = n_pool
         if source == "best_local":
             source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_best_local_pool_ratio", 0.50)), 0.05, 1.0)))))
+        elif source == "correlated_local":
+            source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_correlated_local_pool_ratio", 0.75)), 0.05, 1.0)))))
         elif source == "local_probe":
             local_probe_pool_max = int(max(2 * lb.shape[0] + 1, int(getattr(system, "focus3_local_probe_pool_max", 192))))
             source_pool_size = int(max(2 * lb.shape[0] + 1, min(n_pool, local_probe_pool_max)))
@@ -5211,7 +5411,7 @@ def _build_focus3_plan_refine_starts(
         quotas["boundary"] = 0
         if boundary_quota > 0:
             # Boundary가 충분히 우수하지 않으면 exploitation/coverage 쪽으로 재분배한다.
-            if float(p_best_local) > 0.0:
+            if float(p_best_local_for_plan) > 0.0:
                 n_best = int(math.floor(boundary_quota * 0.4))
                 n_topk = int(math.floor(boundary_quota * 0.4))
                 if boundary_quota > 0 and n_best == 0:
@@ -5233,7 +5433,7 @@ def _build_focus3_plan_refine_starts(
         random_quota = int(quotas.get("random", 0))
         quotas["random"] = 0
         if random_quota > 0:
-            if float(p_best_local) > 0.0:
+            if float(p_best_local_for_plan) > 0.0:
                 n_best = int(math.ceil(random_quota * 0.55))
                 n_topk = int(max(random_quota - n_best, 0))
                 quotas["best_local"] = int(quotas.get("best_local", 0)) + n_best
@@ -5244,7 +5444,7 @@ def _build_focus3_plan_refine_starts(
     quotas, source_performance_info = _apply_focus3_source_performance_to_quotas(
         quotas=quotas,
         source_performance_info=source_performance_info,
-        p_best_local=float(p_best_local),
+        p_best_local=float(p_best_local_for_plan),
         total=int(n_refine),
     )
     penalized_sources = _focus3_penalized_sources(
@@ -5312,7 +5512,7 @@ def _build_focus3_plan_refine_starts(
     best_plan_sources_before_perf = [
         s for s in finite_best_score_sources if s not in gate_excluded_sources
     ]
-    requested_perf_removable_sources = {"random", "boundary"}.intersection(penalized_sources)
+    requested_perf_removable_sources = _focus3_best_plan_filter_sources(system).intersection(penalized_sources)
     perf_removable_sources = set(requested_perf_removable_sources)
     near_goal_active = False
     near_goal_threshold = float("nan")
@@ -5322,7 +5522,7 @@ def _build_focus3_plan_refine_starts(
         bool(getattr(system, "focus3_source_performance_best_plan_filter_enabled", True))
         and bool(getattr(system, "focus3_source_performance_best_plan_filter_near_goal_enabled", True))
         and bool(getattr(system, "focus3_source_performance_best_plan_filter_keep_one_when_both_penalized", True))
-        and requested_perf_removable_sources == {"random", "boundary"}
+        and {"random", "boundary"}.issubset(requested_perf_removable_sources)
         and goal_internal is not None
     ):
         y_best_f = float(y_best)
@@ -5392,6 +5592,7 @@ def _build_focus3_plan_refine_starts(
         "source_perf_best_plan_filter": dict(source_perf_best_plan_filter_info),
         "local_probe": dict(local_probe_info),
         "local_probe_quota": dict(local_probe_quota_info),
+        "correlated_local": dict(correlated_local_info),
         "boundary_score_penalty": dict(boundary_score_penalty_info),
         "best_plan_source": min(
             best_plan_sources,
@@ -5434,7 +5635,7 @@ def _build_focus3_plan_discrete_candidate(
 ) -> tuple[np.ndarray | None, dict[str, int], dict[str, int], dict[str, object]]:
     n_pool = int(max(plan_pool_per_source, 1))
     pool_counts: dict[str, int] = {}
-    selected_counts: dict[str, int] = {"topk": 0, "best_local": 0, "local_probe": 0, "boundary": 0, "random": 0}
+    selected_counts: dict[str, int] = {"topk": 0, "best_local": 0, "correlated_local": 0, "local_probe": 0, "boundary": 0, "random": 0}
     best_scores: dict[str, float] = {}
     best_rows: list[tuple[str, np.ndarray, float]] = []
     boundary_score_penalty_info: dict[str, object] = {}
@@ -5447,7 +5648,7 @@ def _build_focus3_plan_discrete_candidate(
         "enabled": True,
         "applied": False,
         "reason": "not_evaluated",
-        "penalized_sources": ",".join(sorted({"random", "boundary"}.intersection(penalized_sources))),
+        "penalized_sources": ",".join(sorted(_focus3_best_plan_filter_sources(system).intersection(penalized_sources))),
         "removed_count": 0,
         "before_count": 0,
         "after_count": 0,
@@ -5480,9 +5681,21 @@ def _build_focus3_plan_discrete_candidate(
             "min_no_improve": int(local_probe_min_no_improve),
         })
 
+    p_correlated_local, correlated_local_info = _resolve_focus3_correlated_local_policy(
+        system=system,
+        p_best_local=float(p_best_local),
+        p_dim=int(lb.shape[0]),
+        n_train=int(X_train.shape[0]),
+        has_constraints=bool(has_constraints),
+        recover_info=recover_info,
+    )
+    p_best_local_for_plan = float(max(float(p_best_local) - float(p_correlated_local), 0.0))
+
     source_order_list = ["topk"]
-    if float(p_best_local) > 0.0:
+    if float(p_best_local_for_plan) > 0.0:
         source_order_list.append("best_local")
+    if float(p_correlated_local) > 0.0:
+        source_order_list.append("correlated_local")
     if local_probe_active:
         source_order_list.append("local_probe")
     source_order_list.extend(["boundary", "random"])
@@ -5491,6 +5704,8 @@ def _build_focus3_plan_discrete_candidate(
         source_pool_size = n_pool
         if source == "best_local":
             source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_best_local_pool_ratio", 0.50)), 0.05, 1.0)))))
+        elif source == "correlated_local":
+            source_pool_size = int(max(1, round(n_pool * float(np.clip(float(getattr(system, "focus3_correlated_local_pool_ratio", 0.75)), 0.05, 1.0)))))
         elif source == "local_probe":
             local_probe_pool_max = int(max(2 * lb.shape[0] + 1, int(getattr(system, "focus3_local_probe_pool_max", 192))))
             source_pool_size = int(max(2 * lb.shape[0] + 1, min(n_pool, local_probe_pool_max)))
@@ -5590,6 +5805,7 @@ def _build_focus3_plan_discrete_candidate(
             "source_performance": dict(source_performance_info or {}),
             "source_perf_best_plan_filter": dict(source_perf_best_plan_filter_info),
             "local_probe": dict(local_probe_info),
+            "correlated_local": dict(correlated_local_info),
             "boundary_score_penalty": dict(boundary_score_penalty_info),
             "random_cover": {
                 "enabled": False,
@@ -5627,6 +5843,7 @@ def _build_focus3_plan_discrete_candidate(
         "source_performance": dict(source_performance_info or {}),
         "source_perf_best_plan_filter": dict(source_perf_best_plan_filter_info),
         "local_probe": dict(local_probe_info),
+        "correlated_local": dict(correlated_local_info),
         "boundary_score_penalty": dict(boundary_score_penalty_info),
         "random_cover": random_cover_info,
     }
@@ -5698,6 +5915,81 @@ def _parse_float_list(value: object, default: list[float]) -> list[float]:
         if math.isfinite(v) and v > 0.0:
             out.append(float(v))
     return out or list(default)
+
+
+def _build_focus3_correlated_local_pool(
+    *,
+    rng: np.random.Generator,
+    system: OptimizerSystemConfig,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    objective_sense: str,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    pool_size: int,
+) -> np.ndarray:
+    arr = np.asarray(X_train, dtype=float)
+    y_arr = np.asarray(y_train, dtype=float).reshape(-1)
+    n_dim = int(lb.shape[0])
+    n = int(max(int(pool_size), 1))
+    if arr.ndim != 2 or arr.shape[0] == 0 or arr.shape[1] != n_dim or y_arr.shape[0] != arr.shape[0]:
+        return rng.uniform(lb, ub, size=(n, n_dim))
+    finite = np.where(np.isfinite(y_arr) & np.all(np.isfinite(arr), axis=1))[0]
+    if finite.size < 3:
+        return rng.uniform(lb, ub, size=(n, n_dim))
+
+    order_local = finite[np.argsort(-y_arr[finite] if objective_sense == "max" else y_arr[finite])]
+    elite_count = int(max(3, min(int(getattr(system, "focus3_correlated_local_elite_count", 16)), int(order_local.size))))
+    elite = arr[order_local[:elite_count]]
+    best = np.asarray(elite[0], dtype=float).reshape(-1)
+    span = np.maximum(ub - lb, 1e-12)
+    elite_norm = (elite - best.reshape(1, -1)) / span.reshape(1, -1)
+    cov = np.asarray(np.cov(elite_norm, rowvar=False), dtype=float).reshape(n_dim, n_dim)
+    jitter = float(max(float(getattr(system, "focus3_correlated_local_jitter_ratio", 0.001)), 1e-9))
+    cov = cov + np.eye(n_dim, dtype=float) * float(jitter ** 2)
+    try:
+        eig_vals, eig_vecs = np.linalg.eigh(cov)
+    except np.linalg.LinAlgError:
+        return rng.uniform(lb, ub, size=(n, n_dim))
+    order = np.argsort(eig_vals)[::-1]
+    eig_vals = np.maximum(eig_vals[order], jitter ** 2)
+    eig_vecs = eig_vecs[:, order]
+    sigma_scale = float(max(float(getattr(system, "focus3_correlated_local_sigma_scale", 0.85)), 1e-9))
+    max_step = float(max(float(getattr(system, "focus3_correlated_local_max_step_ratio", 0.18)), 1e-9))
+
+    starts: list[np.ndarray] = [np.clip(best, lb, ub)]
+    for j in range(min(n_dim, eig_vecs.shape[1])):
+        step_norm = eig_vecs[:, j] * math.sqrt(float(eig_vals[j])) * sigma_scale
+        norm = float(np.linalg.norm(step_norm))
+        if norm <= 1e-12:
+            continue
+        if norm > max_step:
+            step_norm = step_norm * (max_step / norm)
+        for scale in (0.35, 0.70, 1.0, 1.45):
+            delta = step_norm * float(scale) * span
+            starts.append(np.clip(best + delta, lb, ub))
+            starts.append(np.clip(best - delta, lb, ub))
+
+    for row in elite[1:min(elite.shape[0], 1 + n_dim * 2)]:
+        direction = (np.asarray(row, dtype=float).reshape(-1) - best) / span
+        norm = float(np.linalg.norm(direction))
+        if norm <= 1e-12:
+            continue
+        direction = direction / norm
+        for scale in (0.25, 0.55, 0.90):
+            delta = direction * min(max_step, sigma_scale * max(jitter, norm)) * float(scale) * span
+            starts.append(np.clip(best + delta, lb, ub))
+            starts.append(np.clip(best - delta, lb, ub))
+
+    while len(starts) < n:
+        z = rng.normal(0.0, 1.0, size=n_dim)
+        step_norm = eig_vecs @ (np.sqrt(eig_vals) * z) * sigma_scale
+        norm = float(np.linalg.norm(step_norm))
+        if norm > max_step:
+            step_norm = step_norm * (max_step / norm)
+        base = best if rng.uniform(0.0, 1.0) < 0.70 else elite[int(rng.integers(0, elite.shape[0]))]
+        starts.append(np.clip(base + step_norm * span, lb, ub))
+    return np.asarray(starts[:n], dtype=float)
 
 
 def _build_focus3_local_probe_pool(
@@ -5793,6 +6085,17 @@ def _build_source_pool_starts(
 
     if source == "local_probe":
         return _build_focus3_local_probe_pool(
+            rng=rng,
+            system=OptimizerSystemConfig() if system is None else system,
+            X_train=X_train,
+            y_train=y_train,
+            objective_sense=objective_sense,
+            lb=lb,
+            ub=ub,
+            pool_size=n,
+        )
+    if source == "correlated_local":
+        return _build_focus3_correlated_local_pool(
             rng=rng,
             system=OptimizerSystemConfig() if system is None else system,
             X_train=X_train,
@@ -6577,12 +6880,15 @@ def run_bo_engine(
         source_prob_boundary = float("nan")
         source_prob_random = float("nan")
         source_prob_best_local = float("nan")
+        source_prob_correlated_local = float("nan")
         focus3_source_adapt_info: dict[str, object] = {}
         focus3_acq_policy_info: dict[str, object] = {}
+        focus3_near_goal_exploitation_info: dict[str, object] = {}
         focus3_plan_pool_count = 0
         focus3_refine_start_count = 0
         focus3_selected_topk = 0
         focus3_selected_best_local = 0
+        focus3_selected_correlated_local = 0
         focus3_selected_local_probe = 0
         focus3_selected_boundary = 0
         focus3_selected_random = 0
@@ -6591,6 +6897,7 @@ def run_bo_engine(
         focus3_plan_mode = ""
         focus3_best_score_topk = float("nan")
         focus3_best_score_best_local = float("nan")
+        focus3_best_score_correlated_local = float("nan")
         focus3_best_score_local_probe = float("nan")
         focus3_best_score_boundary = float("nan")
         focus3_best_score_random = float("nan")
@@ -6623,7 +6930,7 @@ def run_bo_engine(
             "enabled": bool(getattr(system, "focus3_refine_source_filter_enabled", True)),
             "skipped": False,
             "reason": "",
-            "allowed_sources": str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local,local_probe")),
+            "allowed_sources": str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local,correlated_local,local_probe")),
         }
         focus3_refine_cooldown_info: dict[str, object] = {
             "enabled": bool(getattr(system, "focus3_refine_cooldown_enabled", True)),
@@ -7207,10 +7514,30 @@ def run_bo_engine(
                     full_ub=full_ub,
                     best_local_active=bool(focus3_best_local_info.get("applied", False)),
                 )
+                focus3_near_goal_exploitation_info = _resolve_focus3_near_goal_exploitation(
+                    system=system,
+                    y_best=float(best_y_raw),
+                    goal_internal=goal_internal,
+                    focus3_eval_count=int(focus3_eval_count),
+                    recover_info=focus3_recover_info,
+                    has_constraints=bool(constraint_defs),
+                )
+                if bool(focus3_near_goal_exploitation_info.get("active", False)) and focus3_requested_acq_type == "AUTO":
+                    focus3_acq_type = str(focus3_near_goal_exploitation_info.get("requested_acq", "MEAN"))
+                    focus3_acq_policy_info["effective"] = str(focus3_acq_type)
+                    focus3_acq_policy_info["reason"] = (
+                        str(focus3_acq_policy_info.get("reason", ""))
+                        + "+near_goal_exploitation"
+                    )
+                    focus3_acq_policy_info["near_goal_exploitation_active"] = True
+                    focus3_acq_policy_info["near_goal_exploitation_threshold"] = float(
+                        focus3_near_goal_exploitation_info.get("threshold", float("nan"))
+                    )
                 if (
                     bool(focus3_recover_info.get("active", False))
                     and focus3_requested_acq_type == "AUTO"
                     and str(focus3_acq_type).upper() in {"EI", "MEAN"}
+                    and not bool(focus3_near_goal_exploitation_info.get("active", False))
                 ):
                     focus3_acq_type = "LCB"
                     focus3_acq_policy_info["effective"] = "LCB"
@@ -7394,6 +7721,7 @@ def run_bo_engine(
                     focus3_refine_start_count = 0 if focus3_plan_mode == "discrete" else int(refine_starts.shape[0])
                     focus3_selected_topk = int(selected_counts.get("topk", 0))
                     focus3_selected_best_local = int(selected_counts.get("best_local", 0))
+                    focus3_selected_correlated_local = int(selected_counts.get("correlated_local", 0))
                     focus3_selected_local_probe = int(selected_counts.get("local_probe", 0))
                     focus3_selected_boundary = int(selected_counts.get("boundary", 0))
                     focus3_selected_random = int(selected_counts.get("random", 0))
@@ -7402,6 +7730,7 @@ def run_bo_engine(
                     if isinstance(best_scores, dict):
                         focus3_best_score_topk = float(best_scores.get("topk", float("nan")))
                         focus3_best_score_best_local = float(best_scores.get("best_local", float("nan")))
+                        focus3_best_score_correlated_local = float(best_scores.get("correlated_local", float("nan")))
                         focus3_best_score_local_probe = float(best_scores.get("local_probe", float("nan")))
                         focus3_best_score_boundary = float(best_scores.get("boundary", float("nan")))
                         focus3_best_score_random = float(best_scores.get("random", float("nan")))
@@ -7426,6 +7755,9 @@ def run_bo_engine(
                     local_probe = focus3_plan_diag.get("local_probe", {})
                     if isinstance(local_probe, dict):
                         focus3_local_probe_info = dict(local_probe)
+                    correlated_local = focus3_plan_diag.get("correlated_local", {})
+                    if isinstance(correlated_local, dict):
+                        source_prob_correlated_local = float(correlated_local.get("prob", float("nan")))
                     boundary_score_penalty = focus3_plan_diag.get("boundary_score_penalty", {})
                     if isinstance(boundary_score_penalty, dict):
                         focus3_boundary_score_penalty_info = dict(boundary_score_penalty)
@@ -7442,7 +7774,7 @@ def run_bo_engine(
                     ):
                         allowed_sources = {
                             item.strip()
-                            for item in str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local,local_probe")).split(",")
+                            for item in str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local,correlated_local,local_probe")).split(",")
                             if item.strip()
                         }
                         refine_allowed = best_plan_source_for_filter in allowed_sources
@@ -7459,7 +7791,7 @@ def run_bo_engine(
                             "skipped": False,
                             "reason": "not_applicable",
                             "best_plan_source": str(best_plan_source_for_filter),
-                            "allowed_sources": str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local,local_probe")),
+                            "allowed_sources": str(getattr(system, "focus3_refine_allowed_sources", "topk,best_local,correlated_local,local_probe")),
                         }
                     if focus3_plan_mode == "discrete" and refine_starts.shape[0] > 0:
                         x_next = refine_starts[0].copy()
@@ -7945,6 +8277,7 @@ def run_bo_engine(
             "focus3_plan_mode": str(focus3_plan_mode),
             "focus3_selected_topk": int(focus3_selected_topk),
             "focus3_selected_best_local": int(focus3_selected_best_local),
+            "focus3_selected_correlated_local": int(focus3_selected_correlated_local),
             "focus3_selected_local_probe": int(focus3_selected_local_probe),
             "focus3_selected_boundary": int(focus3_selected_boundary),
             "focus3_selected_random": int(focus3_selected_random),
@@ -7952,6 +8285,7 @@ def run_bo_engine(
             "focus3_nearest_refine_source": str(focus3_nearest_refine_source),
             "focus3_best_score_topk": float(focus3_best_score_topk),
             "focus3_best_score_best_local": float(focus3_best_score_best_local),
+            "focus3_best_score_correlated_local": float(focus3_best_score_correlated_local),
             "focus3_best_score_local_probe": float(focus3_best_score_local_probe),
             "focus3_best_score_boundary": float(focus3_best_score_boundary),
             "focus3_best_score_random": float(focus3_best_score_random),
@@ -8014,6 +8348,8 @@ def run_bo_engine(
             "focus3_source_perf_boundary_improve_rate": float(focus3_source_perf_info.get("boundary_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
             "focus3_source_perf_best_local_count": int(focus3_source_perf_info.get("best_local_refine_count", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_best_local_improve_rate": float(focus3_source_perf_info.get("best_local_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
+            "focus3_source_perf_correlated_local_count": int(focus3_source_perf_info.get("correlated_local_refine_count", 0)) if focus3_source_perf_info else 0,
+            "focus3_source_perf_correlated_local_improve_rate": float(focus3_source_perf_info.get("correlated_local_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
             "focus3_source_perf_topk_count": int(focus3_source_perf_info.get("topk_refine_count", 0)) if focus3_source_perf_info else 0,
             "focus3_source_perf_topk_improve_rate": float(focus3_source_perf_info.get("topk_refine_improve_rate", float("nan"))) if focus3_source_perf_info else float("nan"),
             "focus3_source_perf_quota_random_before": int(focus3_source_perf_info.get("quota_random_before", 0)) if focus3_source_perf_info else 0,
@@ -8048,6 +8384,11 @@ def run_bo_engine(
             "focus3_acq_mean_min_data_ratio": float(focus3_acq_policy_info.get("mean_min_data_ratio", float("nan"))) if focus3_acq_policy_info else float("nan"),
             "focus3_acq_mean_max_volume_ratio": float(focus3_acq_policy_info.get("mean_max_volume_ratio", float("nan"))) if focus3_acq_policy_info else float("nan"),
             "focus3_acq_best_local_active": bool(focus3_acq_policy_info.get("best_local_active", False)) if focus3_acq_policy_info else False,
+            "focus3_near_goal_exploitation_enabled": bool(focus3_near_goal_exploitation_info.get("enabled", False)) if focus3_near_goal_exploitation_info else False,
+            "focus3_near_goal_exploitation_active": bool(focus3_near_goal_exploitation_info.get("active", False)) if focus3_near_goal_exploitation_info else False,
+            "focus3_near_goal_exploitation_reason": str(focus3_near_goal_exploitation_info.get("reason", "")) if focus3_near_goal_exploitation_info else "",
+            "focus3_near_goal_exploitation_threshold": float(focus3_near_goal_exploitation_info.get("threshold", float("nan"))) if focus3_near_goal_exploitation_info else float("nan"),
+            "focus3_near_goal_exploitation_acq": str(focus3_near_goal_exploitation_info.get("requested_acq", "")) if focus3_near_goal_exploitation_info else "",
             "focus3_recover_enabled": bool(focus3_recover_info.get("enabled", False)) if focus3_recover_info else False,
             "focus3_recover_active": bool(focus3_recover_info.get("active", False)) if focus3_recover_info else False,
             "focus3_recover_reason": str(focus3_recover_info.get("reason", "")) if focus3_recover_info else "",
@@ -8113,6 +8454,7 @@ def run_bo_engine(
             "focus3_archive_distance_after_dedup": float(focus3_dedup_info.get("archive_distance_after", float("nan"))),
             "source_prob_topk": float(source_prob_topk),
             "source_prob_best_local": float(source_prob_best_local),
+            "source_prob_correlated_local": float(source_prob_correlated_local),
             "source_prob_boundary": float(source_prob_boundary),
             "source_prob_random": float(source_prob_random),
             "gp_fallback_used": bool(gp_fallback_used),
