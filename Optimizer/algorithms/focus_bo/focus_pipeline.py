@@ -227,13 +227,29 @@ def _allocate_budgets(
         else:
             frac = float(getattr(system, "focus2_budget_fraction", 0.30))
         base = int(max(0, math.ceil(float(frac) * int(n_samples))))
+        focus2_min_with_focus3 = 0
+        if "focus3" in stages and not bool(has_selected_bounds):
+            focus2_min_with_focus3 = int(min(
+                max(int(getattr(system, "focus2_min_budget_with_focus3", 1)), 0),
+                max(int(remaining), 0),
+            ))
+            if focus2_min_with_focus3 > 0:
+                focus3_reserve = int(min(
+                    int(focus3_reserve),
+                    max(int(remaining) - int(focus2_min_with_focus3), 0),
+                ))
         available = max(remaining - focus3_reserve, 0) if "focus3" in stages else remaining
-        budgets["focus2"] = int(min(base, available))
+        focus2_budget = int(min(base, available))
+        if focus2_min_with_focus3 > 0:
+            focus2_budget = int(min(max(focus2_budget, focus2_min_with_focus3), available))
+        budgets["focus2"] = int(focus2_budget)
         remaining -= budgets["focus2"]
         reasons["focus2_budget"] = (
             "adaptive region validation budget with focus3 reserve"
             if adaptive else "region validation budget fraction with focus3 reserve"
         )
+        if focus2_min_with_focus3 > 0 and int(budgets["focus2"]) >= int(focus2_min_with_focus3):
+            reasons["focus2_budget"] += f"; min_with_focus3={focus2_min_with_focus3}"
 
     if "focus3" in stages and remaining > 0:
         budgets["focus3"] = int(remaining)
@@ -241,6 +257,17 @@ def _allocate_budgets(
         reasons["focus3_budget"] = "remaining budget after focus0/focus1/focus2"
         if adaptive:
             reasons["focus3_budget"] += " (adaptive reserve policy)"
+
+    if remaining > 0:
+        for fallback_stage in ("focus3", "focus2", "focus1", "focus0"):
+            if fallback_stage in stages:
+                budgets[fallback_stage] = int(budgets.get(fallback_stage, 0)) + int(remaining)
+                reasons[f"{fallback_stage}_budget"] = (
+                    str(reasons.get(f"{fallback_stage}_budget", ""))
+                    + f"; unused_budget_assigned={int(remaining)}"
+                ).lstrip("; ")
+                remaining = 0
+                break
 
     return budgets, reasons
 

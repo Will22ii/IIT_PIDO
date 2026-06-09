@@ -379,6 +379,9 @@ class OptimizerSystemConfig:
     # Focus2: Focus1 regions 안에서 region별 local GP 경쟁(TuRBO-lite)을 수행한다.
     focus2_enabled: bool = True
     focus2_min_total_budget: int = 10
+    # Focus3가 Focus2 generated bounds에 의존하는 경우, Focus3 reserve가 Focus2
+    # 예산을 0으로 밀어내지 못하게 보장할 최소 Focus2 샘플 수.
+    focus2_min_budget_with_focus3: int = 1
     focus2_budget_fraction: float = 0.30
     focus2_kappa_min: float = 1.50
     focus2_kappa_start: float = 2.50

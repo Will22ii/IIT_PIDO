@@ -108,7 +108,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         ],
         optimizer_goal=-0.86,
         n_samples=40,
-        optimizer_n_samples=38,
+        optimizer_n_samples=40,
         repeats=25,
     ),
 }
