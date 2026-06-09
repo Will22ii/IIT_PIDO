@@ -108,21 +108,21 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         ],
         optimizer_goal=-0.86,
         n_samples=40,
-        optimizer_n_samples=40,
+        optimizer_n_samples=38,
         repeats=25,
     ),
 }
 
 # Activate only the cases used in this run.
 ACTIVE_PROBLEM_CASES: list[str] = [
-    "cantilever_beam",
-    "rosenbrock",
-    "goldstein_price",
-    "six_hump_camel",
-    # "cantilever_beam_nodummy",
-    # "rosenbrock_nodummy",
-    # "goldstein_price_nodummy",
-    # "six_hump_camel_nodummy",
+    # "cantilever_beam",
+    # "rosenbrock",
+    # "goldstein_price",
+    # "six_hump_camel",
+    "cantilever_beam_nodummy",
+    "rosenbrock_nodummy",
+    "goldstein_price_nodummy",
+    "six_hump_camel_nodummy",
 ]
 
 PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIVE_PROBLEM_CASES]
@@ -130,9 +130,9 @@ PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIV
 # Batch runner local config. This file is an analysis runner, so the default
 # execution policy lives here instead of requiring CLI flags.
 BATCH_TASKS: dict[str, bool] = {
-    "doe": True,
-    "modeler": True,
-    "explorer": True,
+    "doe": False,
+    "modeler": False,
+    "explorer": False,
     "optimizer": True,
 }
 BATCH_DEFAULT_OPTIMIZER_N_SAMPLES = 80
