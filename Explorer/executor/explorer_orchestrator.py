@@ -1,5 +1,6 @@
 ﻿import os
 import json
+import math
 import warnings
 from typing import Optional
 
@@ -19,6 +20,7 @@ from DOE.executor.anchor_refiner import (
     kernel_stable_conservative,
 )
 from Explorer.config import ExplorerConfig
+from Explorer.config import ExplorerSystemConfig
 from utils.boundary_sampling import sample_boundary_corners, sample_boundary_partial
 from utils.cluster_selection import select_top_clusters
 from utils.bounds_utils import compute_spans_lbs
@@ -688,8 +690,118 @@ def _fit_gp_like_additional(
     X: np.ndarray,
     y: np.ndarray,
     seed: int,
-) -> tuple[GaussianProcessRegressor | None, bool]:
-    return fit_gp_with_fallback(X=X, y=y, include_white=False, random_state=int(seed))
+    bounds: list[tuple[float, float]] | None = None,
+    system: ExplorerSystemConfig | None = None,
+) -> tuple[GaussianProcessRegressor | None, bool, dict[str, object]]:
+    policy = _explorer_gp_x_scaling_policy(system=system, bounds=bounds)
+    if not bool(policy.get("gp_x_scaling_applied", False)):
+        model, fallback = fit_gp_with_fallback(X=X, y=y, include_white=False, random_state=int(seed))
+        return model, bool(fallback), policy
+
+    lb = np.asarray([float(lo) for lo, _ in bounds or []], dtype=float)
+    ub = np.asarray([float(hi) for _, hi in bounds or []], dtype=float)
+    span_floor = float(max(float(getattr(system, "gp_x_scaling_span_floor", 1e-12)), 1e-15))
+    X_scaled = _scale_X_by_bounds(X=X, lb=lb, ub=ub, span_floor=span_floor)
+    model, fallback = fit_gp_with_fallback(
+        X=X_scaled,
+        y=y,
+        include_white=False,
+        random_state=int(seed),
+    )
+    if model is None:
+        return None, bool(fallback), policy
+    return _BoundsScaledExplorerGPModel(model, lb=lb, ub=ub, span_floor=span_floor), bool(fallback), policy
+
+
+class _BoundsScaledExplorerGPModel:
+    """Raw-X facade for an Explorer GP fitted in bounds-normalized X space."""
+
+    def __init__(self, model: object, *, lb: np.ndarray, ub: np.ndarray, span_floor: float):
+        self._model = model
+        self._lb = np.asarray(lb, dtype=float).reshape(-1)
+        raw_span = np.asarray(ub, dtype=float).reshape(-1) - self._lb
+        floor = float(max(float(span_floor), 1e-15))
+        self._span = np.where(np.abs(raw_span) > floor, raw_span, floor)
+
+    def _scale(self, X: np.ndarray) -> np.ndarray:
+        arr = np.asarray(X, dtype=float)
+        was_1d = arr.ndim == 1
+        arr2 = arr.reshape(1, -1) if was_1d else arr
+        return (arr2 - self._lb.reshape(1, -1)) / self._span.reshape(1, -1)
+
+    def predict(self, X: np.ndarray, return_std: bool = False, return_cov: bool = False):
+        X_scaled = self._scale(X)
+        return self._model.predict(X_scaled, return_std=return_std, return_cov=return_cov)
+
+    def __getattr__(self, name: str):
+        return getattr(self._model, name)
+
+
+def _scale_X_by_bounds(
+    *,
+    X: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    span_floor: float,
+) -> np.ndarray:
+    arr = np.asarray(X, dtype=float)
+    raw_span = np.asarray(ub, dtype=float).reshape(-1) - np.asarray(lb, dtype=float).reshape(-1)
+    floor = float(max(float(span_floor), 1e-15))
+    span = np.where(np.abs(raw_span) > floor, raw_span, floor)
+    return (arr - np.asarray(lb, dtype=float).reshape(1, -1)) / span.reshape(1, -1)
+
+
+def _explorer_gp_x_scaling_policy(
+    *,
+    system: ExplorerSystemConfig | None,
+    bounds: list[tuple[float, float]] | None,
+) -> dict[str, object]:
+    requested_enabled = bool(getattr(system, "gp_x_scaling_enabled", True))
+    mode = str(getattr(system, "gp_x_scaling_mode", "auto")).strip().lower()
+    threshold = float(max(float(getattr(system, "gp_x_scaling_auto_span_ratio_threshold", 3.0)), 1.0))
+
+    span_min = float("nan")
+    span_max = float("nan")
+    span_ratio = float("nan")
+    valid_bounds = bool(bounds)
+    if valid_bounds:
+        try:
+            raw_span = np.asarray([float(hi) - float(lo) for lo, hi in bounds or []], dtype=float)
+            finite = raw_span[np.isfinite(raw_span)]
+            positive = np.abs(finite[finite != 0.0])
+            if positive.size > 0:
+                span_min = float(np.min(positive))
+                span_max = float(np.max(positive))
+                span_ratio = float(span_max / max(span_min, 1e-15))
+        except Exception:
+            valid_bounds = False
+
+    applied = False
+    reason = "disabled"
+    if requested_enabled:
+        if not valid_bounds:
+            reason = "invalid_bounds"
+        elif mode in {"bounds", "bound", "minmax", "on", "true"}:
+            applied = True
+            reason = "forced_bounds"
+        elif mode in {"auto", ""}:
+            applied = bool(math.isfinite(span_ratio) and span_ratio >= threshold)
+            reason = "auto_span_ratio_pass" if applied else "auto_span_ratio_below_threshold"
+        elif mode in {"off", "none", "raw", "false"}:
+            reason = "raw_mode"
+        else:
+            reason = "unsupported_mode"
+
+    return {
+        "gp_x_scaling_enabled": bool(requested_enabled),
+        "gp_x_scaling_applied": bool(applied),
+        "gp_x_scaling_mode": str(mode or "auto"),
+        "gp_x_scaling_reason": str(reason),
+        "gp_x_scaling_auto_span_ratio_threshold": float(threshold),
+        "gp_x_scaling_span_min": span_min,
+        "gp_x_scaling_span_max": span_max,
+        "gp_x_scaling_span_ratio": span_ratio,
+    }
 
 
 def _resolve_known_optimum(
@@ -2113,10 +2225,24 @@ class ExplorerOrchestrator:
 
             gp_pred = None
             gp_obj = None
+            gp_pred_scaling_info = _explorer_gp_x_scaling_policy(system=self.config.system, bounds=bounds)
+            gp_obj_scaling_info = _explorer_gp_x_scaling_policy(system=self.config.system, bounds=bounds)
             if use_pred_model and X_pred_train.shape[0] >= min_fit:
-                gp_pred, _ = _fit_gp_like_additional(X=X_pred_train, y=y_pred_train, seed=int(rng_seed) + 17)
+                gp_pred, _, gp_pred_scaling_info = _fit_gp_like_additional(
+                    X=X_pred_train,
+                    y=y_pred_train,
+                    seed=int(rng_seed) + 17,
+                    bounds=bounds,
+                    system=self.config.system,
+                )
             if use_obj_model and X_obj_train.shape[0] >= min_fit:
-                gp_obj, _ = _fit_gp_like_additional(X=X_obj_train, y=y_obj_train, seed=int(rng_seed) + 29)
+                gp_obj, _, gp_obj_scaling_info = _fit_gp_like_additional(
+                    X=X_obj_train,
+                    y=y_obj_train,
+                    seed=int(rng_seed) + 29,
+                    bounds=bounds,
+                    system=self.config.system,
+                )
 
             # III-A: dual_acq_split — DUAL 모드에서 pred측 EI, obj측 LCB 분할
             _dual_acq_split = bool(strategy_params_local.get("dual_acq_split", False))
@@ -2481,6 +2607,7 @@ class ExplorerOrchestrator:
         constraint_aware_obj_centroid_blend_applied: bool = False
         constraint_aware_shift_boost_applied: bool = False
         constraint_aware_shift_fraction_used: float | None = None
+        explorer_gp_uncertainty_dim_weights: list[float] | None = None
 
         if selected_bounds is not None:
             if (
@@ -2773,6 +2900,9 @@ class ExplorerOrchestrator:
                     clip_max=_w_clip_max,
                 )
                 if dim_weights is not None:
+                    explorer_gp_uncertainty_dim_weights = [
+                        float(v) for v in np.asarray(dim_weights, dtype=float).reshape(-1).tolist()
+                    ]
                     parts = ", ".join(
                         f"{fn}:{w:.2f}" for fn, w in zip(selected_features, dim_weights)
                     )

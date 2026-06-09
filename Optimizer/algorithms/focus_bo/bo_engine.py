@@ -1088,8 +1088,10 @@ def _resolve_focus3_correlated_local_policy(
     n_train: int,
     has_constraints: bool,
     recover_info: dict[str, object] | None,
+    near_goal_exploitation_active: bool = False,
 ) -> tuple[float, dict[str, object]]:
     enabled = bool(getattr(system, "focus3_correlated_local_enabled", True))
+    min_dim = int(max(int(getattr(system, "focus3_correlated_local_min_dim", 5)), 1))
     data_ratio = float(max(int(n_train), 0)) / float(max(int(p_dim), 1))
     recover_active = bool(isinstance(recover_info, dict) and bool(recover_info.get("active", False)))
     no_improve_count = int(max(int((recover_info or {}).get("no_improve_count", 0) or 0), 0)) if isinstance(recover_info, dict) else 0
@@ -1102,14 +1104,20 @@ def _resolve_focus3_correlated_local_policy(
         "reason": "disabled" if not enabled else "",
         "prob": 0.0,
         "best_local_before": float(p_best_local),
+        "p_dim": int(p_dim),
+        "min_dim": int(min_dim),
         "data_ratio": float(data_ratio),
         "min_data_ratio": float(min_data_ratio),
         "recover_only": bool(recover_only),
         "recover_active": bool(recover_active),
+        "near_goal_exploitation_active": bool(near_goal_exploitation_active),
         "no_improve_count": int(no_improve_count),
         "min_no_improve": int(min_no_improve),
     }
     if not enabled:
+        return 0.0, info
+    if int(p_dim) < int(min_dim):
+        info["reason"] = "insufficient_dimension"
         return 0.0, info
     if bool(has_constraints):
         info["reason"] = "constraints_present"
@@ -1129,6 +1137,15 @@ def _resolve_focus3_correlated_local_policy(
 
     fraction = float(np.clip(float(getattr(system, "focus3_correlated_local_best_local_fraction", 0.35)), 0.0, 1.0))
     max_prob = float(np.clip(float(getattr(system, "focus3_correlated_local_max_prob", 0.25)), 0.0, 1.0))
+    if bool(near_goal_exploitation_active):
+        near_multiplier = float(np.clip(float(getattr(system, "focus3_correlated_local_near_goal_fraction_multiplier", 0.50)), 0.0, 1.0))
+        near_max_prob = float(np.clip(float(getattr(system, "focus3_correlated_local_near_goal_max_prob", max_prob)), 0.0, 1.0))
+        fraction = float(fraction * near_multiplier)
+        max_prob = float(min(max_prob, near_max_prob))
+        info.update({
+            "near_goal_fraction_multiplier": float(near_multiplier),
+            "near_goal_max_prob": float(near_max_prob),
+        })
     min_prob = float(np.clip(float(getattr(system, "focus3_correlated_local_min_prob", 0.03)), 0.0, 1.0))
     p_corr = float(min(float(p_best_local) * fraction, max_prob))
     if p_corr < min_prob:
@@ -5259,6 +5276,7 @@ def _build_focus3_plan_refine_starts(
     source_performance_info: dict[str, object] | None = None,
     recover_info: dict[str, object] | None = None,
     goal_internal: float | None = None,
+    near_goal_exploitation_active: bool = False,
 ) -> tuple[np.ndarray, dict[str, int], dict[str, int], dict[str, object]]:
     n_pool = int(max(plan_pool_per_source, 1))
     n_refine = int(max(refine_starts, 1))
@@ -5298,6 +5316,7 @@ def _build_focus3_plan_refine_starts(
         n_train=int(X_train.shape[0]),
         has_constraints=bool(has_constraints),
         recover_info=recover_info,
+        near_goal_exploitation_active=bool(near_goal_exploitation_active),
     )
     p_best_local_for_plan = float(max(float(p_best_local) - float(p_correlated_local), 0.0))
     source_probs = {
@@ -5632,6 +5651,7 @@ def _build_focus3_plan_discrete_candidate(
     source_performance_info: dict[str, object] | None = None,
     recover_info: dict[str, object] | None = None,
     goal_internal: float | None = None,
+    near_goal_exploitation_active: bool = False,
 ) -> tuple[np.ndarray | None, dict[str, int], dict[str, int], dict[str, object]]:
     n_pool = int(max(plan_pool_per_source, 1))
     pool_counts: dict[str, int] = {}
@@ -5688,6 +5708,7 @@ def _build_focus3_plan_discrete_candidate(
         n_train=int(X_train.shape[0]),
         has_constraints=bool(has_constraints),
         recover_info=recover_info,
+        near_goal_exploitation_active=bool(near_goal_exploitation_active),
     )
     p_best_local_for_plan = float(max(float(p_best_local) - float(p_correlated_local), 0.0))
 
@@ -7680,6 +7701,7 @@ def run_bo_engine(
                             source_performance_info=focus3_source_perf_info,
                             recover_info=focus3_recover_info,
                             goal_internal=goal_internal,
+                            near_goal_exploitation_active=bool(focus3_near_goal_exploitation_info.get("active", False)),
                         )
                         focus3_plan_mode = "refine"
                     else:
@@ -7713,6 +7735,7 @@ def run_bo_engine(
                             source_performance_info=focus3_source_perf_info,
                             recover_info=focus3_recover_info,
                             goal_internal=goal_internal,
+                            near_goal_exploitation_active=bool(focus3_near_goal_exploitation_info.get("active", False)),
                         )
                         refine_starts = x_discrete.reshape(1, -1) if x_discrete is not None else np.empty((0, p_dim), dtype=float)
                         focus3_plan_mode = "discrete"

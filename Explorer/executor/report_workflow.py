@@ -45,6 +45,16 @@ def build_explorer_report_payload(
         context.get("internal_objective_sense", context["objective_sense"])
     )
     objective_transform = "negate" if raw_objective_sense == "max" else "identity"
+    gp_pred_scaling_info = (
+        context.get("gp_pred_scaling_info", {})
+        if isinstance(context.get("gp_pred_scaling_info", {}), dict)
+        else {}
+    )
+    gp_obj_scaling_info = (
+        context.get("gp_obj_scaling_info", {})
+        if isinstance(context.get("gp_obj_scaling_info", {}), dict)
+        else {}
+    )
 
     previous: dict[str, str] = {}
     data_csv_ref = _rel_or_abs(context.get("doe_csv_path"), task_dir=task_dir)
@@ -120,6 +130,18 @@ def build_explorer_report_payload(
             "volume_cap_boundary_pin_tol_ratio": float(
                 getattr(system_config, "volume_cap_boundary_pin_tol_ratio", 0.03)
             ),
+            "gp_x_scaling_enabled": bool(
+                getattr(system_config, "gp_x_scaling_enabled", True)
+            ),
+            "gp_x_scaling_mode": str(
+                getattr(system_config, "gp_x_scaling_mode", "auto")
+            ),
+            "gp_x_scaling_auto_span_ratio_threshold": float(
+                getattr(system_config, "gp_x_scaling_auto_span_ratio_threshold", 3.0)
+            ),
+            "gp_x_scaling_span_floor": float(
+                getattr(system_config, "gp_x_scaling_span_floor", 1e-12)
+            ),
             "strategy_params": dict(system_config.strategy_params or {}),
         },
         "previous": previous,
@@ -165,6 +187,11 @@ def build_explorer_report_payload(
         "raw_objective_sense": raw_objective_sense,
         "canonical_objective_sense": internal_objective_sense,
         "objective_transform": objective_transform,
+        "explorer_gp_x_scaling_pred": gp_pred_scaling_info,
+        "explorer_gp_x_scaling_obj": gp_obj_scaling_info,
+        "explorer_gp_uncertainty_dim_weights": context.get(
+            "explorer_gp_uncertainty_dim_weights"
+        ),
     }
 
     routed_v2_decision = context["routed_v2_decision"]
@@ -181,6 +208,23 @@ def build_explorer_report_payload(
         "strategy_alias": strategy_alias,
         "strategy_alias_requested": strategy_alias_requested,
         "strategy_mode": strategy_mode,
+        "explorer_gp_x_scaling_pred": gp_pred_scaling_info,
+        "explorer_gp_x_scaling_obj": gp_obj_scaling_info,
+        "explorer_gp_x_scaling_applied_pred": bool(
+            gp_pred_scaling_info.get("gp_x_scaling_applied", False)
+        ),
+        "explorer_gp_x_scaling_applied_obj": bool(
+            gp_obj_scaling_info.get("gp_x_scaling_applied", False)
+        ),
+        "explorer_gp_x_scaling_span_ratio_pred": gp_pred_scaling_info.get(
+            "gp_x_scaling_span_ratio"
+        ),
+        "explorer_gp_x_scaling_span_ratio_obj": gp_obj_scaling_info.get(
+            "gp_x_scaling_span_ratio"
+        ),
+        "explorer_gp_uncertainty_dim_weights": context.get(
+            "explorer_gp_uncertainty_dim_weights"
+        ),
         "dual_obj_equivalent_forced": bool(context["dual_obj_equivalent_forced"]),
         "p_dim": int(len(selected_features)),
         "usable_n": int(base_n),

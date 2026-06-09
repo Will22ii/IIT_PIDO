@@ -284,7 +284,7 @@ class OptimizerSystemConfig:
     # Rosenbrock no_dummy는 bounds 안에 optimum이 있어도 후반 LCB 탐색에 묶여
     # 1.20 근처에서 멈추는 케이스가 많았다.
     focus3_near_goal_exploitation_enabled: bool = True
-    focus3_near_goal_exploitation_margin_ratio: float = 0.20
+    focus3_near_goal_exploitation_margin_ratio: float = 0.10
     focus3_near_goal_exploitation_acq: str = "MEAN"
     focus3_near_goal_exploitation_min_focus3_evals: int = 60
     # Focus3 source ratio = budget class + data reliability + GP/recent improvement 보정.
@@ -339,11 +339,14 @@ class OptimizerSystemConfig:
     # best_local quota 일부를 elite covariance/PCA 방향 source로 분리한다.
     # 함수명을 보지 않고 최근 elite archive의 형상만 사용해 curved valley를 따라간다.
     focus3_correlated_local_enabled: bool = True
+    focus3_correlated_local_min_dim: int = 5
     focus3_correlated_local_recover_only: bool = True
     focus3_correlated_local_min_no_improve: int = 80
     focus3_correlated_local_min_data_ratio: float = 8.0
     focus3_correlated_local_best_local_fraction: float = 0.35
     focus3_correlated_local_max_prob: float = 0.26
+    focus3_correlated_local_near_goal_fraction_multiplier: float = 0.50
+    focus3_correlated_local_near_goal_max_prob: float = 0.16
     focus3_correlated_local_min_prob: float = 0.03
     focus3_correlated_local_pool_ratio: float = 0.75
     focus3_correlated_local_elite_count: int = 16
