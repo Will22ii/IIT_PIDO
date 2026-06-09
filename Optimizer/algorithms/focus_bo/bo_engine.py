@@ -447,9 +447,17 @@ def _resolve_focus3_near_goal_exploitation(
     has_constraints: bool,
 ) -> dict[str, object]:
     enabled = bool(getattr(system, "focus3_near_goal_exploitation_enabled", True))
+    is_aion_profile = _focus3_is_aion_profile(system)
+    if bool(is_aion_profile):
+        enabled = bool(enabled and bool(getattr(system, "focus3_aion_near_goal_exploitation_enabled", True)))
     margin_ratio = float(max(float(getattr(system, "focus3_near_goal_exploitation_margin_ratio", 0.20)), 0.0))
+    if bool(is_aion_profile):
+        margin_ratio = float(max(float(getattr(system, "focus3_aion_near_goal_exploitation_margin_ratio", margin_ratio)), 0.0))
     min_evals = int(max(int(getattr(system, "focus3_near_goal_exploitation_min_focus3_evals", 60)), 0))
-    requested_acq = _normalize_focus3_acq_type(getattr(system, "focus3_near_goal_exploitation_acq", "MEAN"))
+    if bool(is_aion_profile):
+        min_evals = int(max(int(getattr(system, "focus3_aion_near_goal_exploitation_min_focus3_evals", min_evals)), 0))
+    acq_attr = "focus3_aion_near_goal_exploitation_acq" if bool(is_aion_profile) else "focus3_near_goal_exploitation_acq"
+    requested_acq = _normalize_focus3_acq_type(getattr(system, acq_attr, getattr(system, "focus3_near_goal_exploitation_acq", "MEAN")))
     if requested_acq not in {"EI", "MEAN", "LCB"}:
         requested_acq = "MEAN"
     info: dict[str, object] = {
@@ -461,6 +469,8 @@ def _resolve_focus3_near_goal_exploitation(
         "requested_acq": str(requested_acq),
         "focus3_eval_count": int(focus3_eval_count),
         "min_focus3_evals": int(min_evals),
+        "planner_profile": str(getattr(system, "focus_planner_profile", "standalone") or "standalone"),
+        "aion_profile": bool(is_aion_profile),
     }
     if not enabled:
         return info
@@ -1091,12 +1101,19 @@ def _resolve_focus3_correlated_local_policy(
     near_goal_exploitation_active: bool = False,
 ) -> tuple[float, dict[str, object]]:
     enabled = bool(getattr(system, "focus3_correlated_local_enabled", True))
+    is_aion_profile = _focus3_is_aion_profile(system)
+    if bool(is_aion_profile):
+        enabled = bool(enabled and bool(getattr(system, "focus3_aion_correlated_local_enabled", True)))
     min_dim = int(max(int(getattr(system, "focus3_correlated_local_min_dim", 5)), 1))
+    if bool(is_aion_profile):
+        min_dim = int(max(int(getattr(system, "focus3_aion_correlated_local_min_dim", min_dim)), 1))
     data_ratio = float(max(int(n_train), 0)) / float(max(int(p_dim), 1))
     recover_active = bool(isinstance(recover_info, dict) and bool(recover_info.get("active", False)))
     no_improve_count = int(max(int((recover_info or {}).get("no_improve_count", 0) or 0), 0)) if isinstance(recover_info, dict) else 0
     min_no_improve = int(max(int(getattr(system, "focus3_correlated_local_min_no_improve", 80)), 0))
     min_data_ratio = float(max(float(getattr(system, "focus3_correlated_local_min_data_ratio", 8.0)), 0.0))
+    if bool(is_aion_profile):
+        min_data_ratio = float(max(float(getattr(system, "focus3_aion_correlated_local_min_data_ratio", min_data_ratio)), 0.0))
     recover_only = bool(getattr(system, "focus3_correlated_local_recover_only", True))
     info: dict[str, object] = {
         "enabled": bool(enabled),
@@ -1113,6 +1130,8 @@ def _resolve_focus3_correlated_local_policy(
         "near_goal_exploitation_active": bool(near_goal_exploitation_active),
         "no_improve_count": int(no_improve_count),
         "min_no_improve": int(min_no_improve),
+        "planner_profile": str(getattr(system, "focus_planner_profile", "standalone") or "standalone"),
+        "aion_profile": bool(is_aion_profile),
     }
     if not enabled:
         return 0.0, info
@@ -1137,9 +1156,22 @@ def _resolve_focus3_correlated_local_policy(
 
     fraction = float(np.clip(float(getattr(system, "focus3_correlated_local_best_local_fraction", 0.35)), 0.0, 1.0))
     max_prob = float(np.clip(float(getattr(system, "focus3_correlated_local_max_prob", 0.25)), 0.0, 1.0))
+    if bool(is_aion_profile):
+        fraction = float(np.clip(float(getattr(system, "focus3_aion_correlated_local_best_local_fraction", fraction)), 0.0, 1.0))
+        max_prob = float(np.clip(float(getattr(system, "focus3_aion_correlated_local_max_prob", max_prob)), 0.0, 1.0))
     if bool(near_goal_exploitation_active):
-        near_multiplier = float(np.clip(float(getattr(system, "focus3_correlated_local_near_goal_fraction_multiplier", 0.50)), 0.0, 1.0))
-        near_max_prob = float(np.clip(float(getattr(system, "focus3_correlated_local_near_goal_max_prob", max_prob)), 0.0, 1.0))
+        near_multiplier_attr = (
+            "focus3_aion_correlated_local_near_goal_fraction_multiplier"
+            if bool(is_aion_profile)
+            else "focus3_correlated_local_near_goal_fraction_multiplier"
+        )
+        near_max_attr = (
+            "focus3_aion_correlated_local_near_goal_max_prob"
+            if bool(is_aion_profile)
+            else "focus3_correlated_local_near_goal_max_prob"
+        )
+        near_multiplier = float(np.clip(float(getattr(system, near_multiplier_attr, getattr(system, "focus3_correlated_local_near_goal_fraction_multiplier", 0.50))), 0.0, 1.0))
+        near_max_prob = float(np.clip(float(getattr(system, near_max_attr, getattr(system, "focus3_correlated_local_near_goal_max_prob", max_prob))), 0.0, 1.0))
         fraction = float(fraction * near_multiplier)
         max_prob = float(min(max_prob, near_max_prob))
         info.update({

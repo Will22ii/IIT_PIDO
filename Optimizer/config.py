@@ -287,6 +287,12 @@ class OptimizerSystemConfig:
     focus3_near_goal_exploitation_margin_ratio: float = 0.10
     focus3_near_goal_exploitation_acq: str = "MEAN"
     focus3_near_goal_exploitation_min_focus3_evals: int = 60
+    # AION trusted-bounds Focus3 uses the same near-goal idea, but keeps the
+    # threshold narrow so Explorer bounds do not over-exploit a wrong basin.
+    focus3_aion_near_goal_exploitation_enabled: bool = True
+    focus3_aion_near_goal_exploitation_margin_ratio: float = 0.10
+    focus3_aion_near_goal_exploitation_acq: str = "MEAN"
+    focus3_aion_near_goal_exploitation_min_focus3_evals: int = 60
     # Focus3 source ratio = budget class + data reliability + GP/recent improvement 보정.
     focus3_source_adaptive_enabled: bool = True
     focus3_data_ratio_low: float = 5.0
@@ -348,6 +354,15 @@ class OptimizerSystemConfig:
     focus3_correlated_local_near_goal_fraction_multiplier: float = 0.50
     focus3_correlated_local_near_goal_max_prob: float = 0.16
     focus3_correlated_local_min_prob: float = 0.03
+    # AION selected bounds are trusted but may be imperfect, so correlated local
+    # is enabled only in high dimension and with a smaller quota than standalone.
+    focus3_aion_correlated_local_enabled: bool = True
+    focus3_aion_correlated_local_min_dim: int = 5
+    focus3_aion_correlated_local_min_data_ratio: float = 8.0
+    focus3_aion_correlated_local_best_local_fraction: float = 0.25
+    focus3_aion_correlated_local_max_prob: float = 0.16
+    focus3_aion_correlated_local_near_goal_fraction_multiplier: float = 0.50
+    focus3_aion_correlated_local_near_goal_max_prob: float = 0.10
     focus3_correlated_local_pool_ratio: float = 0.75
     focus3_correlated_local_elite_count: int = 16
     focus3_correlated_local_sigma_scale: float = 0.85
