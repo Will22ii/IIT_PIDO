@@ -9,7 +9,7 @@ from Explorer.config import ExplorerConfig, ExplorerSystemConfig, ExplorerUserCo
 from Explorer.strategy_presets import apply_explorer_strategy_preset
 from Modeler.config import ModelerConfig, ModelerSystemConfig, ModelerUserConfig
 from Optimizer.config import OptimizerConfig, OptimizerSystemConfig, OptimizerUserConfig
-from pipeline.aion_system_config import apply_aion_system_config
+from pipeline.aion_system_config import AION_SYSTEM_CONFIG, apply_aion_system_config
 from pipeline.config import PipelineConfig, PipelineReusePolicy, PipelineTasks
 from pipeline.config_io import load_json_object
 from pipeline.run_pipeline import run_pipeline
@@ -74,11 +74,11 @@ def build_aion_pipeline_config(*, config: AIONConfig) -> PipelineConfig:
 
     explorer_system = apply_explorer_strategy_preset(
         ExplorerSystemConfig(
-            strategy_id="S4_dual",
+            strategy_id=AION_SYSTEM_CONFIG.explorer_strategy_id,
             debug_level=str(config.debug_level),
             save_plot=True,
         ),
-        "S4_dual",
+        AION_SYSTEM_CONFIG.explorer_strategy_id,
     )
 
     explorer_cfg = ExplorerConfig(

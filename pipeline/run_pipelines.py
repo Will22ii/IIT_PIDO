@@ -23,7 +23,7 @@ from Explorer.strategy_presets import EXPLORER_STRATEGIES, ExplorerStrategy
 from Explorer.strategy_presets import apply_explorer_strategy_preset
 from Explorer.strategy_presets import strategy_map
 from Modeler.config import ModelerConfig, ModelerSystemConfig, ModelerUserConfig
-from pipeline.aion_system_config import apply_aion_system_config
+from pipeline.aion_system_config import AION_SYSTEM_CONFIG, apply_aion_system_config
 from pipeline.config import PipelineConfig, PipelineTasks
 from pipeline.run_pipeline import run_pipeline
 
@@ -107,22 +107,22 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": -0.0898, "x2": 0.7126},
         ],
         optimizer_goal=-0.86,
-        n_samples=50,
-        optimizer_n_samples=50,
+        n_samples=40,
+        optimizer_n_samples=40,
         repeats=25,
     ),
 }
 
 # Activate only the cases used in this run.
 ACTIVE_PROBLEM_CASES: list[str] = [
-    # "cantilever_beam",
-    # "rosenbrock",
-    # "goldstein_price",
-    # "six_hump_camel",
-    "cantilever_beam_nodummy",
-    "rosenbrock_nodummy",
-    "goldstein_price_nodummy",
-    "six_hump_camel_nodummy",
+    "cantilever_beam",
+    "rosenbrock",
+    "goldstein_price",
+    "six_hump_camel",
+    # "cantilever_beam_nodummy",
+    # "rosenbrock_nodummy",
+    # "goldstein_price_nodummy",
+    # "six_hump_camel_nodummy",
 ]
 
 PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIVE_PROBLEM_CASES]
@@ -130,9 +130,9 @@ PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIV
 # Batch runner local config. This file is an analysis runner, so the default
 # execution policy lives here instead of requiring CLI flags.
 BATCH_TASKS: dict[str, bool] = {
-    "doe": False,
-    "modeler": False,
-    "explorer": False,
+    "doe": True,
+    "modeler": True,
+    "explorer": True,
     "optimizer": True,
 }
 BATCH_DEFAULT_OPTIMIZER_N_SAMPLES = 80
@@ -142,7 +142,7 @@ BATCH_USE_PRIMARY_SELECTION = True
 BATCH_USE_TIMESTAMP = True
 BATCH_DEBUG_LEVEL = "on"
 BATCH_CONTINUE_ON_ERROR = False
-BATCH_AION_MODE = False
+BATCH_AION_MODE = True
 
 # Keep the per-problem n_samples/repeats fixed for score experiments. These are
 # the target budgets, not a convenience runtime knob.
@@ -157,6 +157,12 @@ BATCH_OPTIMIZER_SYSTEM_OVERRIDES: dict[str, Any] = {
 
 def _strategy_map() -> dict[str, ExplorerStrategy]:
     return strategy_map()
+
+
+def _default_explorer_strategy_id(*, aion_mode: bool) -> str:
+    if bool(aion_mode):
+        return str(AION_SYSTEM_CONFIG.explorer_strategy_id)
+    return str(ExplorerSystemConfig().strategy_id)
 
 
 def _resolve_case_repeats(case: ProblemCase) -> int:
@@ -241,8 +247,8 @@ def _choose_strategies_by_dim(
 ) -> tuple[str, list[ExplorerStrategy]]:
     requested_map = {s.strategy_id: s for s in requested}
     policy = "low_dim_active" if selected_feature_count <= 3 else "high_dim_active"
-    # 정렬 우선순위: S4_dual (AION) → S4_obj (stand-alone). EXPLORER_STRATEGIES와
-    # 동일 catalog 사용.
+    # Preserve a stable catalog order when multiple strategies are explicitly
+    # requested. Default ownership lives in ExplorerSystemConfig/AIONSystemConfig.
     ordered = ["S4_dual", "S4_obj"]
     chosen = [requested_map[sid] for sid in ordered if sid in requested_map]
     if not chosen:
@@ -1263,19 +1269,18 @@ def main() -> None:
         default=30,
         help="Optimizer user n_samples.",
     )
-    # ExplorerSystemConfig 의 system-wide default (stand-alone safe = S4_obj) 를
-    # fetch한 뒤, pipeline entry-point에서는 Modeler 동반(AION 모드)을 가정하여
-    # S4_dual 로 명시 override 한다.
+    # Strategy policy is owned by aion_system_config when AION mode is enabled.
+    # Stand-alone defaults remain owned by ExplorerSystemConfig.
     _explorer_system_default = ExplorerSystemConfig().strategy_id
-    _pipeline_explorer_default = "S4_dual"
+    _pipeline_explorer_default = _default_explorer_strategy_id(aion_mode=BATCH_AION_MODE)
     parser.add_argument(
         "--explorer-strategies",
         type=str,
         default=_pipeline_explorer_default,
         help=(
             "Comma-separated Explorer strategy IDs. "
-            f"pipeline default = {_pipeline_explorer_default} (AION 모드 — Modeler task "
-            f"동반 가정. p_dim<=3 비제약은 자동 obj-equivalent path, p_dim>=4는 dual blend). "
+            f"pipeline default = {_pipeline_explorer_default} "
+            f"(AION defaults come from pipeline/aion_system_config.py). "
             f"Explorer system default = {_explorer_system_default} (stand-alone safe — "
             f"Modeler 미동반 환경). stand-alone Explorer 호출 시 system default 적용."
         ),

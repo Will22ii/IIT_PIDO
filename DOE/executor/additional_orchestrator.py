@@ -140,6 +140,9 @@ class AdditionalDOEOrchestrator:
         local_exec_min_anchors: int = 2,
         plan_filter_safety: float = 1.2,
         plan_filter_r_floor: float = 0.02,
+        pre_equality_boost_base: float = 2.0,
+        pre_equality_boost_max: float = 8.0,
+        pre_equality_warning_threshold: int = 3,
         success_rate_floor: float = 0.02,
         max_additional_stages: int = 10,
         var_names: list[str] | None = None,
@@ -166,7 +169,7 @@ class AdditionalDOEOrchestrator:
         local_phase1_kappa: float = 0.75,
         local_phase2_kappa: float = 0.5,
         local_base_perturb_ratio: float = 0.02,
-        local_constraint_retry_count: int = 1,
+        local_constraint_retry_count: int = 2,
         local_constraint_shrink_factor: float = 0.5,
         local_constraint_min_factor: float = 2.0,
         local_exec_pick_mode: str = "random",
@@ -343,6 +346,9 @@ class AdditionalDOEOrchestrator:
         self.local_exec_min_anchors = int(max(0, int(local_exec_min_anchors)))
         self.plan_filter_safety = float(plan_filter_safety)
         self.plan_filter_r_floor = float(plan_filter_r_floor)
+        self.pre_equality_boost_base = max(float(pre_equality_boost_base), 1.0)
+        self.pre_equality_boost_max = max(float(pre_equality_boost_max), 1.0)
+        self.pre_equality_warning_threshold = max(int(pre_equality_warning_threshold), 1)
         self.success_rate_floor = float(success_rate_floor)
         if not (0.0 <= self.success_rate_floor <= 1.0):
             raise ValueError("success_rate_floor must be in [0, 1]")
@@ -358,6 +364,34 @@ class AdditionalDOEOrchestrator:
             str(c.get("scope", "pre")).strip().lower() == "post"
             for c in self.constraint_defs
         )
+        self.pre_equality_count = int(
+            sum(
+                1
+                for c in self.constraint_defs
+                if str(c.get("scope", "pre")).strip().lower() == "pre"
+                and str(c.get("type", "")).strip() == "=="
+            )
+        )
+        self.pre_equality_boost = 1.0
+        if self.pre_equality_count > 0:
+            self.pre_equality_boost = float(
+                min(
+                    self.pre_equality_boost_base ** float(self.pre_equality_count),
+                    self.pre_equality_boost_max,
+                )
+            )
+            print(
+                "[AdditionalDOE][PreEquality] "
+                f"count={self.pre_equality_count} "
+                f"candidate_boost={self.pre_equality_boost:.3g} "
+                "policy=eps_band_rejection"
+            )
+            if self.pre_equality_count >= self.pre_equality_warning_threshold:
+                print(
+                    "[AdditionalDOE][PreEquality][WARN] "
+                    f"count={self.pre_equality_count} may be too restrictive for rejection sampling; "
+                    "consider relaxing eps or reparameterizing equality constraints."
+                )
         self.constraint_rate_hat = 1.0
         self._constraint_gen_total = 0
         self._constraint_feas_total = 0
@@ -1106,7 +1140,7 @@ class AdditionalDOEOrchestrator:
             return target_count
         r_used = max(float(self.constraint_rate_hat), float(self.plan_filter_r_floor))
         inv = max(int(np.ceil(1.0 / r_used)), 1)
-        n_gen = int(np.ceil(target_count * self.plan_filter_safety * inv))
+        n_gen = int(np.ceil(target_count * self.plan_filter_safety * inv * self.pre_equality_boost))
         return max(n_gen, target_count)
 
     def _update_post_rate(self, *, feasible: bool) -> None:
@@ -1305,7 +1339,10 @@ class AdditionalDOEOrchestrator:
 
         if self.has_pre_constraints:
             if n_regular_target > 0:
-                probe_size = max(1, int(np.ceil(n_regular_target * self.initial_probe_multiplier)))
+                probe_size = max(
+                    1,
+                    int(np.ceil(n_regular_target * self.initial_probe_multiplier * self.pre_equality_boost)),
+                )
                 max_attempts = min(max(2, int(np.ceil(1.0 / max(self.plan_filter_r_floor, 1e-6)))), 50)
                 pool_X: list[np.ndarray] = []
                 pool_constraints: list[dict] = []
@@ -2597,12 +2634,16 @@ class AdditionalDOEOrchestrator:
                     if self.has_pre_constraints and f_i < required_feasible:
                         for retry_idx in range(self.local_constraint_retry_count):
                             shrink = self.local_constraint_shrink_factor ** float(retry_idx + 1)
+                            n_retry = max(
+                                4,
+                                int(np.ceil(required_feasible * self.pre_equality_boost)),
+                            )
                             X_retry = clamp_to_bounds(
                                 anchors[i].reshape(1, -1)
                                 + self.rng.normal(
                                     loc=0.0,
                                     scale=np.maximum(spans * radius_ratio * shrink, spans * self.local_min_radius_ratio),
-                                    size=(max(4, required_feasible), Xl_work.shape[1]),
+                                    size=(n_retry, Xl_work.shape[1]),
                                 ),
                                 self.bounds,
                             )
@@ -3163,6 +3204,10 @@ class AdditionalDOEOrchestrator:
             "gate_history": self.gate_history,
             "budget_policy": str(self.budget_policy),
             "constraint_rate_hat": float(self.constraint_rate_hat),
+            "pre_equality_count": int(self.pre_equality_count),
+            "pre_equality_boost": float(self.pre_equality_boost),
+            "pre_equality_boost_base": float(self.pre_equality_boost_base),
+            "pre_equality_boost_max": float(self.pre_equality_boost_max),
             "post_feasible_rate_hat": float(self.post_feasible_rate_hat),
             "post_lambda": float(self.post_lambda_current),
             "post_model_active": bool(self._post_model is not None),
@@ -3358,7 +3403,11 @@ class AdditionalDOEOrchestrator:
             return np.empty((0, len(self.bounds)), dtype=float), [], []
 
         offset = np.zeros((len(self.bounds),), dtype=float)
-        n_corner_pool = n_target if not self.has_pre_constraints else max((2 * n_target), (n_target + 4))
+        if not self.has_pre_constraints:
+            n_corner_pool = n_target
+        else:
+            n_corner_pool = max((2 * n_target), (n_target + 4))
+            n_corner_pool = int(np.ceil(float(n_corner_pool) * self.pre_equality_boost))
         corner_pool = sample_boundary_corners_random(
             self.bounds,
             offset=offset,

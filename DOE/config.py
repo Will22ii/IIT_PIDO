@@ -46,6 +46,9 @@ class DOESystemConfig:
     plan_decay: float = 0.9
     plan_filter_safety: float = 1.2
     plan_filter_r_floor: float = 0.02
+    pre_equality_boost_base: float = 2.0
+    pre_equality_boost_max: float = 8.0
+    pre_equality_warning_threshold: int = 3
     max_additional_stages: int = 10
 
     # 4) Gate
@@ -82,7 +85,7 @@ class DOESystemConfig:
     local_gp_use_white_kernel: bool = False
 
     # 8) Local planner: 제약 재시도
-    local_constraint_retry_count: int = 1
+    local_constraint_retry_count: int = 2
     local_constraint_shrink_factor: float = 0.75
     local_constraint_min_factor: float = 2.0
     local_exec_pick_mode: str = "random"
@@ -209,6 +212,9 @@ def build_additional_cfg_from_system(
         "plan_decay": system.plan_decay,
         "plan_filter_safety": system.plan_filter_safety,
         "plan_filter_r_floor": system.plan_filter_r_floor,
+        "pre_equality_boost_base": system.pre_equality_boost_base,
+        "pre_equality_boost_max": system.pre_equality_boost_max,
+        "pre_equality_warning_threshold": system.pre_equality_warning_threshold,
         "max_additional_stages": system.max_additional_stages,
         "gate1_ratio": system.gate1_ratio,
         "gate1_pass_ratio": system.gate1_pass_ratio,
