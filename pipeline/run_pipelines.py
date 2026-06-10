@@ -119,14 +119,14 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
 
 # Activate only the cases used in this run.
 ACTIVE_PROBLEM_CASES: list[str] = [
-    # "cantilever_beam",
-    # "rosenbrock",
-    # "goldstein_price",
-    # "six_hump_camel",
-    "cantilever_beam_nodummy",
-    "rosenbrock_nodummy",
-    "goldstein_price_nodummy",
-    "six_hump_camel_nodummy",
+    "cantilever_beam",
+    "rosenbrock",
+    "goldstein_price",
+    "six_hump_camel",
+    # "cantilever_beam_nodummy",
+    # "rosenbrock_nodummy",
+    # "goldstein_price_nodummy",
+    # "six_hump_camel_nodummy",
 ]
 
 PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIVE_PROBLEM_CASES]
@@ -134,9 +134,9 @@ PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIV
 # Batch runner local config. This file is an analysis runner, so the default
 # execution policy lives here instead of requiring CLI flags.
 BATCH_TASKS: dict[str, bool] = {
-    "doe": False,
-    "modeler": False,
-    "explorer": False,
+    "doe": True,
+    "modeler": True,
+    "explorer": True,
     "optimizer": True,
 }
 BATCH_DEFAULT_OPTIMIZER_N_SAMPLES = 80
@@ -146,7 +146,7 @@ BATCH_USE_PRIMARY_SELECTION = True
 BATCH_USE_TIMESTAMP = True
 BATCH_DEBUG_LEVEL = "on"
 BATCH_CONTINUE_ON_ERROR = False
-BATCH_AION_MODE = False
+BATCH_AION_MODE = True
 
 # Keep the per-problem n_samples/repeats fixed for score experiments. These are
 # the target budgets, not a convenience runtime knob.
