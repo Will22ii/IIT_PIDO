@@ -805,6 +805,12 @@ def run_doe_orchestrator(
         "phase2_entered": diagnostics.get("phase2_entered"),
         "post_lambda": diagnostics.get("post_lambda"),
         "post_model_active": diagnostics.get("post_model_active"),
+        "additional_gp_x_scaling_enabled": diagnostics.get("additional_gp_x_scaling_enabled"),
+        "additional_gp_x_scaling_mode": diagnostics.get("additional_gp_x_scaling_mode"),
+        "additional_gp_x_scaling_auto_span_ratio_threshold": diagnostics.get(
+            "additional_gp_x_scaling_auto_span_ratio_threshold"
+        ),
+        "additional_gp_x_scaling_span_floor": diagnostics.get("additional_gp_x_scaling_span_floor"),
     }
 
     # --- Analysis metadata: 패턴 분석 + 개선안 도출용 (artifacts/meta/analysis.json) ---
@@ -836,6 +842,12 @@ def run_doe_orchestrator(
         "post_lambda": diagnostics.get("post_lambda"),
         "post_model_active": diagnostics.get("post_model_active"),
         "failure_reason": diagnostics.get("failure_reason"),
+        "additional_gp_x_scaling_enabled": diagnostics.get("additional_gp_x_scaling_enabled"),
+        "additional_gp_x_scaling_mode": diagnostics.get("additional_gp_x_scaling_mode"),
+        "additional_gp_x_scaling_auto_span_ratio_threshold": diagnostics.get(
+            "additional_gp_x_scaling_auto_span_ratio_threshold"
+        ),
+        "additional_gp_x_scaling_span_floor": diagnostics.get("additional_gp_x_scaling_span_floor"),
         # Gate scores
         "doe_gate1_score_mean": diagnostics.get("doe_gate1_score_mean"),
         "doe_gate2_score_mean": diagnostics.get("doe_gate2_score_mean"),

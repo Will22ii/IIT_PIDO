@@ -152,7 +152,7 @@ def run_fi_selection_workflow(
             if keep_debug:
                 print("[Modeler][FI-ELITE] elite_mode=off -> skip elite score-drop importance")
 
-    selector = FeatureSelector(fs_config)
+    selector = FeatureSelector(fs_config, base_seed=int(base_seed))
 
     perm_global_df = perm_imp_df.loc[
         perm_imp_df["scale"].astype(str) == "global"

@@ -136,7 +136,7 @@ def run_bootstrap_stability(
         perm_g = perm_global.get("perm_effect_raw", pd.DataFrame())
         perm_e = perm_elite.get("perm_effect_raw", pd.DataFrame())
 
-        selector = FeatureSelector(fs_config)
+        selector = FeatureSelector(fs_config, base_seed=int(base_seed))
         try:
             sub_result = selector.run(
                 perm_effect_df=perm_g,

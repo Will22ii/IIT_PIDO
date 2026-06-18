@@ -4,21 +4,16 @@ from __future__ import annotations
 
 import inspect
 from itertools import combinations
-import warnings
 from typing import Any, Callable, Optional
 
 import numpy as np
-from sklearn.exceptions import ConvergenceWarning
-from sklearn.gaussian_process import GaussianProcessRegressor
 
 from utils.boundary_sampling import sample_boundary_corners, sample_boundary_corners_random, sample_boundary_partial
 from utils.bounds_utils import compute_spans_lbs, clamp_to_bounds
 from utils.objective_sense import canonical_objective_for_result
 from DOE.executor.anchor_refiner import (
     AcquisitionOptimizer,
-    fit_gp_with_fallback,
-    kernel_common_best,
-    kernel_stable_conservative,
+    fit_gp_with_optional_x_scaling,
 )
 from DOE.executor.constraint_filter import (
     clamp_ratio,
@@ -186,6 +181,10 @@ class AdditionalDOEOrchestrator:
         force_baseline: bool = False,
         local_gp_seed: int = 42,
         local_gp_use_white_kernel: bool = False,
+        additional_gp_x_scaling_enabled: bool = True,
+        additional_gp_x_scaling_mode: str = "bounds",
+        additional_gp_x_scaling_auto_span_ratio_threshold: float = 3.0,
+        additional_gp_x_scaling_span_floor: float = 1e-12,
     ):
         self.bounds = bounds
         self.sampler = sampler
@@ -442,6 +441,14 @@ class AdditionalDOEOrchestrator:
         self.force_baseline = bool(force_baseline)
         self.local_gp_seed = int(local_gp_seed)
         self.local_gp_use_white_kernel = bool(local_gp_use_white_kernel)
+        self.additional_gp_x_scaling_enabled = bool(additional_gp_x_scaling_enabled)
+        self.additional_gp_x_scaling_mode = str(additional_gp_x_scaling_mode or "auto").strip().lower()
+        if self.additional_gp_x_scaling_mode not in {"off", "auto", "bounds"}:
+            self.additional_gp_x_scaling_mode = "auto"
+        self.additional_gp_x_scaling_auto_span_ratio_threshold = float(
+            additional_gp_x_scaling_auto_span_ratio_threshold
+        )
+        self.additional_gp_x_scaling_span_floor = float(additional_gp_x_scaling_span_floor)
 
         self.store = DatasetStore(dim=len(bounds))
         self.budget = ExecutionBudget(total=self.total_budget)
@@ -850,11 +857,17 @@ class AdditionalDOEOrchestrator:
         *,
         X: np.ndarray,
         y: np.ndarray,
-    ) -> tuple[GaussianProcessRegressor | None, bool]:
-        return fit_gp_with_fallback(
-            X=X, y=y,
+    ) -> tuple[Any | None, bool, dict[str, Any]]:
+        return fit_gp_with_optional_x_scaling(
+            X=X,
+            y=y,
+            bounds=self.bounds,
             include_white=self.local_gp_use_white_kernel,
             random_state=self.local_gp_seed,
+            gp_x_scaling_enabled=self.additional_gp_x_scaling_enabled,
+            gp_x_scaling_mode=self.additional_gp_x_scaling_mode,
+            gp_x_scaling_auto_span_ratio_threshold=self.additional_gp_x_scaling_auto_span_ratio_threshold,
+            gp_x_scaling_span_floor=self.additional_gp_x_scaling_span_floor,
         )
 
     def _dedup_candidates_norm(
@@ -897,7 +910,7 @@ class AdditionalDOEOrchestrator:
             print(f"[ProbeStage] stage={round_idx} skipped: insufficient history")
             return True
 
-        gp_model, fallback_used = self._fit_probe_gp(X=X_hist, y=y_hist)
+        gp_model, fallback_used, probe_scaling_info = self._fit_probe_gp(X=X_hist, y=y_hist)
         if gp_model is None:
             print(f"[ProbeStage] stage={round_idx} skipped: gp_fit_failed")
             return True
@@ -1013,7 +1026,8 @@ class AdditionalDOEOrchestrator:
         print(
             "[ProbeStage] "
             f"stage={round_idx} candidates={len(candidates)} "
-            f"kept={X_exec_probe.shape[0]} fallback_kernel={fallback_used}"
+            f"kept={X_exec_probe.shape[0]} fallback_kernel={fallback_used} "
+            f"gp_x_scaling={probe_scaling_info.get('gp_x_scaling_applied')}"
         )
         executed = self._execute_points(
             X_exec_probe,
@@ -1195,7 +1209,7 @@ class AdditionalDOEOrchestrator:
                 colsample_bytree=0.9,
                 reg_alpha=0.0,
                 reg_lambda=1.0,
-                random_state=42,
+                random_state=int(self.local_gp_seed),
                 n_jobs=-1,
             )
             clf.fit(X.astype(float), y.astype(int))
@@ -3211,6 +3225,12 @@ class AdditionalDOEOrchestrator:
             "post_feasible_rate_hat": float(self.post_feasible_rate_hat),
             "post_lambda": float(self.post_lambda_current),
             "post_model_active": bool(self._post_model is not None),
+            "additional_gp_x_scaling_enabled": bool(self.additional_gp_x_scaling_enabled),
+            "additional_gp_x_scaling_mode": str(self.additional_gp_x_scaling_mode),
+            "additional_gp_x_scaling_auto_span_ratio_threshold": float(
+                self.additional_gp_x_scaling_auto_span_ratio_threshold
+            ),
+            "additional_gp_x_scaling_span_floor": float(self.additional_gp_x_scaling_span_floor),
             "post_policy_log": self.post_policy_log,
             "success_rate_floor": float(self.success_rate_floor),
             "success_count": int(n_success),

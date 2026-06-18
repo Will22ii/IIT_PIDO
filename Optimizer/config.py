@@ -280,6 +280,16 @@ class OptimizerSystemConfig:
     focus3_auto_mean_min_data_ratio: float = 20.0
     focus3_auto_mean_max_volume_ratio: float = 0.20
     focus3_auto_mean_best_local_required: bool = True
+    # AION Focus3 receives Explorer/Modeler-selected bounds rather than
+    # standalone Focus2 bounds. Treat those bounds as more trusted, so the
+    # policy can leave LCB and exploit with EI/MEAN earlier.
+    focus3_aion_auto_ei_min_data_ratio: float = 5.0
+    focus3_aion_auto_ei_max_volume_ratio: float = 0.30
+    focus3_aion_auto_ei_max_mean_width_ratio: float = 0.85
+    focus3_aion_auto_mean_enabled: bool = True
+    focus3_aion_auto_mean_min_data_ratio: float = 8.0
+    focus3_aion_auto_mean_max_volume_ratio: float = 0.30
+    focus3_aion_auto_mean_best_local_required: bool = True
     # Goal 근처에서 recovery가 켜지면 더 넓게 찾는 LCB보다 exploitation을 우선한다.
     # Rosenbrock no_dummy는 bounds 안에 optimum이 있어도 후반 LCB 탐색에 묶여
     # 1.20 근처에서 멈추는 케이스가 많았다.
@@ -288,11 +298,23 @@ class OptimizerSystemConfig:
     focus3_near_goal_exploitation_acq: str = "MEAN"
     focus3_near_goal_exploitation_min_focus3_evals: int = 60
     # AION trusted-bounds Focus3 uses the same near-goal idea, but keeps the
-    # threshold narrow so Explorer bounds do not over-exploit a wrong basin.
+    # threshold separate from standalone. Six-hump can have only ~40 optimizer
+    # iterations in AION, so the activation floor must be lower than standalone.
     focus3_aion_near_goal_exploitation_enabled: bool = True
-    focus3_aion_near_goal_exploitation_margin_ratio: float = 0.10
+    focus3_aion_near_goal_exploitation_margin_ratio: float = 0.15
     focus3_aion_near_goal_exploitation_acq: str = "MEAN"
-    focus3_aion_near_goal_exploitation_min_focus3_evals: int = 60
+    focus3_aion_near_goal_exploitation_min_focus3_evals: int = 20
+    focus3_aion_near_goal_exploitation_require_recovery: bool = False
+    focus3_aion_near_goal_best_plan_filter_enabled: bool = True
+    focus3_aion_near_goal_dim_threshold: int = 5
+    focus3_aion_near_goal_allowed_sources: str = "topk,best_local"
+    focus3_aion_near_goal_allowed_sources_low_dim: str = "topk,best_local,random"
+    focus3_aion_near_goal_allowed_sources_high_dim: str = "topk,best_local"
+    focus3_aion_near_goal_source_policy_enabled: bool = True
+    focus3_aion_near_goal_low_dim_random_floor: float = 0.10
+    focus3_aion_near_goal_short_budget_random_floor: float = 0.05
+    focus3_aion_near_goal_short_budget_topk_floor: float = 0.38
+    focus3_aion_near_goal_boundary_max: float = 0.005
     # Focus3 source ratio = budget class + data reliability + GP/recent improvement 보정.
     focus3_source_adaptive_enabled: bool = True
     focus3_data_ratio_low: float = 5.0
@@ -342,6 +364,21 @@ class OptimizerSystemConfig:
     focus3_best_local_elite_std_scale: float = 0.75
     focus3_best_local_max_sigma: float = 0.08
     focus3_best_local_anchor_best_prob: float = 0.45
+    # AION-only best-local policy. Explorer-selected bounds are already a
+    # narrowed trust region, so spend more of no-constraint Focus3 around the
+    # current elite than standalone does.
+    focus3_aion_best_local_enabled: bool = True
+    focus3_aion_best_local_prob: float = 0.58
+    focus3_aion_best_local_max_prob: float = 0.78
+    focus3_aion_best_local_min_focus3_evals: int = 1
+    focus3_aion_best_local_min_data_ratio: float = 3.0
+    focus3_aion_best_local_sigma: float = 0.020
+    focus3_aion_best_local_sigma_schedule_enabled: bool = True
+    focus3_aion_best_local_sigma_mid_eval: int = 40
+    focus3_aion_best_local_sigma_mid: float = 0.012
+    focus3_aion_best_local_sigma_late_eval: int = 160
+    focus3_aion_best_local_sigma_late: float = 0.006
+    focus3_aion_best_local_sigma_recover_strong_multiplier: float = 0.90
     # best_local quota 일부를 elite covariance/PCA 방향 source로 분리한다.
     # 함수명을 보지 않고 최근 elite archive의 형상만 사용해 curved valley를 따라간다.
     focus3_correlated_local_enabled: bool = True
@@ -359,10 +396,15 @@ class OptimizerSystemConfig:
     focus3_aion_correlated_local_enabled: bool = True
     focus3_aion_correlated_local_min_dim: int = 5
     focus3_aion_correlated_local_min_data_ratio: float = 8.0
-    focus3_aion_correlated_local_best_local_fraction: float = 0.25
-    focus3_aion_correlated_local_max_prob: float = 0.16
+    focus3_aion_correlated_local_min_no_improve: int = 160
+    focus3_aion_correlated_local_best_local_fraction: float = 0.08
+    focus3_aion_correlated_local_max_prob: float = 0.04
     focus3_aion_correlated_local_near_goal_fraction_multiplier: float = 0.50
-    focus3_aion_correlated_local_near_goal_max_prob: float = 0.10
+    focus3_aion_correlated_local_near_goal_max_prob: float = 0.02
+    focus3_aion_correlated_best_plan_filter_enabled: bool = True
+    focus3_aion_correlated_best_plan_min_count: int = 48
+    focus3_aion_correlated_best_plan_max_improve_rate: float = 0.006
+    focus3_aion_correlated_best_plan_best_local_advantage: float = 0.010
     focus3_correlated_local_pool_ratio: float = 0.75
     focus3_correlated_local_elite_count: int = 16
     focus3_correlated_local_sigma_scale: float = 0.85
@@ -400,6 +442,9 @@ class OptimizerSystemConfig:
     focus3_recover_mild_kappa_multiplier: float = 1.05
     focus3_recover_kappa_multiplier: float = 1.25
     focus3_recover_max_kappa: float = 2.50
+    focus3_aion_recover_window: int = 12
+    focus3_aion_recover_min_history: int = 20
+    focus3_aion_recover_strong_no_improve: int = 32
     # 무제약 recovery는 boundary보다 random/topk 쪽으로 기울인다.
     focus3_no_constraint_recover_boundary_scale: float = 0.0
     focus3_no_constraint_recover_random_scale: float = 0.15
@@ -411,6 +456,12 @@ class OptimizerSystemConfig:
     focus3_no_constraint_recover_best_local_late_no_improve: int = 450
     focus3_no_constraint_recover_best_local_late_bonus: float = 0.06
     focus3_no_constraint_recover_best_local_late_max: float = 0.75
+    focus3_aion_recover_best_local_mild_bonus: float = 0.12
+    focus3_aion_recover_best_local_strong_bonus: float = 0.22
+    focus3_aion_recover_best_local_max: float = 0.78
+    focus3_aion_recover_best_local_late_no_improve: int = 180
+    focus3_aion_recover_best_local_late_bonus: float = 0.05
+    focus3_aion_recover_best_local_late_max: float = 0.85
     focus3_recover_random_discrete_gate_enabled: bool = True
     focus3_recover_random_discrete_gate_margin_ratio: float = 0.06
     focus3_recover_random_discrete_gate_min_no_improve: int = 180
@@ -427,6 +478,13 @@ class OptimizerSystemConfig:
     focus3_local_probe_step_ratio: float = 0.030
     focus3_local_probe_min_step_ratio: float = 0.0015
     focus3_local_probe_scales: str = "1.0,0.5,0.25,0.1,0.05,0.025,0.01,1.75,2.5"
+    focus3_aion_local_probe_enabled: bool = False
+    # AION constrained Focus3 path uses a pre-constraint source selector rather
+    # than the no-constraint plan builder. Add a feasible local source around
+    # elite archive points and reduce inefficient constraint-boundary sampling.
+    focus3_aion_constraint_feasible_local_enabled: bool = True
+    focus3_aion_constraint_feasible_local_prob: float = 0.35
+    focus3_aion_constraint_boundary_prob: float = 0.03
 
     # ------------------------------------------------------------------
     # Focus2: region manager / TuRBO-lite

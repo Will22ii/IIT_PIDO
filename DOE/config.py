@@ -83,6 +83,10 @@ class DOESystemConfig:
     local_phase2_kappa: float = 0.6
     local_base_perturb_ratio: float = 0.05
     local_gp_use_white_kernel: bool = False
+    additional_gp_x_scaling_enabled: bool = True
+    additional_gp_x_scaling_mode: str = "bounds"
+    additional_gp_x_scaling_auto_span_ratio_threshold: float = 3.0
+    additional_gp_x_scaling_span_floor: float = 1e-12
 
     # 8) Local planner: 제약 재시도
     local_constraint_retry_count: int = 2
@@ -237,6 +241,10 @@ def build_additional_cfg_from_system(
         "local_phase2_kappa": system.local_phase2_kappa,
         "local_base_perturb_ratio": system.local_base_perturb_ratio,
         "local_gp_use_white_kernel": system.local_gp_use_white_kernel,
+        "additional_gp_x_scaling_enabled": system.additional_gp_x_scaling_enabled,
+        "additional_gp_x_scaling_mode": system.additional_gp_x_scaling_mode,
+        "additional_gp_x_scaling_auto_span_ratio_threshold": system.additional_gp_x_scaling_auto_span_ratio_threshold,
+        "additional_gp_x_scaling_span_floor": system.additional_gp_x_scaling_span_floor,
         "local_constraint_retry_count": system.local_constraint_retry_count,
         "local_constraint_shrink_factor": system.local_constraint_shrink_factor,
         "local_constraint_min_factor": system.local_constraint_min_factor,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 from scipy.optimize import minimize
@@ -17,6 +17,73 @@ from sklearn.gaussian_process.kernels import (
 
 
 ObjectiveSense = Literal["min", "max"]
+
+
+class BoundsScaledGPModel:
+    """Expose a raw-coordinate predict API while the wrapped GP is trained in scaled coordinates."""
+
+    def __init__(self, model: GaussianProcessRegressor, *, lb: np.ndarray, span: np.ndarray):
+        self._model = model
+        self._lb = np.asarray(lb, dtype=float).reshape(-1)
+        self._span = np.maximum(np.asarray(span, dtype=float).reshape(-1), 1e-12)
+
+    def _scale(self, X: np.ndarray) -> np.ndarray:
+        X_arr = np.asarray(X, dtype=float)
+        return (X_arr - self._lb.reshape(1, -1)) / self._span.reshape(1, -1)
+
+    def predict(self, X: np.ndarray, *args: Any, **kwargs: Any):
+        return self._model.predict(self._scale(X), *args, **kwargs)
+
+
+def gp_x_scaling_policy(
+    *,
+    bounds: list[tuple[float, float]] | tuple[tuple[float, float], ...],
+    enabled: bool = True,
+    mode: str = "auto",
+    auto_span_ratio_threshold: float = 3.0,
+    span_floor: float = 1e-12,
+) -> dict[str, Any]:
+    requested_enabled = bool(enabled)
+    mode_norm = str(mode or "auto").strip().lower()
+    if mode_norm not in {"off", "auto", "bounds"}:
+        mode_norm = "auto"
+    threshold = float(max(float(auto_span_ratio_threshold), 1.0))
+    floor = float(max(float(span_floor), 1e-15))
+    arr = np.asarray(bounds, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] != 2 or arr.shape[0] == 0:
+        return {
+            "gp_x_scaling_enabled": requested_enabled,
+            "gp_x_scaling_applied": False,
+            "gp_x_scaling_mode": mode_norm,
+            "gp_x_scaling_reason": "invalid_bounds",
+            "gp_x_scaling_auto_span_ratio_threshold": threshold,
+            "gp_x_scaling_span_min": None,
+            "gp_x_scaling_span_max": None,
+            "gp_x_scaling_span_ratio": None,
+        }
+    spans = np.maximum(arr[:, 1] - arr[:, 0], floor)
+    span_min = float(np.min(spans))
+    span_max = float(np.max(spans))
+    span_ratio = float(span_max / max(span_min, floor))
+    if not requested_enabled or mode_norm == "off":
+        applied = False
+        reason = "disabled" if not requested_enabled else "mode_off"
+    elif mode_norm == "bounds":
+        applied = True
+        reason = "mode_bounds"
+    else:
+        applied = bool(span_ratio >= threshold)
+        reason = "auto_span_ratio" if applied else "auto_span_ratio_below_threshold"
+    return {
+        "gp_x_scaling_enabled": requested_enabled,
+        "gp_x_scaling_applied": bool(applied),
+        "gp_x_scaling_mode": mode_norm,
+        "gp_x_scaling_reason": reason,
+        "gp_x_scaling_auto_span_ratio_threshold": threshold,
+        "gp_x_scaling_span_min": span_min,
+        "gp_x_scaling_span_max": span_max,
+        "gp_x_scaling_span_ratio": span_ratio,
+    }
 
 
 def _scale_args(
@@ -119,6 +186,52 @@ def fit_gp_with_fallback(
         except Exception as e2:
             print(f"[GP] all kernels failed: {e2}")
             return None, True
+
+
+def fit_gp_with_optional_x_scaling(
+    *,
+    X: np.ndarray,
+    y: np.ndarray,
+    bounds: list[tuple[float, float]] | tuple[tuple[float, float], ...],
+    include_white: bool = False,
+    random_state: int = 0,
+    gp_x_scaling_enabled: bool = True,
+    gp_x_scaling_mode: str = "auto",
+    gp_x_scaling_auto_span_ratio_threshold: float = 3.0,
+    gp_x_scaling_span_floor: float = 1e-12,
+) -> tuple[Any | None, bool, dict[str, Any]]:
+    policy = gp_x_scaling_policy(
+        bounds=bounds,
+        enabled=gp_x_scaling_enabled,
+        mode=gp_x_scaling_mode,
+        auto_span_ratio_threshold=gp_x_scaling_auto_span_ratio_threshold,
+        span_floor=gp_x_scaling_span_floor,
+    )
+    X_arr = np.asarray(X, dtype=float)
+    arr = np.asarray(bounds, dtype=float)
+    if X_arr.ndim != 2 or arr.ndim != 2 or arr.shape[0] != X_arr.shape[1]:
+        policy = {**policy, "gp_x_scaling_applied": False, "gp_x_scaling_reason": "bounds_dim_mismatch"}
+    if not bool(policy.get("gp_x_scaling_applied", False)):
+        model, fallback = fit_gp_with_fallback(
+            X=X_arr,
+            y=y,
+            include_white=include_white,
+            random_state=random_state,
+        )
+        return model, fallback, policy
+
+    lb = arr[:, 0]
+    span = np.maximum(arr[:, 1] - arr[:, 0], max(float(gp_x_scaling_span_floor), 1e-15))
+    X_scaled = (X_arr - lb.reshape(1, -1)) / span.reshape(1, -1)
+    model, fallback = fit_gp_with_fallback(
+        X=X_scaled,
+        y=y,
+        include_white=include_white,
+        random_state=random_state,
+    )
+    if model is None:
+        return None, fallback, policy
+    return BoundsScaledGPModel(model, lb=lb, span=span), fallback, policy
 
 
 class AcquisitionOptimizer:
@@ -370,9 +483,15 @@ class GPAnchorRefiner:
         thr = float(np.percentile(y, 100.0 - q_clip))
         return y >= thr
 
-    def _fit_gp(self, *, X: np.ndarray, y: np.ndarray) -> tuple[GaussianProcessRegressor | None, bool]:
+    def _fit_gp(
+        self,
+        *,
+        X: np.ndarray,
+        y: np.ndarray,
+    ) -> tuple[GaussianProcessRegressor | None, bool]:
         return fit_gp_with_fallback(
-            X=X, y=y,
+            X=X,
+            y=y,
             include_white=self.use_white_kernel,
             random_state=self.random_seed,
         )
@@ -432,7 +551,10 @@ class GPAnchorRefiner:
 
         X_train = X_source[idx]
         y_train = y_source[idx]
-        gp_model, fallback_used = self._fit_gp(X=X_train, y=y_train)
+        gp_model, fallback_used = self._fit_gp(
+            X=X_train,
+            y=y_train,
+        )
         if gp_model is None:
             return RefineResult(
                 refined_anchor=base.copy(),
@@ -553,7 +675,10 @@ class GPAnchorRefiner:
 
         X_train = X_source[selected]
         y_train = y_source[selected]
-        gp_model, fallback_used = self._fit_gp(X=X_train, y=y_train)
+        gp_model, fallback_used = self._fit_gp(
+            X=X_train,
+            y=y_train,
+        )
         if gp_model is None:
             return RefineResult(
                 refined_anchor=None,

@@ -30,7 +30,7 @@ class ExplorerSystemConfig:
     # GP refinement/uncertainty X scaling. Coordinates are normalized only
     # inside GP fit/predict; Explorer bounds and CAE coordinates stay raw.
     gp_x_scaling_enabled: bool = True
-    gp_x_scaling_mode: str = "auto"
+    gp_x_scaling_mode: str = "bounds"
     gp_x_scaling_auto_span_ratio_threshold: float = 3.0
     gp_x_scaling_span_floor: float = 1e-12
     # EXP-3: 고제약(crate_hat < threshold) 시 fi_aware → uncertainty_aware 자동 스위치

@@ -105,8 +105,9 @@ class FeatureSelectionConfig:
 
 
 class FeatureSelector:
-    def __init__(self, config: FeatureSelectionConfig):
+    def __init__(self, config: FeatureSelectionConfig, base_seed: int):
         self.config = config
+        self.base_seed = int(base_seed)
 
     def run(
         self,
@@ -719,7 +720,7 @@ class FeatureSelector:
         null_samples = np.zeros((int(n_shuffle), p), dtype=float)
         perm_null_samples = np.zeros((int(n_shuffle), p), dtype=float)
         drop_null_samples = np.zeros((int(n_shuffle), p), dtype=float)
-        rng = np.random.default_rng(20260324)
+        rng = np.random.default_rng(self.base_seed)
 
         n_perm_folds = perm_mat.shape[0]
         n_drop_folds = drop_mat.shape[0]
