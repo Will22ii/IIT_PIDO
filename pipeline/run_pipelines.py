@@ -36,7 +36,7 @@ from pipeline.run_pipeline import run_pipeline
 class ProblemCase:
     problem_name: str
     known_optimum: Any
-    # DOE budget. Optimizer budget is configured separately below.
+    # DOE 예산. Optimizer 예산은 아래에서 별도로 설정한다.
     n_samples: int
     optimizer_n_samples: int | None = None
     objective_sense: str = "min"
@@ -117,7 +117,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
     ),
 }
 
-# Activate only the cases used in this run.
+# 이번 실행에 사용할 문제만 활성화한다.
 ACTIVE_PROBLEM_CASES: list[str] = [
     "cantilever_beam",
     "rosenbrock",
@@ -131,8 +131,8 @@ ACTIVE_PROBLEM_CASES: list[str] = [
 
 PROBLEM_SUITE: list[ProblemCase] = [PROBLEM_CASE_PRESETS[name] for name in ACTIVE_PROBLEM_CASES]
 
-# Batch runner local config. This file is an analysis runner, so the default
-# execution policy lives here instead of requiring CLI flags.
+# 배치 실행용 로컬 설정. 이 파일은 분석 runner이므로 기본 실행 정책을
+# CLI flag가 아니라 여기에서 관리한다.
 BATCH_TASKS: dict[str, bool] = {
     "doe": True,
     "modeler": True,
@@ -148,14 +148,17 @@ BATCH_DEBUG_LEVEL = "on"
 BATCH_CONTINUE_ON_ERROR = False
 BATCH_AION_MODE = True
 
-# Keep the per-problem n_samples/repeats fixed for score experiments. These are
-# the target budgets, not a convenience runtime knob.
+# 점수 실험에서는 문제별 n_samples/repeats를 고정한다.
+# 이 값은 편의용 runtime knob가 아니라 목표 예산이다.
 BATCH_FAST_OPTIMIZER_MODE = False
 BATCH_FAST_REPEATS: int | None = None
 BATCH_FAST_OPTIMIZER_N_SAMPLES_BY_PROBLEM: dict[str, int] = {}
 BATCH_OPTIMIZER_SYSTEM_OVERRIDES: dict[str, Any] = {
-    # Score experiments should preserve optimizer defaults. Put temporary
-    # profiling-only overrides here only when explicitly testing runtime tradeoffs.
+    # 점수 실험에서는 optimizer 기본값을 보존한다. runtime tradeoff를 명시적으로
+    # 테스트할 때만 임시 profiling override를 여기에 넣는다.
+    # AION omitted-feature freeze 실험 예시:
+    # "omitted_feature_freeze_mode": "user_value",
+    # "omitted_feature_freeze_value": 0.0,
 }
 
 
@@ -214,6 +217,12 @@ def _build_optimizer_system_config(
     system_cfg = OptimizerSystemConfig(debug_level=str(debug_level))
     if bool(aion_mode):
         apply_aion_optimizer_system_config(system_cfg)
+    else:
+        # standalone optimizer 실험에서는 Modeler에서 탈락한 변수를 active search space에
+        # 되살리지 않고, 사용자가 제어하는 상수로 freeze한다. 다른 omitted-feature
+        # context를 테스트할 때는 BATCH_OPTIMIZER_SYSTEM_OVERRIDES로 override한다.
+        system_cfg.omitted_feature_freeze_mode = "user_value"
+        system_cfg.omitted_feature_freeze_value = 0.0
     if problem_name and _case_has_pre_constraints(str(problem_name)):
         system_cfg.enforce_pre_constraints = True
     for key, value in BATCH_OPTIMIZER_SYSTEM_OVERRIDES.items():
@@ -258,8 +267,8 @@ def _choose_strategies_by_dim(
 ) -> tuple[str, list[ExplorerStrategy]]:
     requested_map = {s.strategy_id: s for s in requested}
     policy = "low_dim_active" if selected_feature_count <= 3 else "high_dim_active"
-    # Preserve a stable catalog order when multiple strategies are explicitly
-    # requested. Default ownership lives in ExplorerSystemConfig/AIONSystemConfig.
+    # 여러 strategy를 명시적으로 요청했을 때 catalog 순서를 안정적으로 유지한다.
+    # 기본값의 소유권은 ExplorerSystemConfig/AIONSystemConfig에 있다.
     ordered = ["S4_dual", "S4_obj"]
     chosen = [requested_map[sid] for sid in ordered if sid in requested_map]
     if not chosen:
@@ -647,6 +656,8 @@ def _extract_explorer_router_metadata(explorer_metadata_path: str | None) -> dic
         "explorer_dual_volume_cap_target": _pick("dual_volume_cap_target"),
         "explorer_dual_volume_ratio_before_cap": _pick("dual_volume_ratio_before_cap"),
         "explorer_dual_volume_cap_applied": _pick("dual_volume_cap_applied"),
+        "explorer_post_cap_side_mass_shift_applied": _pick("post_cap_side_mass_shift_applied"),
+        "explorer_post_cap_side_mass_shift_dims": _pick("post_cap_side_mass_shift_dims"),
     }
 
 
@@ -841,10 +852,12 @@ def _save_explorer_stats_csv(
                 "explorer_dual_volume_cap_target",
                 "explorer_dual_volume_ratio_before_cap",
                 "explorer_dual_volume_cap_applied",
+                "explorer_post_cap_side_mass_shift_applied",
+                "explorer_post_cap_side_mass_shift_dims",
             ]
         )
 
-    # --- derive DSE metrics per row ---
+    # --- row별 DSE metric 계산 ---
     if not detail_df.empty:
         _opt = detail_df["survivor_optimum_included"].astype(bool)
         if "modeler_all_real_included" in detail_df.columns:
@@ -1302,8 +1315,8 @@ def main() -> None:
         default=30,
         help="Optimizer user n_samples.",
     )
-    # Strategy policy is owned by aion_system_config when AION mode is enabled.
-    # Stand-alone defaults remain owned by ExplorerSystemConfig.
+    # AION 모드에서는 strategy policy를 aion_system_config가 소유한다.
+    # standalone 기본값은 ExplorerSystemConfig가 계속 소유한다.
     _explorer_system_default = ExplorerSystemConfig().strategy_id
     _pipeline_explorer_default = _default_explorer_strategy_id(aion_mode=BATCH_AION_MODE)
     parser.add_argument(
@@ -1450,7 +1463,7 @@ def main() -> None:
                     float(modeler_selected_real_count) / float(len(real_variables)) * 100.0
                     if len(real_variables) > 0 else 0.0
                 )
-                # strict success: selected features exactly match real variables
+                # strict success: selected feature가 real variable과 정확히 일치해야 성공
                 modeler_all_real_only = bool(selected_set == real_variables and len(real_variables) > 0)
                 modeler_all_real_included = bool(
                     len(real_variables) > 0 and real_variables.issubset(selected_set)
@@ -1785,6 +1798,8 @@ def main() -> None:
                                     "explorer_dual_volume_cap_target": explorer_meta_features.get("explorer_dual_volume_cap_target"),
                                     "explorer_dual_volume_ratio_before_cap": explorer_meta_features.get("explorer_dual_volume_ratio_before_cap"),
                                     "explorer_dual_volume_cap_applied": explorer_meta_features.get("explorer_dual_volume_cap_applied"),
+                                    "explorer_post_cap_side_mass_shift_applied": explorer_meta_features.get("explorer_post_cap_side_mass_shift_applied"),
+                                    "explorer_post_cap_side_mass_shift_dims": explorer_meta_features.get("explorer_post_cap_side_mass_shift_dims"),
                                 }
                             )
                         except Exception as exp_exc:

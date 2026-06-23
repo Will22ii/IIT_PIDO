@@ -120,7 +120,7 @@ class ResultSaver:
             "debug": debug_refs,
         }
 
-        # Convenience aliases for internal/debug tools that read direct keys.
+        # 직접 key를 읽는 내부/debug tool을 위한 편의 alias.
         for layer_name in ("public", "meta", "debug"):
             for key, value in artifacts[layer_name].items():
                 if key not in artifacts:

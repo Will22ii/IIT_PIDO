@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from DOE.executor.constraint_filter import evaluate_constraints_point
 from Optimizer.config import OptimizerConfig
 from pipeline.run_context import RunContext, get_task_metadata_path
 from utils.objective_sense import canonicalize_objective_columns
@@ -27,6 +28,9 @@ class ResolvedOptimizerInputs:
     modeler_metadata_path: str | None
     selected_features: list[str]
     selected_bounds: dict[str, tuple[float, float]]
+    evaluation_base_values: dict[str, float]
+    omitted_feature_values: dict[str, float]
+    omitted_feature_policy: dict[str, object]
     bounds_source: str
     bounds_path: str | None
     post_feasibility_payload: dict | None
@@ -320,6 +324,235 @@ def _artifact_ref(metadata: dict | None, key: str) -> str | None:
     return None
 
 
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float(default)
+    if not np.isfinite(out):
+        return float(default)
+    return float(out)
+
+
+def _baseline_values_from_variables(variables: list[dict]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for var in variables:
+        if not isinstance(var, dict):
+            continue
+        name = str(var.get("name", "")).strip()
+        if not name:
+            continue
+        if "baseline" in var:
+            base = _safe_float(var.get("baseline"), 0.0)
+        elif "lb" in var and "ub" in var:
+            base = 0.5 * (_safe_float(var.get("lb"), 0.0) + _safe_float(var.get("ub"), 0.0))
+        else:
+            base = 0.0
+        out[name] = float(base)
+    return out
+
+
+def _normalize_omitted_feature_freeze_mode(raw: object) -> str:
+    value = str(raw or "auto").strip().lower()
+    aliases = {
+        "base": "auto",
+        "best": "auto",
+        "best_row": "auto",
+        "best_feasible": "auto",
+        "best_feasible_row": "auto",
+        "csv_best": "auto",
+        "constant": "user_value",
+        "user": "user_value",
+        "value": "user_value",
+        "manual": "user_value",
+        "fixed": "user_value",
+        "none": "baseline",
+        "cae_baseline": "baseline",
+    }
+    value = aliases.get(value, value)
+    if value not in {"auto", "user_value", "baseline"}:
+        value = "auto"
+    return value
+
+
+def _full_row_pre_constraint_margin(
+    *,
+    row: pd.Series,
+    var_names: list[str],
+    constraint_defs: list[dict],
+) -> tuple[bool, float]:
+    if not constraint_defs:
+        return True, float("inf")
+    try:
+        x = np.asarray([float(row[name]) for name in var_names], dtype=float)
+    except Exception:
+        return False, float("-inf")
+    if x.shape[0] != len(var_names) or np.any(~np.isfinite(x)):
+        return False, float("-inf")
+    try:
+        _payload, feasible, margin = evaluate_constraints_point(
+            x=x,
+            var_names=var_names,
+            constraint_defs=constraint_defs,
+            scope="pre",
+            fail_fast_output_missing=False,
+        )
+    except Exception:
+        return False, float("-inf")
+    return bool(feasible), float(margin)
+
+
+def _select_auto_freeze_row(
+    *,
+    doe_df: pd.DataFrame,
+    variables: list[dict],
+    constraint_defs: list[dict],
+    objective_col: str,
+) -> tuple[pd.Series | None, dict[str, object]]:
+    var_names = [
+        str(var.get("name", "")).strip()
+        for var in variables
+        if isinstance(var, dict) and str(var.get("name", "")).strip()
+    ]
+    if not var_names or objective_col not in doe_df.columns:
+        return None, {"source": "baseline", "reason": "missing_objective_or_variables"}
+    missing = [name for name in var_names if name not in doe_df.columns]
+    if missing:
+        return None, {
+            "source": "baseline",
+            "reason": "input_csv_missing_full_row_columns",
+            "missing_columns": missing,
+        }
+
+    work = doe_df.copy()
+    work["_freeze_objective"] = pd.to_numeric(work[objective_col], errors="coerce")
+    for name in var_names:
+        work[name] = pd.to_numeric(work[name], errors="coerce")
+    work = work.dropna(subset=var_names + ["_freeze_objective"]).copy()
+    if work.empty:
+        return None, {"source": "baseline", "reason": "no_finite_full_rows"}
+
+    feasible_flags: list[bool] = []
+    margins: list[float] = []
+    for _, row in work.iterrows():
+        feasible, margin = _full_row_pre_constraint_margin(
+            row=row,
+            var_names=var_names,
+            constraint_defs=constraint_defs,
+        )
+        feasible_flags.append(bool(feasible))
+        margins.append(float(margin))
+    work["_freeze_pre_feasible"] = feasible_flags
+    work["_freeze_pre_margin"] = margins
+
+    feasible = work[work["_freeze_pre_feasible"].astype(bool)]
+    if not feasible.empty:
+        best_idx = feasible["_freeze_objective"].astype(float).idxmin()
+        row = work.loc[best_idx]
+        return row, {
+            "source": "input_csv_best_feasible_row",
+            "reason": "best_objective_among_pre_feasible_rows",
+            "row_index": int(best_idx) if isinstance(best_idx, (int, np.integer)) else str(best_idx),
+            "objective": float(row["_freeze_objective"]),
+            "pre_margin": float(row["_freeze_pre_margin"]),
+        }
+
+    margin_series = pd.to_numeric(work["_freeze_pre_margin"], errors="coerce")
+    if margin_series.notna().any():
+        best_idx = margin_series.idxmax()
+        row = work.loc[best_idx]
+        return row, {
+            "source": "input_csv_best_margin_row",
+            "reason": "no_pre_feasible_rows",
+            "row_index": int(best_idx) if isinstance(best_idx, (int, np.integer)) else str(best_idx),
+            "objective": float(row["_freeze_objective"]),
+            "pre_margin": float(row["_freeze_pre_margin"]),
+        }
+
+    best_idx = work["_freeze_objective"].astype(float).idxmin()
+    row = work.loc[best_idx]
+    return row, {
+        "source": "input_csv_best_objective_row",
+        "reason": "constraint_margin_unavailable",
+        "row_index": int(best_idx) if isinstance(best_idx, (int, np.integer)) else str(best_idx),
+        "objective": float(row["_freeze_objective"]),
+        "pre_margin": float("nan"),
+    }
+
+
+def _resolve_omitted_feature_freeze_values(
+    *,
+    config: OptimizerConfig,
+    variables: list[dict],
+    selected_features: list[str],
+    doe_df: pd.DataFrame | None,
+    constraint_defs: list[dict],
+    objective_col: str,
+) -> tuple[dict[str, float], dict[str, float], dict[str, object]]:
+    baseline_values = _baseline_values_from_variables(variables)
+    selected_set = {str(name) for name in selected_features}
+    omitted = [name for name in baseline_values if name not in selected_set]
+    base_values = dict(baseline_values)
+
+    mode = _normalize_omitted_feature_freeze_mode(
+        getattr(config.system, "omitted_feature_freeze_mode", "auto")
+    )
+    policy: dict[str, object] = {
+        "mode": mode,
+        "omitted_features": list(omitted),
+        "source": "baseline",
+    }
+    if not omitted:
+        policy["source"] = "none"
+        return base_values, {}, policy
+
+    omitted_values: dict[str, float] = {}
+    if mode == "baseline":
+        omitted_values = {name: float(base_values[name]) for name in omitted}
+        policy["source"] = "baseline"
+        return base_values, omitted_values, policy
+
+    if mode == "user_value":
+        scalar = _safe_float(getattr(config.system, "omitted_feature_freeze_value", 0.0), 0.0)
+        raw_values = getattr(config.system, "omitted_feature_freeze_values", {})
+        per_feature = dict(raw_values) if isinstance(raw_values, dict) else {}
+        for name in omitted:
+            value = _safe_float(per_feature.get(name, scalar), scalar)
+            base_values[name] = float(value)
+            omitted_values[name] = float(value)
+        policy.update(
+            {
+                "source": "user_value",
+                "value": float(scalar),
+                "per_feature_values": {str(k): float(_safe_float(v, scalar)) for k, v in per_feature.items()},
+            }
+        )
+        return base_values, omitted_values, policy
+
+    selected_row = None
+    row_policy: dict[str, object] = {"source": "baseline", "reason": "no_input_csv"}
+    if isinstance(doe_df, pd.DataFrame) and not doe_df.empty:
+        selected_row, row_policy = _select_auto_freeze_row(
+            doe_df=doe_df,
+            variables=variables,
+            constraint_defs=constraint_defs,
+            objective_col=objective_col,
+        )
+    if selected_row is not None:
+        for name in omitted:
+            if name in selected_row and np.isfinite(_safe_float(selected_row[name], float("nan"))):
+                value = _safe_float(selected_row[name], base_values[name])
+                base_values[name] = float(value)
+                omitted_values[name] = float(value)
+            else:
+                omitted_values[name] = float(base_values[name])
+        policy.update(row_policy)
+    else:
+        omitted_values = {name: float(base_values[name]) for name in omitted}
+        policy.update(row_policy)
+    return base_values, omitted_values, policy
+
+
 def _resolve_modeler_feasibility_payload_optional(
     modeler_metadata_path: str | None,
 ) -> tuple[dict | None, str | None, str]:
@@ -433,13 +666,16 @@ def resolve_optimizer_inputs(
         if not np.isfinite(float(lb)) or not np.isfinite(float(ub)):
             raise RuntimeError(f"Invalid bounds for feature '{feature}': ({lb}, {ub})")
 
+    objective_col = str(config.system.objective_col).strip()
     if doe_df is not None:
-        objective_col = str(config.system.objective_col).strip()
         doe_df = canonicalize_objective_columns(
             doe_df,
             objective_sense=objective_sense,
             objective_col=objective_col,
         )
+    freeze_source_df = doe_df.copy() if isinstance(doe_df, pd.DataFrame) else None
+
+    if doe_df is not None:
         doe_cols = {str(c) for c in doe_df.columns}
         matched_features = [f for f in selected_features if f in doe_cols]
         if len(matched_features) == 0:
@@ -471,6 +707,17 @@ def resolve_optimizer_inputs(
                 doe_df = None
                 doe_meta_path = None
 
+    evaluation_base_values, omitted_feature_values, omitted_feature_policy = (
+        _resolve_omitted_feature_freeze_values(
+            config=config,
+            variables=variables,
+            selected_features=selected_features,
+            doe_df=freeze_source_df,
+            constraint_defs=constraint_defs,
+            objective_col=objective_col,
+        )
+    )
+
     return ResolvedOptimizerInputs(
         problem_name=problem_name,
         seed=int(seed),
@@ -483,6 +730,9 @@ def resolve_optimizer_inputs(
         modeler_metadata_path=modeler_meta_path,
         selected_features=selected_features,
         selected_bounds=selected_bounds,
+        evaluation_base_values=evaluation_base_values,
+        omitted_feature_values=omitted_feature_values,
+        omitted_feature_policy=omitted_feature_policy,
         bounds_source=str(bounds_source),
         bounds_path=bounds_path,
         post_feasibility_payload=feasibility_payload,

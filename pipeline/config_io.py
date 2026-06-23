@@ -302,8 +302,8 @@ def _build_explorer_config(
     if not enabled and not section and not user_overrides and not system_overrides:
         return None
 
-    # known_optimum is a run_pipelines benchmark/debug concept. The service-style
-    # run_pipeline config does not expose it.
+    # known_optimum은 run_pipelines benchmark/debug 전용 개념이다.
+    # service-style run_pipeline config에는 노출하지 않는다.
     section.pop("known_optimum", None)
     user_overrides.pop("known_optimum", None)
     user = ExplorerUserConfig()
@@ -381,8 +381,8 @@ def _build_optimizer_config(
         goal=goal,
         goal_objective=goal_objective,
     )
-    # known_optimum markers are injected only by run_pipelines benchmark cases.
-    # Keep run_pipeline JSON free of benchmark-only fields.
+    # known_optimum marker는 run_pipelines benchmark case에서만 주입한다.
+    # run_pipeline JSON에는 benchmark 전용 필드를 넣지 않는다.
     section.pop("known_optimum", None)
     user_overrides.pop("known_optimum", None)
     _apply_dataclass_overrides(user, user_overrides, section_name="optimizer.user")
@@ -391,8 +391,8 @@ def _build_optimizer_config(
     section.pop("n_restarts", None)
     if "debug_level" in system_overrides:
         system_overrides.pop("debug_level")
-    # Removed compatibility key. Keep old JSON configs from failing while
-    # preventing it from becoming part of the active Optimizer schema again.
+    # 제거된 호환 key. 오래된 JSON config가 실패하지 않게 하되,
+    # active Optimizer schema에 다시 포함되지는 않도록 막는다.
     system_overrides.pop("n_restarts", None)
     _apply_dataclass_overrides(system, system_overrides, section_name="optimizer.system")
 

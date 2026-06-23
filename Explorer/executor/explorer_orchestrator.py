@@ -685,6 +685,99 @@ def _apply_constraint_side_shift(
     return out, shifted
 
 
+def _apply_post_cap_side_mass_shift(
+    *,
+    selected_bounds: list[tuple[float, float]] | None,
+    global_bounds: list[tuple[float, float]],
+    selected_points: np.ndarray | None,
+    quantile: float = 0.98,
+    trigger_ratio: float = 0.0,
+    pad_ratio: float = 0.001,
+) -> tuple[list[tuple[float, float]] | None, list[dict[str, object]]]:
+    if (
+        selected_bounds is None
+        or len(selected_bounds) != len(global_bounds)
+        or selected_points is None
+    ):
+        return selected_bounds, []
+    X = np.asarray(selected_points, dtype=float)
+    d = len(global_bounds)
+    if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] != d:
+        return selected_bounds, []
+
+    q_hi = float(np.clip(float(quantile), 0.5, 1.0))
+    q_lo = 1.0 - q_hi
+    trigger_r = float(max(float(trigger_ratio), 0.0))
+    pad_r = float(max(float(pad_ratio), 0.0))
+    out = [(float(min(lb, ub)), float(max(lb, ub))) for lb, ub in selected_bounds]
+    shifted: list[dict[str, object]] = []
+
+    for j, ((lo0, hi0), (g_lb, g_ub)) in enumerate(zip(out, global_bounds)):
+        gl = float(min(g_lb, g_ub))
+        gu = float(max(g_lb, g_ub))
+        span = max(gu - gl, 1e-12)
+        lo = float(np.clip(lo0, gl, gu))
+        hi = float(np.clip(hi0, gl, gu))
+        width = max(hi - lo, 0.0)
+        if width <= 0.0 or width >= span - 1e-12:
+            out[j] = (lo, hi)
+            continue
+
+        col = X[:, j]
+        col = col[np.isfinite(col)]
+        if col.size == 0:
+            out[j] = (lo, hi)
+            continue
+
+        low_target = float(np.quantile(col, q_lo))
+        high_target = float(np.quantile(col, q_hi))
+        trigger = trigger_r * span
+        pad = pad_r * span
+        lower_gap = lo - low_target
+        upper_gap = high_target - hi
+
+        side: str | None = None
+        if upper_gap > trigger and upper_gap >= lower_gap:
+            side = "ub"
+        elif lower_gap > trigger:
+            side = "lb"
+        if side is None:
+            out[j] = (lo, hi)
+            continue
+
+        if side == "ub":
+            new_hi = float(min(gu, max(hi, high_target + pad)))
+            new_lo = float(max(gl, new_hi - width))
+            new_hi = float(min(gu, new_lo + width))
+            ref_value = high_target
+            gap = upper_gap
+        else:
+            new_lo = float(max(gl, min(lo, low_target - pad)))
+            new_hi = float(min(gu, new_lo + width))
+            new_lo = float(max(gl, new_hi - width))
+            ref_value = low_target
+            gap = lower_gap
+
+        if abs(new_lo - lo) <= 1e-12 and abs(new_hi - hi) <= 1e-12:
+            out[j] = (lo, hi)
+            continue
+        out[j] = (new_lo, new_hi)
+        shifted.append(
+            {
+                "dim": int(j),
+                "side": side,
+                "gap_ratio": float(gap / span),
+                "ref_value": float(ref_value),
+                "old_lb": float(lo),
+                "old_ub": float(hi),
+                "new_lb": float(new_lo),
+                "new_ub": float(new_hi),
+            }
+        )
+
+    return out, shifted
+
+
 def _fit_gp_like_additional(
     *,
     X: np.ndarray,
@@ -2595,6 +2688,8 @@ class ExplorerOrchestrator:
         dse_cap_center_realign_applied = False
         dse_cap_center_blend_used: float | None = None
         dse_cap_force_pin_applied = False
+        post_cap_side_mass_shift_applied = False
+        post_cap_side_mass_shift_dims: list[dict[str, object]] = []
         constraint_aware_enabled = bool(getattr(self.config.system, "constraint_aware_enabled", True))
         constraint_aware_policy_applied = False
         constraint_aware_shifted_dims: list[tuple[int, str]] = []
@@ -3370,6 +3465,46 @@ class ExplorerOrchestrator:
                 print(
                     f"[Explorer] DSE-1 boundary-touch shift: dims={_dse1_shifted} "
                     f"(width-preserving)"
+                )
+
+        if (
+            bool(getattr(self.config.system, "post_cap_side_mass_shift_enabled", True))
+            and selected_bounds is not None
+            and has_pre_constraints
+            and isinstance(selected_points, np.ndarray)
+            and selected_points.ndim == 2
+            and selected_points.shape[0] > 0
+            and selected_points.shape[1] == len(bounds)
+            and len(selected_bounds) == len(bounds)
+        ):
+            _pcsm_bounds, _pcsm_shifted = _apply_post_cap_side_mass_shift(
+                selected_bounds=selected_bounds,
+                global_bounds=bounds,
+                selected_points=selected_points,
+                quantile=float(
+                    getattr(self.config.system, "post_cap_side_mass_quantile", 0.98)
+                ),
+                trigger_ratio=float(
+                    getattr(self.config.system, "post_cap_side_mass_trigger_ratio", 0.0)
+                ),
+                pad_ratio=float(
+                    getattr(self.config.system, "post_cap_side_mass_pad_ratio", 0.001)
+                ),
+            )
+            if _pcsm_bounds is not None and _pcsm_shifted:
+                selected_bounds = _pcsm_bounds
+                post_cap_side_mass_shift_applied = True
+                post_cap_side_mass_shift_dims = list(_pcsm_shifted)
+                _dim_msg = []
+                for item in post_cap_side_mass_shift_dims:
+                    _j = int(item.get("dim", -1))
+                    _side = str(item.get("side", ""))
+                    _name = selected_features[_j] if 0 <= _j < len(selected_features) else str(_j)
+                    _gap = float(item.get("gap_ratio", 0.0))
+                    _dim_msg.append(f"{_name}:{_side}(gap={_gap:.4f})")
+                print(
+                    "[Explorer] post-cap side-mass shift: "
+                    + ", ".join(_dim_msg)
                 )
 
         if selected_bounds is not None:

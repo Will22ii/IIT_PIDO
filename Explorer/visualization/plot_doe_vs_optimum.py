@@ -215,8 +215,8 @@ def _plot_exec_scope_split(
     p_mask = scope == "probe"
     local_title_suffix = ""
 
-    # Backward compatibility:
-    # historical runs may only have "mixed" for additional stage.
+    # 하위 호환:
+    # 과거 run은 additional stage에 "mixed"만 있을 수 있다.
     if not bool(np.any(l_mask)) and bool(np.any(scope == "mixed")):
         l_mask = scope == "mixed"
         local_title_suffix = " (mixed)"
@@ -349,7 +349,7 @@ def plot_doe_vs_optimum(
         saved.append(path)
         saved_set.add(path)
 
-    # DOE points: success + feasible(pre/post) aware
+    # DOE point: success + feasible(pre/post) 인지
     doe_mask = _constraint_mask(doe_df, respect_constraints=respect_constraints)
     doe_used = doe_df.loc[doe_mask].copy()
     if doe_used.empty:
@@ -360,9 +360,9 @@ def plot_doe_vs_optimum(
             "objective_sense": str(objective_sense),
         }
 
-    # Requested output only:
-    # for each variable pair, create one figure with
-    # left=X_exec_global, right=X_exec_local(color=stage)+probe(marker).
+    # 요청된 출력만 생성:
+    # 각 변수 pair마다 figure 하나를 만들고,
+    # left=X_exec_global, right=X_exec_local(color=stage)+probe(marker)로 표시한다.
     first_pair_saved = None
     for i in range(len(feature_cols)):
         for j in range(i + 1, len(feature_cols)):
@@ -383,7 +383,7 @@ def plot_doe_vs_optimum(
                 first_pair_saved = p_exec_pair
             _append_saved(p_exec_pair)
 
-    # Backward-compatible alias (first pair)
+    # 하위 호환 alias(첫 번째 pair)
     if first_pair_saved:
         x0 = feature_cols[0]
         x1 = feature_cols[1]

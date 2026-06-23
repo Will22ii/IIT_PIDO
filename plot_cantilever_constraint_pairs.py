@@ -132,7 +132,7 @@ def _plot_feasible_boolean_pairs(
             weights=infeasible_weights,
         )
 
-        # -1: empty, 0: infeasible(False), 1: feasible(True)
+        # -1: 비어 있음, 0: infeasible(False), 1: feasible(True)
         state = np.full(h_total.shape, -1.0, dtype=float)
         occupied = h_total > 0
         if np.any(occupied):

@@ -1,4 +1,4 @@
-# run_CAE.py
+# CAE 실행 진입점
 
 from CAE_tool_interface.config import CAEConfig
 from CAE_tool_interface.executor.configurator import (

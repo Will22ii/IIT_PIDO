@@ -31,8 +31,8 @@ def get_problem_spec():
     return {
         "name": "cantilever_beam",
         "variables": real_vars + dummy_vars,
-        # Benchmark-only constraint definitions (treated as if user provided them).
-        # Expressions are kept self-contained (no derived symbols) for now.
+        # benchmark 전용 제약 정의(사용자가 제공한 것처럼 취급).
+        # 현재는 expression을 self-contained 형태로 유지한다(파생 symbol 없음).
         "constraint_defs": [
             {
                 "id": "sigma_max_ub",
@@ -74,7 +74,7 @@ def evaluate(x: np.ndarray, w_imp=92.77*1.0, w_dum=92.77*0.001) -> dict:
     # 목적 함수: 무게
     V = (2*h1*b1 + (H - 2*h1) * b2 ) * L 
 
-    # objective: weight + penalties on dummy variables
+    # objective: weight + dummy variable penalty
     term_imp = w_imp * (dum1**2)
     term_dum = w_dum * (dum2**2 + dum3**2+ dum4**2 + dum5**2)
     

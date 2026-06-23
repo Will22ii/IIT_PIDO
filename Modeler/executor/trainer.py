@@ -1,4 +1,4 @@
-# MODELER/executor/trainer.py
+# Modeler trainer
 
 import numpy as np
 import pandas as pd
@@ -45,7 +45,7 @@ class ModelTrainer:
         )
 
     # -------------------------------------------------
-    # Main entry
+    # 주요 진입점
     # -------------------------------------------------
 
     def run(self, df: pd.DataFrame) -> dict:
@@ -63,7 +63,7 @@ class ModelTrainer:
         """
 
         # -----------------------------
-        # Feature / target split
+        # feature / target 분리
         # -----------------------------
         if self.feature_cols is None:
             feature_cols = [
@@ -77,7 +77,7 @@ class ModelTrainer:
         y = df[self.target_col].values
 
         # -----------------------------
-        # Containers
+        # 컨테이너
         # -----------------------------
         models: list = []
         fold_predictions = []
@@ -85,7 +85,7 @@ class ModelTrainer:
         oof_count = np.zeros(len(df), dtype=int)
 
         # -----------------------------
-        # K-Fold loop
+        # K-fold 반복
         # -----------------------------
         for run_id, train_idx, valid_idx in self.splitter.split(X):
             model_seed = self.splitter.get_model_seed(run_id)
@@ -107,7 +107,7 @@ class ModelTrainer:
             )
             y_valid_pred = np.asarray(y_valid_pred, dtype=float).reshape(-1)
 
-            # store
+            # 저장
             models.append(model)
             fold_predictions.append({
                 "run_id": run_id,

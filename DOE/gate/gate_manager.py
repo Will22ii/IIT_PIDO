@@ -1,4 +1,4 @@
-# DOE/gate/gate_manager.py
+# DOE gate manager
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ class GateManager:
     """
 
     # -------------------------------------------------
-    # Main API
+    # 주요 API
     # -------------------------------------------------
 
     def evaluate(

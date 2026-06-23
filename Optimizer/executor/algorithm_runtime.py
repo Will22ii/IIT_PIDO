@@ -77,6 +77,7 @@ class OptimizerRuntime:
             problem_name=self.problem_name,
             variables=resolved.variables,
             selected_features=self.selected_features,
+            base_values=resolved.evaluation_base_values,
             error_context="optimizer runtime evaluation",
         )
         self._mapper = self._cae_evaluator.mapper

@@ -1,4 +1,4 @@
-# doe/doe_algorithm/random.py
+# DOE random 알고리즘
 
 import numpy as np
 from typing import Optional

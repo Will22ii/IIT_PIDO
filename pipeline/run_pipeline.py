@@ -249,7 +249,7 @@ def run_pipeline(*, config: PipelineConfig) -> dict:
         ExplorerOrchestrator(config.explorer, run_context=run_context).run()
 
     if config.tasks.run_optimizer and config.optimizer is not None:
-        # Lazy import: optimizer 의존성(scipy 등)이 없는 파이프라인 실행 경로를 보호
+        # 지연 import: optimizer 의존성(scipy 등)이 없는 파이프라인 실행 경로를 보호
         from Optimizer.run_Optimizer import run_optimizer
 
         config.optimizer.cae = config.cae

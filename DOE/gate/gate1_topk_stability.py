@@ -1,4 +1,4 @@
-# DOE/gate/gate1_topk_stability.py
+# DOE gate1 top-k stability
 
 from __future__ import annotations
 
@@ -108,7 +108,7 @@ class Gate1TopKStability:
         }
 
     # -------------------------
-    # Internals
+    # 내부 구현
     # -------------------------
 
     def _predict(self, model: Any, X: np.ndarray) -> np.ndarray:

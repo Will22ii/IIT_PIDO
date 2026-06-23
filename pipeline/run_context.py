@@ -7,8 +7,8 @@ from datetime import datetime
 
 @dataclass
 class RunContext:
-    # Backend/user-facing identifier is run_root. RunContext is the internal
-    # execution object that resolves paths and updates index.json.
+    # backend/user-facing 식별자는 run_root다. RunContext는 path를 해석하고
+    # index.json을 갱신하는 내부 실행 객체다.
     run_id: str
     run_root: str
     user_config_snapshot_path: str

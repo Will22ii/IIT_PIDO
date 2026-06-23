@@ -1,4 +1,4 @@
-# utils/feasibility.py
+# feasibility 유틸리티
 
 def evaluate_feasibility(constraints: dict) -> bool:
     """

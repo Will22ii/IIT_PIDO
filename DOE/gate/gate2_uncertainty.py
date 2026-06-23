@@ -1,4 +1,4 @@
-# DOE/gate/gate2_uncertainty.py
+# DOE gate2 uncertainty
 
 from __future__ import annotations
 
@@ -68,22 +68,22 @@ class Gate2Uncertainty:
         if X_candidate.ndim != 2 or X_candidate.shape[0] == 0:
             raise ValueError("X_candidate must be a non-empty 2D array")
 
-        # 1) Collect predictions: shape (n_models, n_points)
+        # 1) 예측값 수집: shape (n_models, n_points)
         preds = [self._predict(m, X_candidate) for m in models]
         Y = np.vstack(preds)  # (M, N)
 
-        # 2) Per-point uncertainty
+        # 2) 점별 uncertainty
         per_point_std = np.std(Y, axis=0)
         per_point_var = per_point_std ** 2
 
-        # 3) Fit scale σ² (MLE)
+        # 3) scale σ² 추정(MLE)
         sigma2_hat = float(np.mean(per_point_var) / self.k)
 
-        # 4) Chi-square threshold
+        # 4) chi-square threshold
         chi2_q = float(chi2.ppf(self.cdf_level, df=self.k))
         threshold = self.relax_factor * sigma2_hat * chi2_q
 
-        # 5) Empirical ratio
+        # 5) 경험적 비율
         ratio = float(np.mean(per_point_var <= threshold))
 
         passed = bool(ratio >= self.ratio_threshold)
@@ -105,7 +105,7 @@ class Gate2Uncertainty:
         }
 
     # -------------------------
-    # Internals
+    # 내부 구현
     # -------------------------
 
     def _predict(self, model: Any, X: np.ndarray) -> np.ndarray:

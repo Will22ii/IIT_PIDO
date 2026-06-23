@@ -804,8 +804,8 @@ def _write_focus3_debug_plots(
         ys = pd.to_numeric(focus3_rows[fy], errors="coerce")
         valid = xs.notna() & ys.notna()
         if valid.any():
-            # BO does not follow a physical path. Keep the connection line very
-            # light so the plot reads as evaluated points, not a trajectory.
+            # BO는 물리적 경로를 따르지 않는다. plot이 trajectory가 아니라
+            # 평가된 점들의 모음으로 읽히도록 연결선을 매우 옅게 유지한다.
             ax.plot(xs[valid], ys[valid], color="#111111", linewidth=0.55, alpha=0.18, label="eval order", zorder=2)
             plan_modes = focus3_rows.get("focus3_plan_mode", pd.Series("", index=focus3_rows.index)).astype(str)
             source_modes = focus3_rows.get("source_mode", pd.Series("", index=focus3_rows.index)).astype(str)
@@ -832,8 +832,8 @@ def _write_focus3_debug_plots(
                     plotted.add(mode)
             fallback_mask = valid & ~plan_modes.str.lower().isin(plotted)
             if fallback_mask.any():
-                # Older result files may not contain focus3_plan_mode. Fall back
-                # to source_mode so historical debug plots remain readable.
+                # 오래된 결과 파일에는 focus3_plan_mode가 없을 수 있다.
+                # 과거 debug plot도 읽을 수 있도록 source_mode로 fallback한다.
                 for source, marker, label in (
                     ("topk", "^", "topk eval"),
                     ("boundary", "s", "boundary eval"),

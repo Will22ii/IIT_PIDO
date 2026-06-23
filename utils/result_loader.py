@@ -1,4 +1,4 @@
-# utils/result_loader.py
+# 결과 loader
 
 import json
 import os

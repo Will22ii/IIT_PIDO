@@ -26,10 +26,10 @@ class PipelineTasks:
 
 @dataclass
 class PipelineReusePolicy:
-    # Explicit input path가 없을 때 기존 run_root의 DOE public CSV를 downstream input으로 쓸지 여부.
+    # 명시적 input path가 없을 때 기존 run_root의 DOE public CSV를 downstream input으로 쓸지 여부.
     use_existing_doe_csv: bool = True
     # 이번 호출에서 Modeler를 실행하지 않았을 때 기존 run_root의 Modeler public artifact를
-    # Explorer optional model/selected-feature layer로 쓸지 여부.
+    # Explorer 선택 model/selected-feature layer로 쓸지 여부.
     use_existing_modeler_artifacts: bool = True
 
 
@@ -52,6 +52,6 @@ class PipelineConfig:
     # 기존 run을 이어서 사용할 때 backend가 넘기는 run root.
     # None이면 새 run context를 생성한다.
     run_root: str | None = None
-    # AION mode enables pipeline-only integration features through
-    # pipeline/aion_system_config.py. Default off for direct/standalone runs.
+    # AION mode는 pipeline/aion_system_config.py를 통해 pipeline 전용 연계 기능을 켠다.
+    # direct/standalone run에서는 기본값을 off로 둔다.
     aion_mode: bool = False

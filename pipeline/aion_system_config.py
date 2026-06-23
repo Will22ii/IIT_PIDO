@@ -13,8 +13,14 @@ if TYPE_CHECKING:
 def _aion_optimizer_overrides() -> dict[str, object]:
     return {
         "focus3_profile_id": "aion_trusted_bounds_v1",
-        # AION Explorer bounds are trusted evidence. Spend Focus3 on structured
-        # exploitation inside those bounds, not on generic boundary/random search.
+        # Modeler에서 탈락한 변수는 Optimizer 탐색 좌표로 되살리지 않는다.
+        # AION 기본값은 Optimizer 입력/archive CSV의 best feasible full row를
+        # omitted-feature context로 사용한다. 임시 실험은 run_pipelines.py에서
+        # user_value=0.0으로 override할 수 있다.
+        "omitted_feature_freeze_mode": "auto",
+        "omitted_feature_freeze_value": 0.0,
+        # AION Explorer bounds는 신뢰도 높은 근거로 본다. 일반 boundary/random 탐색보다
+        # 해당 bounds 내부의 구조적 exploitation에 Focus3 예산을 더 쓴다.
         "focus3_ultra_low_source_topk_prob": 0.78,
         "focus3_ultra_low_source_boundary_prob": 0.05,
         "focus3_ultra_low_source_random_prob": 0.17,
@@ -34,8 +40,8 @@ def _aion_optimizer_overrides() -> dict[str, object]:
         "focus3_gp_fallback_random_bonus": 0.08,
         "source_stagnation_boundary_bonus": 0.0,
         "source_stagnation_random_bonus": 0.01,
-        # Unconstrained benchmark cases showed boundary/random over-selection.
-        # Keep small coverage only; require a clear acquisition advantage.
+        # 무제약 benchmark에서는 boundary/random 과선택이 관측됐다.
+        # 작은 coverage만 유지하고, 명확한 acquisition 우위가 있을 때만 허용한다.
         "focus3_no_constraint_boundary_max": 0.02,
         "focus3_no_constraint_topk_min": 0.72,
         "focus3_no_constraint_random_min": 0.03,
@@ -46,8 +52,8 @@ def _aion_optimizer_overrides() -> dict[str, object]:
         "focus3_no_constraint_random_discrete_gate_margin_ratio": 0.16,
         "focus3_recover_random_discrete_gate_margin_ratio": 0.12,
         "focus3_recover_random_discrete_gate_min_no_improve": 80,
-        # Earlier source-performance switching: previous runs showed it fired,
-        # but too late to rescue plateaued Focus3 trajectories.
+        # source-performance 전환을 더 일찍 켠다. 이전 run에서는 작동했지만,
+        # plateau에 빠진 Focus3 trajectory를 구하기에는 너무 늦었다.
         "focus3_source_performance_recover_only": False,
         "focus3_source_performance_window": 80,
         "focus3_source_performance_min_focus3_evals": 30,
@@ -64,8 +70,8 @@ def _aion_optimizer_overrides() -> dict[str, object]:
         "focus3_source_performance_best_plan_filter_near_goal_preferred_source": "performance",
         "focus3_source_performance_best_plan_filter_near_goal_random_fallback_enabled": True,
         "focus3_source_performance_best_plan_filter_near_goal_random_min_advantage": 0.005,
-        # Multi-incumbent local exploitation: top archive basins get more quota,
-        # while not anchoring every candidate to the single current best.
+        # 다중 incumbent local exploitation: 상위 archive basin에 quota를 더 주되,
+        # 모든 후보가 현재 단일 best에만 묶이지 않게 한다.
         "focus3_best_local_prob": 0.45,
         "focus3_best_local_max_prob": 0.68,
         "focus3_best_local_min_focus3_evals": 1,
@@ -81,8 +87,8 @@ def _aion_optimizer_overrides() -> dict[str, object]:
         "focus3_best_local_elite_std_scale": 0.65,
         "focus3_best_local_max_sigma": 0.10,
         "focus3_best_local_anchor_best_prob": 0.28,
-        # Recovery in AION should intensify structured local search before
-        # falling back to broad random exploration.
+        # AION recovery는 넓은 random 탐색으로 돌아가기 전에
+        # 구조적 local search를 먼저 강화한다.
         "focus3_recover_window": 40,
         "focus3_recover_min_history": 45,
         "focus3_recover_boundary_bonus": 0.05,
@@ -112,20 +118,20 @@ def _aion_optimizer_overrides() -> dict[str, object]:
         "focus3_local_probe_step_ratio": 0.025,
         "focus3_local_probe_min_step_ratio": 0.001,
         "focus3_local_probe_scales": "1.0,0.5,0.25,0.1,0.05,0.025,0.01,0.005,1.75,2.5,3.5",
-        # Let reliable, narrow AION bounds enter exploitation a little earlier.
+        # 신뢰 가능한 좁은 AION bounds는 exploitation으로 조금 더 빨리 진입시킨다.
         "focus3_auto_mean_min_data_ratio": 12.0,
         "focus3_auto_mean_max_volume_ratio": 0.35,
         "focus3_auto_ei_max_volume_ratio": 0.35,
         "focus3_auto_ei_max_mean_width_ratio": 0.85,
-        # Refine scheduling remains adaptive, but reacts earlier to the
-        # discrete/refine performance split.
+        # refine scheduling은 adaptive로 유지하되,
+        # discrete/refine 성능 차이에 더 일찍 반응한다.
         "focus3_refine_adaptive_window": 60,
         "focus3_refine_adaptive_min_samples": 5,
         "focus3_refine_adaptive_max_every": 3,
         "focus3_refine_adaptive_worse_every": 3,
         "focus3_refine_cooldown_min_focus3_evals": 50,
         "focus3_refine_cooldown_window": 40,
-        # Constraint cases should still be able to work near feasible borders.
+        # 제약 문제가 feasible border 근처에서도 동작할 수 있게 유지한다.
         "focus3_constraint_boundary_prob": 0.25,
     }
 
@@ -136,8 +142,8 @@ class AIONSystemConfig:
     optimizer_focus_planner_profile: str = "aion"
     optimizer_focus3_profile_id: str = "aion_trusted_bounds_v1"
     optimizer_system_overrides: dict[str, object] = field(default_factory=_aion_optimizer_overrides)
-    # AION-only Explorer integration. This restores DOE diagnostic signals for
-    # router decisions without making DOE metadata a standalone Explorer input.
+    # AION 전용 Explorer 연계. DOE metadata를 standalone Explorer 입력으로 만들지 않으면서
+    # router decision에 필요한 DOE diagnostic signal만 복원한다.
     enable_doe_router_signals: bool = True
 
 

@@ -1,4 +1,4 @@
-# cae_model/registry.py
+# CAE model registry
 
 from typing import Callable, Dict, Tuple
 
@@ -48,7 +48,7 @@ CAEEntry = Tuple[ProblemSpecFunc, EvaluateFunc]
 
 
 # -------------------------------------------------
-# CAE Registry
+# CAE registry
 # -------------------------------------------------
 CAE_REGISTRY: Dict[str, CAEEntry] = {
     "goldstein_price": (gp_spec, gp_eval),

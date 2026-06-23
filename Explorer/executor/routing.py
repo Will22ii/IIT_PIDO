@@ -37,12 +37,12 @@ class RouterInput:
     has_pre_constraints: bool
     has_post_constraints: bool = False
 
-    # data density
+    # 데이터 밀도
     usable_n: int = 0
     usable_n_over_p: float = 0.0
     constraint_rate_hat: float = 1.0
 
-    # DOE quality
+    # DOE 품질
     doe_gate1_pass_rate: float | None = None
     doe_gate2_pass_rate: float | None = None
     doe_gate1_score_last: float | None = None
@@ -52,12 +52,12 @@ class RouterInput:
     doe_collapse_detected_count: int = 0
     doe_diversity_injection_applied_count: int = 0
 
-    # pred quality (Explorer interim)
+    # 예측 품질(Explorer 중간값)
     pred_cluster_confidence: float | None = None
     pred_cluster_sigma_mean_selected: float | None = None
     pred_refine_shift_norm: float | None = None
 
-    # disagreement (computed inline if not provided)
+    # disagreement(제공되지 않으면 inline 계산)
     pred_obj_iou: float | None = None
     dual_disagreement_iou: float | None = None
     dual_disagreement_center_l1_norm: float | None = None
@@ -94,7 +94,7 @@ class RouterOutput:
 # 결정 트리 임계값 (모두 명시적 — 변경 시 reason_trace에도 반영됨)
 # ─────────────────────────────────────────────────────────────────
 THRESH = {
-    # Acquisition mode
+    # acquisition mode
     "acq_ei_pred_conf_min": 0.55,
     "acq_ei_g2_pass_min": 0.80,
     "acq_ei_np_min": 18.0,
@@ -102,7 +102,7 @@ THRESH = {
     "acq_lcb_g2_pass_max": 0.50,
     "acq_lcb_np_max": 12.0,
 
-    # obj_ratio base
+    # obj_ratio 기본값
     "obj_base_constraint": 0.70,
     "obj_base_low_dim_dense_p_max": 3,
     "obj_base_low_dim_dense_np_min": 20.0,
@@ -112,7 +112,7 @@ THRESH = {
     "obj_base_high_dim_dense": 0.45,
     "obj_base_default": 0.55,
 
-    # obj_ratio adjustments
+    # obj_ratio 보정
     "obj_iou_strong_disag": 0.20,
     "obj_iou_strong_disag_bonus": 0.15,
     "obj_iou_mild_disag": 0.30,
@@ -131,17 +131,17 @@ THRESH = {
     "tilt_min": 0.30,
     "tilt_max": 0.65,
 
-    # expansion mode (state-based; 기존 EXP-3 로직과 정합)
+    # expansion mode(state-based; 기존 EXP-3 로직과 정합)
     "exp_high_crate_threshold": 0.85,
 
-    # fixed cap target (hard policy)
+    # 고정 cap target(hard policy)
     "cap_fixed": 0.2499,
 
     # DSE-2 trigger
     "dse2_high_conf_threshold": 0.55,
     "dse2_iou_high_conf": 0.18,
     "dse2_iou_default": 0.22,
-    # DSE-2 adaptive relax (uncertainty-aware)
+    # DSE-2 adaptive relax(uncertainty-aware)
     "dse2_low_conf_threshold": 0.58,
     "dse2_low_conf_bonus": 0.02,
     "dse2_low_g2_pass_threshold": 0.60,
@@ -221,7 +221,7 @@ def route_v2(
         )
 
     # ─────────────────────────────────────────────────────────────
-    # (B) obj_ratio (pred vs obj 비율)
+    # (B) obj_ratio(pred vs obj 비율)
     # 근거: routed_v1 베이스 + DSE-2 분석 (low IoU에서 obj 우세 효과)
     # ─────────────────────────────────────────────────────────────
     if has_c:
@@ -293,7 +293,7 @@ def route_v2(
         R.append("expansion=fi_aware (default; no FI score 시 uniform fallback)")
 
     # ─────────────────────────────────────────────────────────────
-    # (E) cap_target (hard fixed policy)
+    # (E) cap_target(hard fixed policy)
     # 30% 완화 경로를 제거하고 고정 cap(24.99%)만 사용한다.
     # ─────────────────────────────────────────────────────────────
     cap_target = T["cap_fixed"]

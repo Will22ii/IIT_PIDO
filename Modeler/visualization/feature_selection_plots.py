@@ -156,7 +156,7 @@ def plot_perm_drop_compare(
     plt.bar(x - w / 2, perm_vals, width=w, color="#1f77b4", alpha=0.9, label="perm_delta_norm")
     plt.bar(x + w / 2, drop_norm, width=w, color="#2ca02c", alpha=0.9, label="drop_metric_norm")
 
-    # Overlay FI score axis signals when available (null baseline and adjusted score).
+    # 사용 가능하면 FI score 축 signal을 겹쳐 표시한다(null baseline 및 adjusted score).
     if "global_score" in df.columns:
         global_vals = pd.to_numeric(df["global_score"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
         plt.plot(

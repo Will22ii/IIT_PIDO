@@ -22,7 +22,7 @@ class DOESystemConfig:
     initial_corner_adaptive_low_dim_max: int = 6
     initial_corner_adaptive_ratio_low_dim: float = 0.05
 
-    # 2) Additional DOE: 단계/배분
+    # 2) 추가 DOE: 단계/배분
     additional_init_ratio: float = 0.3
     additional_exec_ratio: float = 0.1
     additional_initial_probe_multiplier: float = 2.0
@@ -40,7 +40,7 @@ class DOESystemConfig:
     global_boundary_margin_near_tol: float = 0.03
     global_margin_obj_alpha: float = 0.5
 
-    # 3) Additional DOE: plan 크기
+    # 3) 추가 DOE: plan 크기
     plan_base_k: float = 200.0
     plan_remaining_cap: float = 4.0
     plan_decay: float = 0.9
@@ -51,7 +51,7 @@ class DOESystemConfig:
     pre_equality_warning_threshold: int = 3
     max_additional_stages: int = 10
 
-    # 4) Gate
+    # 4) 게이트
     gate1_ratio: float = 0.3
     gate1_pass_ratio: float = 0.6
     gate2_k: int = 2
@@ -59,7 +59,7 @@ class DOESystemConfig:
     gate2_ratio_threshold: float = 0.9
     gate2_relax_factor: float = 1.1
 
-    # 5) Local planner: 앵커/클러스터
+    # 5) 로컬 planner: 앵커/클러스터
     local_anchor_max_base: int = 6
     local_anchor_max_decay: float = 0.9
     local_anchor_best_ratio: float = 0.35
@@ -69,13 +69,13 @@ class DOESystemConfig:
     local_dbscan_q_eps: float = 0.65
     local_dbscan_eps_max: float = 0.25
 
-    # 6) Local planner: 반경/중복 제어
+    # 6) 로컬 planner: 반경/중복 제어
     local_radius_ratio_phase1: float = 0.25
     local_radius_ratio_phase2: float = 0.15
     local_min_radius_ratio: float = 0.08
     local_tol_ratio: float = 0.3
 
-    # 7) Local planner: GP refine
+    # 7) 로컬 planner: GP refine
     local_refine_min_points: int = 15
     local_cluster_delta_ratio: float = 0.03
     local_singleton_box_ratio: float = 0.05
@@ -88,13 +88,13 @@ class DOESystemConfig:
     additional_gp_x_scaling_auto_span_ratio_threshold: float = 3.0
     additional_gp_x_scaling_span_floor: float = 1e-12
 
-    # 8) Local planner: 제약 재시도
+    # 8) 로컬 planner: 제약 재시도
     local_constraint_retry_count: int = 2
     local_constraint_shrink_factor: float = 0.75
     local_constraint_min_factor: float = 2.0
     local_exec_pick_mode: str = "random"
 
-    # 9) Post 제약 penalty
+    # 9) 사후 제약 penalty
     post_use_penalty: bool = True
     post_lambda_init: float = 2.0
     post_lambda_min: float = 0.25
@@ -123,30 +123,30 @@ class DOESystemConfig:
     phase2_min_used_budget_ratio: float = 0.30
     phase2_min_used_budget_ratio_high_crate: float = 0.50
     phase2_high_crate_threshold: float = 0.85
-    # DOE-2: gate2 saturation 가드
+    # DOE-2: gate2 포화 가드
     # phase2 진입 후 gate2_ema가 포화(0.92+) + 고제약 + 예산 잔여 충분 시
     # 다음 stage에 diversity_boost 강제 (위양성 수렴 보정)
     phase2_g2_saturation_threshold: float = 0.92
     phase2_g2_saturation_min_remaining: float = 0.20
     # ─────────────────────────────────────────────────────
-    # Bucket minima 정책 (DOE-3 대체)
+    # bucket 최소치 정책 (DOE-3 대체)
     # ─────────────────────────────────────────────────────
     # phase별/제약상태별 각 bucket의 최소 개수를 보장. n_exec_floor 계산 근거.
-    # remaining 부족 시 drop priority (top > margin > boundary > random) 순으로 graceful degrade
+    # remaining 부족 시 drop priority(top > margin > boundary > random) 순으로 점진적으로 축소
     global_bucket_minima_enabled: bool = True
     global_bucket_minima_strict: bool = False   # True면 minima 미달 시 FAILED (기본 relax)
-    # high_crate 판정 (bucket minima 전용, DSE-C의 phase2 진입 threshold와 별개)
+    # high_crate 판정(bucket minima 전용, DSE-C의 phase2 진입 threshold와 별개)
     global_boundary_high_crate_threshold: float = 0.80   # crate_hat < 0.80 → high_crate
-    # phase1 minima
+    # phase1 최소치
     phase1_min_top: int = 1
     phase1_min_margin: int = 1              # has_pre_constraints일 때만 활성
     phase1_min_boundary_any: int = 1        # constraint + normal(crate>=0.80) 또는 no_constraint
     phase1_min_boundary_classic_hc: int = 1 # high_crate 전용
     phase1_min_boundary_cross_hc: int = 1   # high_crate 전용
-    # phase2 minima (boundary는 phase2_disable_boundary_sampling=True로 이미 off)
+    # phase2 최소치(boundary는 phase2_disable_boundary_sampling=True로 이미 off)
     phase2_min_top: int = 1
     phase2_min_margin: int = 1              # has_pre_constraints일 때만 활성
-    # planning pool headroom (filter/dedup 손실 감안)
+    # planning pool 여유분(filter/dedup 손실 감안)
     global_bucket_plan_multiplier: int = 3
     gate_smoothing_enabled: bool = True
     gate_ema_alpha: float = 0.35
@@ -168,7 +168,7 @@ class DOESystemConfig:
     stop_anchor_spread_streak: int = 5
     stop_min_usable_np_ratio: float = 20.0
 
-    # 10-1) Probe stage
+    # 10-1) probe 단계
     probe_stage_enabled: bool = True
     probe_top_ratio: float = 0.3
     probe_max_points: int = 6

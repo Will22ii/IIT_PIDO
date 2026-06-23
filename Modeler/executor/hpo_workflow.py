@@ -7,7 +7,7 @@ from Modeler.executor.hpo_runner import HPORunner
 
 
 # -------------------------------------------------
-# XGB HPO param type spec
+# XGB HPO parameter type 정의
 # -------------------------------------------------
 XGB_PARAM_TYPES = {
     "n_estimators": int,

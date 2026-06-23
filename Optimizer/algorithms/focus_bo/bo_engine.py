@@ -1073,8 +1073,8 @@ def _apply_focus3_recover_best_local_policy(
         info["after"] = dict(info["before"])
         return p_topk, p_boundary, p_random, p_best_local, info
 
-    # Recovering in unconstrained Focus3 should intensify locally. Take quota
-    # first from boundary/random exploration, then from top-k if needed.
+    # 무제약 Focus3 recovery에서는 local intensification을 우선한다.
+    # quota는 boundary/random 탐색에서 먼저 가져오고, 필요하면 top-k에서도 가져온다.
     take_random = min(need, p_random)
     p_random -= take_random
     p_best_local += take_random
@@ -3091,7 +3091,7 @@ def _build_focus2_fallback_region_from_archive(
                 best_inside_rank = int(np.min(best_order_rank[inside_idx]))
             else:
                 best_inside_rank = int(10**9)
-            # Higher count first, then better objective-rank support.
+            # count가 높은 것을 먼저 보고, 그다음 objective-rank support가 좋은 것을 고른다.
             score = float(count) - 1e-3 * float(best_inside_rank)
             if best_candidate is None or score > best_candidate[0]:
                 best_candidate = (score, count, cand_lb, cand_ub, float(cand_ratio))
@@ -5312,8 +5312,8 @@ def _build_focus0_batch(
         }
         for idx, row in enumerate(pool[:n_batch])
     ]
-    # Focus0 diagnostics are intentionally not carried into public optimizer rows.
-    # Keep the sampler fields internal unless a dedicated debug summary is added later.
+    # Focus0 diagnostics는 의도적으로 public optimizer row에 싣지 않는다.
+    # 별도 debug summary가 추가되기 전까지 sampler field는 내부용으로 유지한다.
     return rows, {
         "mode": "focus0",
         "pool_count": int(pool.shape[0]),
@@ -6850,11 +6850,13 @@ def _build_cae_objective_evaluator(
     problem_name: str,
     variables: list[dict],
     selected_features: list[str],
+    evaluation_base_values: dict[str, float] | None = None,
 ) -> Callable[[np.ndarray], float]:
     evaluator = CaeObjectiveEvaluator(
         problem_name=problem_name,
         variables=variables,
         selected_features=selected_features,
+        base_values=evaluation_base_values,
         error_context="optimizer iteration",
     )
     return evaluator.evaluate_selected
@@ -6868,6 +6870,7 @@ def run_bo_engine(
     selected_features: list[str],
     selected_bounds: dict[str, tuple[float, float]],
     bounds_source: str,
+    evaluation_base_values: dict[str, float] | None = None,
     objective_col: str,
     objective_sense: str,
     n_samples: int,
@@ -6885,9 +6888,8 @@ def run_bo_engine(
     external_objective_sense = str(objective_sense or "min").strip().lower()
     if external_objective_sense not in {"min", "max"}:
         raise ValueError("objective_sense must be 'min' or 'max'.")
-    # FocusBO is implemented as a canonical minimizer. Keep user-facing raw
-    # objective values for outputs/goal checks, but train GP/acquisition/best
-    # state on this internal min score.
+    # FocusBO는 canonical minimizer로 구현되어 있다. 출력/goal check에는 사용자-facing raw
+    # objective 값을 유지하되, GP/acquisition/best 상태는 내부 min score로 학습/관리한다.
     objective_sense = "min"
 
     def _to_optimizer_objective(value: float | np.ndarray):
@@ -6939,6 +6941,7 @@ def run_bo_engine(
         problem_name=problem_name,
         variables=variables,
         selected_features=selected_features,
+        evaluation_base_values=evaluation_base_values,
     )
 
     post_score_mode = _normalize_post_score_mode(getattr(system, "post_score_mode", "add_penalty"))

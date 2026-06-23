@@ -28,6 +28,7 @@ class FocusBOAlgorithm:
             doe_df=resolved.doe_df,
             selected_features=resolved.selected_features,
             selected_bounds=resolved.selected_bounds,
+            evaluation_base_values=resolved.evaluation_base_values,
             bounds_source=resolved.bounds_source,
             objective_col=str(config.system.objective_col),
             objective_sense=str(resolved.objective_sense),

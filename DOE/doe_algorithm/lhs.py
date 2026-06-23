@@ -1,4 +1,4 @@
-# DOE/doe_algorithm/lhs.py
+# DOE LHS 알고리즘
 
 import numpy as np
 from typing import Optional, Sequence, Tuple

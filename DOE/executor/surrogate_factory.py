@@ -1,4 +1,4 @@
-# DOE/executor/surrogate_factory.py
+# DOE surrogate factory
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ class SurrogateFactory:
             raise ValueError("gate2_bootstrap_seeds length must equal n_models")
         self.gate2_bootstrap_seeds = gate2_bootstrap_seeds
 
-        # Reasonable deterministic defaults (can be tuned later)
+        # 합리적인 deterministic 기본값(나중에 tuning 가능)
         default_params = {
             "n_estimators": 600,
             "max_depth": 6,
@@ -63,7 +63,7 @@ class SurrogateFactory:
         self.xgb_params = {**default_params, **(xgb_params or {})}
 
     # -----------------------------
-    # Public API
+    # 공개 API
     # -----------------------------
 
     def build(self, *, df: pd.DataFrame, round_idx: int, exec_size: int | None = None) -> Dict[str, List[XGBoostModel]]:
@@ -102,13 +102,13 @@ class SurrogateFactory:
         else:
             n_exec = int(exec_size)
             sizes = [max(1, N - 2 * n_exec), max(1, N - n_exec), N]
-            # ensure non-decreasing and <= N
+            # 감소하지 않고 N 이하가 되도록 보장
             sizes = [min(s, N) for s in sizes]
             for i in range(1, len(sizes)):
                 if sizes[i] < sizes[i - 1]:
                     sizes[i] = sizes[i - 1]
 
-        # fixed permutation -> nested subsets
+        # 고정 permutation -> 중첩 subset
         rng = np.random.default_rng(self.gate1_fixed_seed)
         perm = rng.permutation(N)
 
@@ -147,7 +147,7 @@ class SurrogateFactory:
         return models
 
     # -----------------------------
-    # Internals
+    # 내부 구현
     # -----------------------------
 
     def _new_xgb_model(self, *, random_state: int) -> XGBoostModel:

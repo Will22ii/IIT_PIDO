@@ -130,6 +130,18 @@ def build_explorer_report_payload(
             "volume_cap_boundary_pin_tol_ratio": float(
                 getattr(system_config, "volume_cap_boundary_pin_tol_ratio", 0.03)
             ),
+            "post_cap_side_mass_shift_enabled": bool(
+                getattr(system_config, "post_cap_side_mass_shift_enabled", True)
+            ),
+            "post_cap_side_mass_quantile": float(
+                getattr(system_config, "post_cap_side_mass_quantile", 0.98)
+            ),
+            "post_cap_side_mass_trigger_ratio": float(
+                getattr(system_config, "post_cap_side_mass_trigger_ratio", 0.0)
+            ),
+            "post_cap_side_mass_pad_ratio": float(
+                getattr(system_config, "post_cap_side_mass_pad_ratio", 0.001)
+            ),
             "gp_x_scaling_enabled": bool(
                 getattr(system_config, "gp_x_scaling_enabled", True)
             ),
@@ -176,6 +188,10 @@ def build_explorer_report_payload(
             context["dse_cap_center_realign_applied"]
         ),
         "dse_cap_force_pin_applied": bool(context["dse_cap_force_pin_applied"]),
+        "post_cap_side_mass_shift_applied": bool(
+            context["post_cap_side_mass_shift_applied"]
+        ),
+        "post_cap_side_mass_shift_dims": context["post_cap_side_mass_shift_dims"],
         "constraint_aware_enabled": bool(context["constraint_aware_enabled"]),
         "constraint_aware_policy_applied": bool(
             context["constraint_aware_policy_applied"]
@@ -284,6 +300,10 @@ def build_explorer_report_payload(
         ),
         "dse_cap_center_blend_used": context["dse_cap_center_blend_used"],
         "dse_cap_force_pin_applied": bool(context["dse_cap_force_pin_applied"]),
+        "post_cap_side_mass_shift_applied": bool(
+            context["post_cap_side_mass_shift_applied"]
+        ),
+        "post_cap_side_mass_shift_dims": context["post_cap_side_mass_shift_dims"],
         "constraint_aware_enabled": bool(context["constraint_aware_enabled"]),
         "constraint_aware_policy_applied": bool(
             context["constraint_aware_policy_applied"]

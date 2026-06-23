@@ -129,9 +129,11 @@ class SelectedFeatureMapper:
         *,
         variables: list[dict],
         selected_features: list[str],
+        base_values: dict[str, float] | None = None,
     ) -> "SelectedFeatureMapper":
         var_names: list[str] = []
         baselines: list[float] = []
+        base_override = dict(base_values or {})
         for var in variables:
             if not isinstance(var, dict):
                 continue
@@ -144,6 +146,11 @@ class SelectedFeatureMapper:
                 base = 0.5 * (float(var["lb"]) + float(var["ub"]))
             else:
                 base = 0.0
+            if name in base_override:
+                try:
+                    base = float(base_override[name])
+                except Exception:
+                    pass
             if not np.isfinite(base):
                 base = 0.0
             var_names.append(name)
@@ -203,11 +210,13 @@ class CaeObjectiveEvaluator:
         problem_name: str,
         variables: list[dict],
         selected_features: list[str],
+        base_values: dict[str, float] | None = None,
         error_context: str = "optimizer evaluation",
     ) -> None:
         self.mapper = SelectedFeatureMapper.from_variables(
             variables=variables,
             selected_features=selected_features,
+            base_values=base_values,
         )
         _, self._evaluate_func = select_cae_by_name(str(problem_name).strip())
         self.error_context = str(error_context or "optimizer evaluation")

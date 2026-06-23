@@ -60,7 +60,7 @@ def plot_dual_cluster_pair(
         hull = np.array(lower[:-1] + upper[:-1], dtype=float)
         return hull if hull.shape[0] >= 3 else None
 
-    # Pred clusters
+    # 예측 cluster
     if X_pred.size:
         for lab, color, name in [(0, "#1f77b4", "pred:best"), (1, "#17becf", "pred:second")]:
             mask = labels_pred == lab
@@ -84,7 +84,7 @@ def plot_dual_cluster_pair(
     ax_left.grid(True, alpha=0.3)
     ax_left.legend(loc="best", frameon=False)
 
-    # Objective clusters
+    # objective cluster
     if X_obj.size:
         for lab, color, name in [(0, "#ff7f0e", "obj:best"), (1, "#2ca02c", "obj:second")]:
             mask = labels_obj == lab
@@ -181,14 +181,14 @@ def plot_bounds_pair(
             label="selected points",
         )
 
-    # draw selected bounds rectangle
+    # selected bounds 사각형 그리기
     lb_i, ub_i = selected_bounds[i]
     lb_j, ub_j = selected_bounds[j]
     rect_x = [lb_i, ub_i, ub_i, lb_i, lb_i]
     rect_y = [lb_j, lb_j, ub_j, ub_j, lb_j]
     ax.plot(rect_x, rect_y, color="#d62728", linewidth=1.5, label="selected bounds")
 
-    # set axis to original bounds
+    # axis를 원래 bounds로 설정
     if i < len(bounds) and j < len(bounds):
         ax.set_xlim(bounds[i][0], bounds[i][1])
         ax.set_ylim(bounds[j][0], bounds[j][1])

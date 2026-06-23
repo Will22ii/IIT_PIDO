@@ -16,7 +16,7 @@ def clamp_ratio(value: float, *, floor: float) -> float:
 
 
 def _normalize_scope(scope: str | None) -> str:
-    # Canonical scope is pre/post only.
+    # canonical scope는 pre/post만 허용한다.
     value = str(scope or "pre").strip().lower()
     if value not in {"pre", "post"}:
         raise ValueError(f"unsupported constraint scope: {scope}")

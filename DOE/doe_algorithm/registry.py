@@ -1,4 +1,4 @@
-# doe/doe_algorithm/registry.py
+# DOE 알고리즘 registry
 
 from typing import Callable, Dict
 import numpy as np
@@ -13,7 +13,7 @@ DOEAlgorithm = Callable[..., np.ndarray]
 
 
 # -------------------------------------------------
-# DOE Algorithm Registry
+# DOE 알고리즘 registry
 # -------------------------------------------------
 DOE_ALGORITHM_REGISTRY: Dict[str, DOEAlgorithm] = {
     "lhs": latin_hypercube_sampling,

@@ -170,6 +170,8 @@ def _write_optimizer_debug_tables(
                 "problem_name": str(resolved.problem_name),
                 "objective_sense": str(resolved.objective_sense),
                 "selected_features": list(resolved.selected_features),
+                "omitted_feature_policy": dict(resolved.omitted_feature_policy),
+                "omitted_feature_values": dict(resolved.omitted_feature_values),
                 "bounds_source": str(resolved.bounds_source),
                 "final_bounds": final_bounds,
                 "focus_pipeline_summary": bo_result.focus_pipeline_summary,
@@ -275,7 +277,7 @@ def save_optimizer_outputs(
             indent=2,
         )
 
-    # Main CSV는 "OPT 추가 평가점"만 저장한다 (DOE seed 제외).
+    # 기본 CSV는 "OPT 추가 평가점"만 저장한다(DOE seed 제외).
     opt_point_cols = [
         "iter",
         "segment",
@@ -327,6 +329,9 @@ def save_optimizer_outputs(
                 "objective_col": str(config.system.objective_col),
                 "objective_sense": str(resolved.objective_sense),
                 "selected_features": list(resolved.selected_features),
+                "omitted_feature_policy": dict(resolved.omitted_feature_policy),
+                "omitted_feature_values": dict(resolved.omitted_feature_values),
+                "evaluation_base_values": dict(resolved.evaluation_base_values),
                 "selected_bounds": {
                     str(feature): {
                         "lb": float(resolved.selected_bounds[feature][0]),

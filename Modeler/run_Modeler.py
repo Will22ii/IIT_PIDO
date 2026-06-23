@@ -1,4 +1,4 @@
-# run_Modeler.py
+# Modeler 실행 진입점
 
 import os
 import sys
@@ -171,10 +171,10 @@ def run_modeler(
     os.makedirs(debug_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # Feature Selection 분기
+    # feature selection 분기
     # ------------------------------------------------------------------
     if use_primary_selection:
-        # === Primary Selection ON: FI용 학습 → FI 계산 → Primary → (Secondary) ===
+        # === primary selection ON: FI용 학습 → FI 계산 → primary → (secondary) ===
         trainer = ModelTrainer(
             base_random_seed=base_seed,
             target_col=target_col,
@@ -206,7 +206,7 @@ def run_modeler(
             keep_debug=keep_debug,
             debug_dir=debug_dir,
             meta_dir=meta_dir,
-            # Bootstrap Stability Selection
+            # bootstrap stability selection
             bootstrap_enabled=bool(config.system.fi_bootstrap_enabled),
             bootstrap_np_ratio=_np_ratio,
             bootstrap_np_threshold=float(config.system.fi_bootstrap_np_threshold),
@@ -315,7 +315,7 @@ def run_modeler(
             print(f"- Saved feature selection plot: {plot_path}")
 
     else:
-        # === Primary Selection OFF: 전체 피쳐 사용, FI 스킵 ===
+        # === primary selection OFF: 전체 feature 사용, FI 스킵 ===
         print(
             "[Modeler] Primary Selection OFF → "
             f"모든 피쳐({len(feature_cols)}개)를 사용하여 모델을 생성합니다."

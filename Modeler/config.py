@@ -11,25 +11,25 @@ class ModelerUserConfig:
     use_hpo: bool = False
     # 목표 컬럼명
     target_col: str = "objective"
-    # Secondary Selection 사용 여부
+    # 보조 선택 사용 여부
     use_secondary_selection: bool = False
 
 
 @dataclass
 class ModelerSystemConfig:
     # -----------------------------
-    # 1) HPO / CV
+    # 1) HPO / 교차검증
     # -----------------------------
     # HPO 상세 설정(옵션, model_name=xgb일 때만 사용)
-    # - n_trials: normal 모드 trial 수 (기본 20)
-    # - lambda_std: robust objective 가중치 (기본 0.5)
-    # - reuse_if_same_config: signature 일치 시 캐시 재사용 여부 (기본 True)
-    # - low_data_constrained_enabled: low-data constrained HPO 활성화 (기본 True)
-    # - low_data_n_trials: low-data 모드 trial 수 (기본 10)
-    # - low_data_lambda_std: low-data 모드 lambda_std (기본 lambda_std와 동일)
-    # - sampler: HPO sampler 선택 (tpe|cmaes, 기본 tpe)
-    # - search_space: normal 모드 탐색공간 override(dict)
-    # - low_data_search_space: low-data 모드 탐색공간 override(dict)
+    # - n_trials: 일반 모드 trial 수(기본 20)
+    # - lambda_std: robust objective 가중치(기본 0.5)
+    # - reuse_if_same_config: signature 일치 시 캐시 재사용 여부(기본 True)
+    # - low_data_constrained_enabled: 저데이터 제약 HPO 활성화(기본 True)
+    # - low_data_n_trials: 저데이터 모드 trial 수(기본 10)
+    # - low_data_lambda_std: 저데이터 모드 lambda_std(기본 lambda_std와 동일)
+    # - sampler: HPO sampler 선택(tpe|cmaes, 기본 tpe)
+    # - search_space: 일반 모드 탐색공간 override(dict)
+    # - low_data_search_space: 저데이터 모드 탐색공간 override(dict)
     hpo_config: dict | None = None
     # 기본 CV split/repeat
     kfold_splits: int = 5
@@ -38,7 +38,7 @@ class ModelerSystemConfig:
     cv_dynamic_policy: bool = True
     # fold별 최소 valid 샘플 목표(동적 k 결정 기준)
     cv_min_valid_size: int = 14
-    # low-data 기준: usable N / p < ratio
+    # 저데이터 기준: usable N / p < ratio
     cv_low_data_np_ratio: float = 15.0
 
     # -----------------------------
@@ -56,7 +56,7 @@ class ModelerSystemConfig:
     fi_drop_metric: str = "drop_sq"
     fi_drop_min_pass_rate: float = 0.6
     fi_drop_epsilon: float = 0.06
-    # very_low_data 전용 drop 채널 임계값 (n_samples < stability_very_low_data_n_threshold일 때)
+    # very_low_data 전용 drop 채널 임계값(n_samples < stability_very_low_data_n_threshold일 때)
     fi_drop_min_pass_rate_very_low_data: float = 0.35
     fi_drop_epsilon_very_low_data: float = 0.02
 
@@ -70,7 +70,7 @@ class ModelerSystemConfig:
     # 채널 결합 가중치 (perm / drop, 합 1 권장)
     fi_weight_perm: float = 0.80
     fi_weight_drop: float = 0.20
-    # low_data 전용 채널 가중치 (low_data=True일 때 fi_weight_perm/drop 대신 사용)
+    # low_data 전용 채널 가중치(low_data=True일 때 fi_weight_perm/drop 대신 사용)
     fi_weight_perm_low_data: float = 0.85
     fi_weight_drop_low_data: float = 0.15
 
@@ -108,15 +108,15 @@ class ModelerSystemConfig:
     # -----------------------------
     # 6) FI Stability Gate
     # -----------------------------
-    # Stability gate 사용 여부
+    # stability gate 사용 여부
     fi_stability_enabled: bool = True
-    # Stability 결합 규칙 (legacy fallback): or | and
+    # stability 결합 규칙(legacy fallback): or | and
     fi_stability_rule: str = "or"
     # -----------------------------
     # 3단계 stability 분기 (n_samples 기반)
-    # very_low_data: n_samples < threshold → or rule, 느슨한 임계값 (six_hump 류)
-    # low_data     : low_data=True AND n_samples >= threshold → and rule, 중간 임계값 (cantilever 류)
-    # normal_data  : low_data=False → and rule, 엄격한 임계값
+    # very_low_data: n_samples < threshold → or 규칙, 느슨한 임계값(six_hump 류)
+    # low_data     : low_data=True AND n_samples >= threshold → and 규칙, 중간 임계값(cantilever 류)
+    # normal_data  : low_data=False → and 규칙, 엄격한 임계값
     fi_stability_very_low_data_n_threshold: int = 55
     fi_stability_rule_very_low_data: str = "and"
     fi_stability_perm_min_rate_very_low_data: float = 0.60
@@ -133,13 +133,13 @@ class ModelerSystemConfig:
     fi_disagreement_penalty_enabled: bool = True
     fi_disagreement_threshold: float = 0.25   # 이 이상 불일치면 패널티 시작
     fi_disagreement_penalty_scale: float = 0.40  # 패널티 강도 (B: 0.55→0.40, 과도한 감점 완화)
-    # Redundancy-aware disagreement dampening (L1)
+    # redundancy-aware disagreement 완화(L1)
     # perm이 높지만 drop이 매우 낮은 경우 (변수 간 정보 중복 의심) disagreement penalty 감면
     fi_redundancy_dampening_enabled: bool = True
     fi_redundancy_perm_floor: float = 0.78   # perm_rate >= 이 값 (rosenbrock x1 같은 borderline multicollinearity 포착)
     fi_redundancy_drop_ceil: float = 0.50    # drop_rate < 이 값 (A: 0.40→0.50, 다중공선성 감지 범위 확대)
     fi_redundancy_dampening_factor: float = 0.5  # penalty에 곱할 감면 계수
-    # Adaptive score gap filter (L2)
+    # adaptive score gap filter(L2)
     # 선택된 feature 간 점수 갭이 클 때, 갭 아래의 저점수 feature를 제거
     fi_gap_filter_enabled: bool = True
     fi_gap_threshold_very_low_data: float = 0.08
@@ -161,7 +161,7 @@ class ModelerSystemConfig:
     fi_perm_var_penalty_very_low_data_scale: float = 0.35  # E: 0.20→0.35, very_low_data dummy 분산 패널티 강화
 
     # -----------------------------
-    # Bootstrap Stability Selection
+    # bootstrap stability selection
     # -----------------------------
     # N/p ≤ threshold일 때 bootstrap 서브샘플링으로 feature 선택 안정성 검증
     fi_bootstrap_enabled: bool = True
@@ -175,11 +175,11 @@ class ModelerSystemConfig:
     fi_bootstrap_rescue_very_low_data_only: bool = True  # very_low_data에서만 구제 적용
 
     # -----------------------------
-    # 7) FI Null(soft) Gate
+    # 7) FI null(soft) gate
     # -----------------------------
     # null importance 기반 soft penalty 사용 여부
     fi_null_enabled: bool = True
-    # null 모드: soft | hard | off (권장: soft)
+    # null 모드: soft | hard | off(권장: soft)
     fi_null_mode: str = "soft"
     # null 비교 분위수(예: 0.90 = null90)
     fi_null_quantile: float = 0.90  # C: 0.85→0.90, null 기준 상향으로 dummy 억제 강화
@@ -220,11 +220,11 @@ class ModelerSystemConfig:
     debug_level: str = "on"
 
     # -----------------------------
-    # 11) Primary / Secondary Selection
+    # 11) primary / secondary selection
     # -----------------------------
-    # Primary Selection 사용 여부 (False이면 FI 전체 스킵, 모든 피쳐로 모델 생성)
+    # primary selection 사용 여부(False이면 FI 전체 스킵, 모든 feature로 모델 생성)
     use_primary_selection: bool = True
-    # Secondary Selection은 user config의 use_secondary_selection으로 제어
+    # secondary selection은 user config의 use_secondary_selection으로 제어
     # model1=f(X_primary), model2=f(X_primary+dj)
     # - secondary 후보 dj를 하나씩 추가한 model2와 model1을 같은 CV split에서 비교
     # - delta_r2 = r2(model2) - r2(model1)
@@ -249,16 +249,16 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         drop_epsilon=system.fi_drop_epsilon,
         drop_min_pass_rate_very_low_data=system.fi_drop_min_pass_rate_very_low_data,
         drop_epsilon_very_low_data=system.fi_drop_epsilon_very_low_data,
-        # fold vote weights
+        # fold vote 가중치
         weight_abs=system.fi_weight_abs,
         weight_quantile=system.fi_weight_quantile,
         weight_rank=system.fi_weight_rank,
-        # channel merge weights
+        # channel merge 가중치
         weight_perm=system.fi_weight_perm,
         weight_drop=system.fi_weight_drop,
         weight_perm_low_data=system.fi_weight_perm_low_data,
         weight_drop_low_data=system.fi_weight_drop_low_data,
-        # scale merge weights
+        # scale merge 가중치
         weight_global_default=system.fi_weight_global_default,
         weight_global_low=system.fi_weight_global_low,
         weight_global_rich=system.fi_weight_global_rich,
@@ -270,7 +270,7 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         elite_var_penalty_enabled=system.fi_elite_var_penalty_enabled,
         elite_var_threshold=system.fi_elite_var_threshold,
         elite_var_penalty_scale=system.fi_elite_var_penalty_scale,
-        # decision guards
+        # decision guard
         final_score_threshold=system.fi_final_score_threshold,
         global_score_floor=system.fi_global_score_floor,
         # stability gate
@@ -293,10 +293,10 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         # drop veto
         drop_veto_enabled=system.fi_drop_veto_enabled,
         drop_veto_threshold=system.fi_drop_veto_threshold,
-        # perm var penalty
+        # perm 분산 penalty
         perm_var_penalty_very_low_data_enabled=system.fi_perm_var_penalty_very_low_data_enabled,
         perm_var_penalty_very_low_data_scale=system.fi_perm_var_penalty_very_low_data_scale,
-        # redundancy dampening
+        # redundancy 완화
         redundancy_dampening_enabled=system.fi_redundancy_dampening_enabled,
         redundancy_perm_floor=system.fi_redundancy_perm_floor,
         redundancy_drop_ceil=system.fi_redundancy_drop_ceil,
@@ -320,8 +320,8 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         null_alpha_normal=system.fi_null_alpha_normal,
         null_apply_to=system.fi_null_apply_to,
         null_pre_elite_ratio=system.fi_null_pre_elite_ratio,
-        # quantile policy
-        # bootstrap rescue
+        # quantile 정책
+        # bootstrap 구제
         bootstrap_min_freq_very_low_data=system.fi_bootstrap_min_freq_very_low_data,
         fi_bootstrap_rescue_global_floor=system.fi_bootstrap_rescue_global_floor,
         fi_bootstrap_rescue_very_low_data_only=system.fi_bootstrap_rescue_very_low_data_only,

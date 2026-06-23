@@ -30,7 +30,7 @@ def get_problem_spec():
     return {
         "name": "goldstein_price",
         "variables": real_variables + dummy_variables,
-        # No constraints for this benchmark (kept for uniform problem_spec schema).
+        # 이 benchmark에는 제약이 없다(일관된 problem_spec schema를 위해 유지).
         "constraint_defs": [],
     }
 

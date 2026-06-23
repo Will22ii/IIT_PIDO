@@ -8,17 +8,16 @@ from CAE_tool_interface.config import CAEConfig
 class OptimizerUserConfig:
     # Optimizer 반복 횟수(=새 점 탐색 횟수)
     n_samples: int = 30
-    # Standalone 입력: DOE 결과 CSV 경로 (옵션)
+    # standalone 입력: DOE 결과 CSV 경로 (옵션)
     doe_csv_path: str | None = None
-    # Standalone 입력: Explorer selected bounds JSON 경로 (옵션)
+    # standalone 입력: Explorer selected bounds JSON 경로 (옵션)
     explorer_bounds_path: str | None = None
-    # Debug/benchmark용 known optimum. 있으면 pair plot에 marker로 표시한다.
+    # 디버그/benchmark용 known optimum. 있으면 pair plot에 marker로 표시한다.
     known_optimum: Any | None = None
-    # Optional target objective. If provided, any Optimizer algorithm can stop
-    # early after reaching this quality target and observing no further best
-    # improvement. None means "use full budget".
+    # 선택적 목표 objective. 값이 있으면 모든 Optimizer 알고리즘은 이 품질 목표에 도달한 뒤
+    # 더 이상의 best 개선이 없을 때 조기 종료할 수 있다. None이면 전체 예산을 사용한다.
     goal: float | None = None
-    # Backward-compatible alias. Prefer `goal`.
+    # 하위 호환 alias. 새 설정에서는 `goal`을 우선 사용한다.
     goal_objective: float | None = None
 
 
@@ -46,16 +45,15 @@ class OptimizerSystemConfig:
     """
 
     # ------------------------------------------------------------------
-    # Compatibility/default BO controls
+    # 호환성/default BO 제어값
     # ------------------------------------------------------------------
-    # Removal candidates:
-    # - acq_type/kappa_start/kappa_end are still used by the generic acquisition
-    #   scaffold and Focus3 fallback/recovery. Remove only after Focus3 owns all
-    #   acquisition scheduling through focus3_* fields.
-    # - starts_per_iter/random_starts_ratio are legacy default-BO start controls.
-    #   Focus3 primarily uses plan-pool/refine starts, but fallback paths still
-    #   read these values.
-    # Default acquisition 정책: auto | LCB | EI. Focus3는 focus3_acq_type을 우선 사용한다.
+    # 제거 후보:
+    # - acq_type/kappa_start/kappa_end는 generic acquisition scaffold와
+    #   Focus3 fallback/recovery에서 아직 사용한다. Focus3 acquisition scheduling이
+    #   focus3_* 필드로 완전히 이관된 뒤에만 제거한다.
+    # - starts_per_iter/random_starts_ratio는 legacy default-BO start 제어값이다.
+    #   Focus3는 주로 plan-pool/refine start를 쓰지만 fallback 경로가 아직 읽는다.
+    # 기본 acquisition 정책: auto | LCB | EI. Focus3는 focus3_acq_type을 우선 사용한다.
     acq_type: str = "auto"
     # LCB kappa 스케줄 (legacy/default path 및 Focus3 recovery base에서 사용)
     kappa_start: float = 2.5
@@ -69,36 +67,45 @@ class OptimizerSystemConfig:
     source_mixture_enabled: bool = True
 
     # ------------------------------------------------------------------
-    # Service-facing algorithm selection
+    # 서비스 노출용 알고리즘 선택
     # ------------------------------------------------------------------
-    # focus_bo is the built-in default algorithm. Other algorithms can be
-    # registered as long as they consume the common Optimizer inputs and return
-    # the common Optimizer result contract.
+    # focus_bo는 built-in 기본 알고리즘이다. 다른 알고리즘도 공통 Optimizer 입력을 소비하고
+    # 공통 Optimizer 결과 contract를 반환하면 등록할 수 있다.
     algorithm_id: str = "focus_bo"
     algorithm_params: dict[str, object] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
-    # Focus BO orchestration
+    # Focus BO 오케스트레이션
     # ------------------------------------------------------------------
     # auto | focus0,focus1,focus3 | list/tuple. 어떤 focus를 실행할지는 focus_pipeline이 결정한다.
     focus_pipeline: str | list[str] | tuple[str, ...] = "auto"
     # auto planner profile:
-    # - standalone: user-provided/standalone evidence is treated conservatively;
-    #   external bounds may still be validated/refined by Focus2.
-    # - aion: AION Explorer bounds are trusted; Focus3 receives most budget
-    #   directly unless the objective archive is too sparse.
+    # - standalone: user-provided/standalone evidence를 보수적으로 다룬다.
+    #   external bounds도 Focus2에서 검증/보정될 수 있다.
+    # - aion: AION Explorer bounds를 신뢰한다. objective archive가 너무 희박하지 않으면
+    #   대부분의 예산을 바로 Focus3에 배정한다.
     focus_planner_profile: str = "standalone"
     # Focus budget은 고정 fraction보다 archive/bounds/budget 상태를 보고 동적으로 배분한다.
     focus_budget_adaptive_enabled: bool = True
     focus_budget_selected_bounds_focus3_fraction: float = 0.70
     focus_budget_generated_bounds_focus3_fraction: float = 0.50
     focus_budget_low_np_focus3_fraction: float = 0.35
-    # Used only when focus2 is explicitly included with external selected bounds.
-    # auto trusts external bounds and goes directly to Focus3 after any needed archive fill.
+    # external selected bounds와 함께 focus2가 명시적으로 포함된 경우에만 사용한다.
+    # auto는 external bounds를 신뢰하고 필요한 archive fill 이후 바로 Focus3로 간다.
     focus_budget_focus2_fraction_selected_bounds: float = 0.15
     focus_budget_focus2_fraction_generated_bounds: float = 0.25
     focus_budget_focus1_fraction_low_archive: float = 0.45
     focus_budget_focus1_fraction_normal: float = 0.30
+    # optimizer 후보를 평가할 때 selected_features에 없는 CAE 변수를 채우는 정책.
+    # - auto: optimizer 입력/archive CSV의 best feasible full row에서 omitted 변수를 freeze한다.
+    #   feasible row가 없으면 pre-constraint margin이 가장 좋은 row를 쓰고,
+    #   그것도 없으면 CAE baseline으로 fallback한다.
+    # - user_value: 모든 omitted 변수를 omitted_feature_freeze_value로 freeze한다.
+    #   필요하면 omitted_feature_freeze_values로 feature별 override를 적용한다.
+    # - baseline: CAE metadata baseline을 그대로 유지한다.
+    omitted_feature_freeze_mode: str = "auto"
+    omitted_feature_freeze_value: float = 0.0
+    omitted_feature_freeze_values: dict[str, float] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Focus0/Focus1: objective archive bootstrap/classification
@@ -109,9 +116,8 @@ class OptimizerSystemConfig:
     focus0_min_points: int = 3
     focus1_enabled: bool = True
     focus1_target_np_ratio: float = 10.0
-    # AION trusted-bounds mode only. If Explorer already produced bounds and
-    # objective archive density is at least this ratio, auto planner skips
-    # Focus1/2 and sends the remaining optimizer budget to Focus3.
+    # AION trusted-bounds mode 전용. Explorer가 이미 bounds를 만들었고 objective archive
+    # 밀도가 이 비율 이상이면 auto planner는 Focus1/2를 건너뛰고 남은 예산을 Focus3로 보낸다.
     focus_aion_focus1_target_np_ratio: float = 5.0
     focus1_max_budget_fraction: float = 0.50
     focus1_min_gp_points: int = 3
@@ -143,15 +149,14 @@ class OptimizerSystemConfig:
     focus0_filter_safety: float = 1.2
     focus0_filter_r_floor: float = 0.02
 
-    # Optional objective-goal early stop. Active only when user.goal or
-    # user.goal_objective is provided. This is useful for benchmark/production
-    # runs with an explicit target quality; normal runs without a target keep
-    # using the full budget.
+    # 선택적 objective goal 조기 종료. user.goal 또는 user.goal_objective가 있을 때만 활성화된다.
+    # 명확한 목표 품질이 있는 benchmark/production run에 유용하며,
+    # 목표가 없는 일반 run은 전체 예산을 계속 사용한다.
     goal_early_stop_enabled: bool = True
     goal_early_stop_patience: int = 5
-    # Built-in focus_bo only: record goal hits in earlier focus stages, but allow
-    # early stop only from this focus level onward. User algorithms can use
-    # GoalMonitor directly and keep the default "anytime" behavior.
+    # built-in focus_bo 전용: 앞선 focus 단계의 goal hit는 기록하되,
+    # 조기 종료는 이 focus level 이후에만 허용한다. 사용자 알고리즘은 GoalMonitor를
+    # 직접 사용해 기본 anytime 동작을 유지할 수 있다.
     goal_early_stop_min_focus: int = 2
 
     # GP X scaling 정책.
@@ -167,10 +172,10 @@ class OptimizerSystemConfig:
     # ------------------------------------------------------------------
     # Focus3: final selected-bounds BO
     # ------------------------------------------------------------------
-    # Audit label only. Runtime behavior is controlled by the focus3_* knobs.
+    # 감사용 label 전용. 실제 runtime 동작은 focus3_* knob가 제어한다.
     focus3_profile_id: str = "default"
     # Legacy source mixture 기본 확률 (topk / boundary / random).
-    # Removal candidate: focus3_budget_policy_enabled=True가 고정되면
+    # 제거 후보: focus3_budget_policy_enabled=True가 고정되면
     # focus3_*_source_* 확률만 남기고 이 fallback trio는 제거한다.
     # focus3_budget_policy_enabled=False일 때 fallback으로 사용한다.
     source_topk_prob: float = 0.60
@@ -199,12 +204,12 @@ class OptimizerSystemConfig:
     focus3_plan_pool_min_per_source: int = 1024
     focus3_plan_pool_per_dim: int = 80
     focus3_plan_pool_max_per_source: int = 4096
-    # Legacy hard override. Prefer min/per_dim/max policy above.
-    # Removal candidate once old configs no longer set this field.
+    # legacy hard override. 위의 min/per_dim/max 정책을 우선 사용한다.
+    # 오래된 config가 더 이상 이 필드를 설정하지 않으면 제거 후보가 된다.
     focus3_plan_pool_per_source: int | None = None
     focus3_refine_starts: int = 30
     # Focus3는 매번 multi-start L-BFGS-B를 돌리지 않는다. 기본은
-    # 2번 discrete GP scoring 후 1번 refine.
+    # 2번 discrete GP scoring 후 1번 refine이다.
     focus3_discrete_enabled: bool = True
     focus3_refine_every: int = 2
     # 최근 discrete/refine 성과를 보고 expensive L-BFGS-B refine 주기를 조절한다.
@@ -221,7 +226,7 @@ class OptimizerSystemConfig:
     # 그대로 사용한다. RB/GP처럼 budget이 큰 무제약 run에서 runtime을 크게 줄이기 위한 장치다.
     focus3_refine_source_filter_enabled: bool = True
     focus3_refine_allowed_sources: str = "topk,best_local,correlated_local,local_probe"
-    # Random start는 local refine에서 개선 기여가 낮게 관측되었다. 무제약 Focus3에서는
+    # random start는 local refine에서 개선 기여가 낮게 관측되었다. 무제약 Focus3에서는
     # random source의 best acquisition score가 topk/best_local보다 충분히 좋을 때만
     # L-BFGS-B refine start quota를 유지한다.
     focus3_no_constraint_random_refine_gate_enabled: bool = True
@@ -248,7 +253,7 @@ class OptimizerSystemConfig:
     focus3_source_performance_boundary_poor_improve_rate: float = 0.003
     focus3_source_performance_boundary_penalty_fraction: float = 0.85
     focus3_source_performance_boundary_min_quota_fraction: float = 0.01
-    # Source performance가 random/boundary를 둘 다 penalize하더라도, 현재 best가
+    # source performance가 random/boundary를 둘 다 penalize하더라도, 현재 best가
     # goal 근처까지 온 경우에는 productive한 source만 제한적으로 보호한다. 최근
     # no_dummy standalone 결과에서 Rosenbrock boundary 보호는 개선 없이 best-plan을
     # 많이 차지했으므로, standalone에서는 boundary 최근 개선률이 최소 기준을 넘을
@@ -280,9 +285,8 @@ class OptimizerSystemConfig:
     focus3_auto_mean_min_data_ratio: float = 20.0
     focus3_auto_mean_max_volume_ratio: float = 0.20
     focus3_auto_mean_best_local_required: bool = True
-    # AION Focus3 receives Explorer/Modeler-selected bounds rather than
-    # standalone Focus2 bounds. Treat those bounds as more trusted, so the
-    # policy can leave LCB and exploit with EI/MEAN earlier.
+    # AION Focus3는 standalone Focus2 bounds가 아니라 Explorer/Modeler-selected bounds를 받는다.
+    # 이 bounds를 더 신뢰하므로, 정책이 더 빨리 LCB를 벗어나 EI/MEAN으로 exploitation할 수 있다.
     focus3_aion_auto_ei_min_data_ratio: float = 5.0
     focus3_aion_auto_ei_max_volume_ratio: float = 0.30
     focus3_aion_auto_ei_max_mean_width_ratio: float = 0.85
@@ -297,9 +301,9 @@ class OptimizerSystemConfig:
     focus3_near_goal_exploitation_margin_ratio: float = 0.04
     focus3_near_goal_exploitation_acq: str = "MEAN"
     focus3_near_goal_exploitation_min_focus3_evals: int = 60
-    # AION trusted-bounds Focus3 uses the same near-goal idea, but keeps the
-    # threshold separate from standalone. Six-hump can have only ~40 optimizer
-    # iterations in AION, so the activation floor must be lower than standalone.
+    # AION trusted-bounds Focus3도 같은 near-goal 아이디어를 쓰지만,
+    # threshold는 standalone과 분리한다. AION의 Six-hump는 optimizer iteration이
+    # 약 40개뿐일 수 있으므로 activation floor를 standalone보다 낮게 둔다.
     focus3_aion_near_goal_exploitation_enabled: bool = True
     focus3_aion_near_goal_exploitation_margin_ratio: float = 0.15
     focus3_aion_near_goal_exploitation_acq: str = "MEAN"
@@ -339,10 +343,9 @@ class OptimizerSystemConfig:
     # boundary가 best_plan을 과도하게 이기지 못하게 한다. 낮은 acquisition score가 우수하다.
     focus3_no_constraint_boundary_score_penalty_enabled: bool = True
     focus3_no_constraint_boundary_score_penalty_ratio: float = 0.25
-    # Discrete Focus3 compares the best candidate from each source pool. If
-    # random gets the same pool size as structured sources, it can win simply
-    # through broad coverage. Keep random available, but smaller in unconstrained
-    # local search where topk/best_local have shown better improvement rates.
+    # discrete Focus3는 source pool별 best candidate를 비교한다. random이 구조적 source와
+    # 같은 pool size를 받으면 넓은 coverage만으로 이길 수 있다. random은 유지하되,
+    # topk/best_local 개선률이 더 좋았던 무제약 local search에서는 더 작게 둔다.
     focus3_no_constraint_random_pool_ratio: float = 0.35
     # RB처럼 narrow valley를 가진 문제에서는 top-k 전체보다 현재 best 주변을 더 촘촘히
     # 파는 source가 필요하다. best_local은 topk quota 일부를 가져와 좁은 sigma로 후보를 만든다.
@@ -364,9 +367,8 @@ class OptimizerSystemConfig:
     focus3_best_local_elite_std_scale: float = 0.75
     focus3_best_local_max_sigma: float = 0.08
     focus3_best_local_anchor_best_prob: float = 0.45
-    # AION-only best-local policy. Explorer-selected bounds are already a
-    # narrowed trust region, so spend more of no-constraint Focus3 around the
-    # current elite than standalone does.
+    # AION 전용 best-local 정책. Explorer-selected bounds는 이미 좁혀진 trust region이므로,
+    # 무제약 Focus3에서는 standalone보다 현재 elite 주변에 더 많은 예산을 쓴다.
     focus3_aion_best_local_enabled: bool = True
     focus3_aion_best_local_prob: float = 0.58
     focus3_aion_best_local_max_prob: float = 0.78
@@ -391,8 +393,8 @@ class OptimizerSystemConfig:
     focus3_correlated_local_near_goal_fraction_multiplier: float = 0.30
     focus3_correlated_local_near_goal_max_prob: float = 0.08
     focus3_correlated_local_min_prob: float = 0.03
-    # AION selected bounds are trusted but may be imperfect, so correlated local
-    # is enabled only in high dimension and with a smaller quota than standalone.
+    # AION selected bounds는 신뢰하지만 완벽하지 않을 수 있다. 따라서 correlated local은
+    # 고차원에서만 켜고, quota도 standalone보다 작게 둔다.
     focus3_aion_correlated_local_enabled: bool = True
     focus3_aion_correlated_local_min_dim: int = 5
     focus3_aion_correlated_local_min_data_ratio: float = 8.0
@@ -479,9 +481,9 @@ class OptimizerSystemConfig:
     focus3_local_probe_min_step_ratio: float = 0.0015
     focus3_local_probe_scales: str = "1.0,0.5,0.25,0.1,0.05,0.025,0.01,1.75,2.5"
     focus3_aion_local_probe_enabled: bool = False
-    # AION constrained Focus3 path uses a pre-constraint source selector rather
-    # than the no-constraint plan builder. Add a feasible local source around
-    # elite archive points and reduce inefficient constraint-boundary sampling.
+    # AION constrained Focus3 경로는 no-constraint plan builder가 아니라
+    # pre-constraint source selector를 사용한다. elite archive point 주변에
+    # feasible local source를 추가하고 비효율적인 constraint-boundary sampling을 줄인다.
     focus3_aion_constraint_feasible_local_enabled: bool = True
     focus3_aion_constraint_feasible_local_prob: float = 0.35
     focus3_aion_constraint_boundary_prob: float = 0.03
@@ -495,8 +497,8 @@ class OptimizerSystemConfig:
     # Focus3가 Focus2 generated bounds에 의존하는 경우, Focus3 reserve가 Focus2
     # 예산을 0으로 밀어내지 못하게 보장할 최소 Focus2 샘플 수.
     focus2_min_budget_with_focus3: int = 1
-    # Standalone selected-bounds validation path also keeps at least a tiny
-    # Focus2 budget when Focus2 is part of the auto plan.
+    # standalone selected-bounds validation 경로도 Focus2가 auto plan에 포함되면
+    # 최소한의 Focus2 예산을 유지한다.
     focus2_min_budget_selected_bounds_with_focus3: int = 1
     focus2_budget_fraction: float = 0.30
     focus2_kappa_min: float = 1.50
@@ -616,14 +618,14 @@ class OptimizerSystemConfig:
     focus2_scheduler_duplicate_penalty: float = 0.03
 
     # ------------------------------------------------------------------
-    # Shared source-pool and stagnation tuning
+    # 공통 source-pool 및 stagnation tuning
     # ------------------------------------------------------------------
-    # Removal candidates:
-    # - source_stagnation_* overlaps conceptually with focus3_recover_*.
-    #   Merge into focus3_recover_* after benchmark validation.
+    # 제거 후보:
+    # - source_stagnation_*는 개념적으로 focus3_recover_*와 겹친다.
+    #   benchmark 검증 후 focus3_recover_*로 병합한다.
     # - source_pool_size/source_topk_fraction/source_topk_perturb_sigma/
-    #   source_boundary_near_ratio are Focus3-specific in practice. Rename to
-    #   focus3_source_* and keep aliases only for one compatibility window.
+    #   source_boundary_near_ratio는 실제로 Focus3 전용에 가깝다. focus3_source_*로
+    #   이름을 바꾸고 alias는 한 번의 호환 기간 동안만 유지한다.
     # 정체(stagnation) 감지 시 탐색 강화. Focus3 adaptive source policy에서 사용한다.
     source_stagnation_window: int = 8
     source_stagnation_tol: float = 1e-8
@@ -647,7 +649,7 @@ class OptimizerSystemConfig:
     pre_final_feasible_attempts: int = 256
 
     # ------------------------------------------------------------------
-    # Archive / GP train-set policy
+    # Archive / GP train-set 정책
     # ------------------------------------------------------------------
     # DOE 데이터에서 초기 학습점으로 반드시 보존할 상위 개수
     init_from_doe_topk: int = 20
@@ -665,13 +667,13 @@ class OptimizerSystemConfig:
     gp_refit_every: int = 1
 
     # ------------------------------------------------------------------
-    # Input/objective and constraint policy
+    # 입력/objective 및 제약 정책
     # ------------------------------------------------------------------
     # DOE objective 컬럼명
     objective_col: str = "objective"
     # None이면 CAE metadata objective_sense 사용.
-    # Removal candidate: CAE metadata should remain the objective-sense source
-    # of truth. Keep this only while benchmarking opposite-sense experiments.
+    # 제거 후보: CAE metadata가 objective-sense의 단일 기준이어야 한다.
+    # 반대 sense 실험을 benchmark하는 동안에만 유지한다.
     objective_sense_override: str | None = None
     # 현재는 기본 OFF (추후 pre/post 제약 로직 확장용)
     enforce_pre_constraints: bool = False
@@ -687,7 +689,7 @@ class OptimizerSystemConfig:
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
-    # Output/debug
+    # 출력/debug
     # ------------------------------------------------------------------
     # 중복 판정 반올림 자릿수
     dedup_decimals: int = 12
@@ -846,14 +848,14 @@ class OptimizerConfig:
     system: OptimizerSystemConfig
     cae: CAEConfig
     # Sequential 연계용 metadata 경로들 (옵션).
-    # Removal candidate for service mode: prefer run_context + direct public/meta
-    # artifact paths. Keep while standalone/internal task resume still depends on it.
+    # service mode 제거 후보: run_context + 직접 public/meta artifact path를 우선한다.
+    # standalone/internal task resume이 아직 의존하는 동안만 유지한다.
     cae_metadata_path: str | None = None
     doe_metadata_path: str | None = None
     explorer_metadata_path: str | None = None
     modeler_metadata_path: str | None = None
     # 직접 경로 주입 (옵션).
-    # Duplicate with OptimizerUserConfig paths. Long-term policy should keep one
-    # user/input-layer path source and remove the duplicate config-level aliases.
+    # OptimizerUserConfig path와 중복된다. 장기적으로는 user/input-layer path source 하나만
+    # 유지하고 중복 config-level alias는 제거해야 한다.
     doe_csv_path: str | None = None
     explorer_bounds_path: str | None = None
