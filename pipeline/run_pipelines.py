@@ -48,7 +48,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
     "rosenbrock": ProblemCase(
         problem_name="rosenbrock",
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
-        optimizer_goal=1.2,
+        optimizer_goal= None, #1.2,
         n_samples=450,
         optimizer_n_samples=1050,
         repeats=10,
@@ -56,7 +56,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
     "cantilever_beam": ProblemCase(
         problem_name="cantilever_beam",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
-        optimizer_goal=114.66,
+        optimizer_goal= None, #114.66,
         n_samples=90,
         optimizer_n_samples=60,
         repeats=25,
@@ -64,7 +64,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
     "goldstein_price": ProblemCase(
         problem_name="goldstein_price",
         known_optimum={"x1": 0.0, "x2": -1.0},
-        optimizer_goal=3.6,
+        optimizer_goal= None, #3.6,
         n_samples=150,
         optimizer_n_samples=350,
         repeats=50,
@@ -75,15 +75,15 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": 0.0898, "x2": -0.7126},
             {"x1": -0.0898, "x2": 0.7126},
         ],
-        optimizer_goal=-0.86,
-        n_samples=45,
-        optimizer_n_samples=40,
+        optimizer_goal= None, #-0.86,
+        n_samples= 40,
+        optimizer_n_samples=15,
         repeats=25,
     ),
     "rosenbrock_nodummy": ProblemCase(
         problem_name="rosenbrock_nodummy",
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
-        optimizer_goal=1.2,
+        optimizer_goal= None, #1.2,
         n_samples=450,
         optimizer_n_samples=1500,
         repeats=10,
@@ -91,7 +91,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
     "cantilever_beam_nodummy": ProblemCase(
         problem_name="cantilever_beam_nodummy",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
-        optimizer_goal=114.66,
+        optimizer_goal= None, #114.66,
         n_samples=90,
         optimizer_n_samples=150,
         repeats=25,
@@ -99,7 +99,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
     "goldstein_price_nodummy": ProblemCase(
         problem_name="goldstein_price_nodummy",
         known_optimum={"x1": 0.0, "x2": -1.0},
-        optimizer_goal=3.6,
+        optimizer_goal= None, #3.6,
         n_samples=150,
         optimizer_n_samples=500,
         repeats=50,
@@ -110,7 +110,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": 0.0898, "x2": -0.7126},
             {"x1": -0.0898, "x2": 0.7126},
         ],
-        optimizer_goal=-0.86,
+        optimizer_goal= None, #-0.86,
         n_samples=40,
         optimizer_n_samples=40,
         repeats=25,
@@ -119,9 +119,9 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
 
 # 이번 실행에 사용할 문제만 활성화한다.
 ACTIVE_PROBLEM_CASES: list[str] = [
-    "cantilever_beam",
-    "rosenbrock",
-    "goldstein_price",
+    # "cantilever_beam",
+    # "rosenbrock",
+    # "goldstein_price",
     "six_hump_camel",
     # "cantilever_beam_nodummy",
     # "rosenbrock_nodummy",
@@ -141,7 +141,8 @@ BATCH_TASKS: dict[str, bool] = {
 }
 BATCH_DEFAULT_OPTIMIZER_N_SAMPLES = 80
 BATCH_USE_ADDITIONAL = True
-BATCH_USE_HPO = True
+BATCH_USE_HPO = False
+BATCH_MODELER_MODEL_NAME = "gp"
 BATCH_USE_PRIMARY_SELECTION = True
 BATCH_USE_TIMESTAMP = True
 BATCH_DEBUG_LEVEL = "on"
@@ -313,7 +314,7 @@ def _build_pipeline_config(
 
     modeler_cfg = ModelerConfig(
         user=ModelerUserConfig(
-            model_name="xgb",
+            model_name=str(BATCH_MODELER_MODEL_NAME),
             use_hpo=bool(use_hpo),
             use_secondary_selection=False,
         ),

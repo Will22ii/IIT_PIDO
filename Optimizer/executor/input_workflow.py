@@ -700,6 +700,17 @@ def resolve_optimizer_inputs(
                 keep.append(objective_col)
             if "objective_raw" in doe_df.columns and "objective_raw" not in keep:
                 keep.append("objective_raw")
+            for status_col in (
+                "success",
+                "feasible",
+                "feasible_pre",
+                "feasible_post",
+                "constraint_margin",
+                "margin_pre",
+                "margin_post",
+            ):
+                if status_col in doe_df.columns and status_col not in keep:
+                    keep.append(status_col)
             doe_df = doe_df[keep].copy()
             doe_df = doe_df.dropna(subset=selected_features).reset_index(drop=True)
             if doe_df.empty:

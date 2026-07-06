@@ -11,6 +11,7 @@ import optuna
 def format_hpo_result(
     *,
     best_trial: optuna.Trial,
+    model_name: str,
     base_random_seed: int,
     n_trials: int,
     lambda_std: float,
@@ -23,7 +24,7 @@ def format_hpo_result(
     valid_per_fold = best_trial.user_attrs.get("valid_rmse_per_fold")
 
     return {
-        "model": "XGBoost",
+        "model": str(model_name),
         "best_params": best_trial.params,
         "metric": "robust_rmse",
         "score": best_trial.value,

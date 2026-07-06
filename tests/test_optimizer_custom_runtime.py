@@ -38,11 +38,17 @@ ALGORITHM_ID = "{ALGORITHM_ID}"
 
 class Algorithm:
     def run(self, *, runtime, config, resolved):
-        runtime.evaluate(
-            {{"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0}},
-            source_mode=ALGORITHM_ID,
-            segment="custom",
-        )
+        points = runtime.algorithm_params.get("points") or [
+            {{"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0}}
+        ]
+        for point in points:
+            if runtime.should_stop:
+                break
+            runtime.evaluate(
+                point,
+                source_mode=ALGORITHM_ID,
+                segment="custom",
+            )
         return runtime.build_result(algorithm_id=ALGORITHM_ID)
 '''
 
@@ -62,7 +68,7 @@ def _remove_test_custom_algorithm() -> None:
     discover_custom_optimizer_algorithms(force=True)
 
 
-def _build_temp_run_context(tmpdir: str) -> RunContext:
+def _build_temp_run_context(tmpdir: str, constraint_defs: list[dict] | None = None) -> RunContext:
     user_config_path = os.path.join(tmpdir, "user_config_snapshot.json")
     with open(user_config_path, "w", encoding="utf-8") as f:
         json.dump({"problem": "rosenbrock_nodummy", "task": "OPT"}, f)
@@ -83,7 +89,7 @@ def _build_temp_run_context(tmpdir: str) -> RunContext:
                 "problem": "rosenbrock_nodummy",
                 "inputs": {
                     "variables": variables,
-                    "constraint_defs": [],
+                    "constraint_defs": list(constraint_defs or []),
                     "user_config": "../user_config_snapshot.json",
                 },
                 "resolved_params": {
@@ -254,6 +260,133 @@ class OptimizerCustomRuntimeTest(unittest.TestCase):
             self.assertEqual(algorithm_payload["algorithm_id"], ALGORITHM_ID)
             self.assertEqual(algorithm_payload["algorithm_kind"], "runtime")
             self.assertEqual(algorithm_payload["schema"]["optimizer_output_schema"], "optimizer_points_v2")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_custom_runtime_pre_equality_penalty_keeps_public_objective_raw(self) -> None:
+        tmpdir = tempfile.mkdtemp(prefix="optimizer_custom_runtime_preeq_")
+        try:
+            run_context = _build_temp_run_context(
+                tmpdir,
+                constraint_defs=[
+                    {
+                        "id": "x1_eq_zero",
+                        "scope": "pre",
+                        "type": "==",
+                        "expr": "x1",
+                        "limit": 0.0,
+                        "eps": 0.0,
+                    }
+                ],
+            )
+            config = OptimizerConfig(
+                user=OptimizerUserConfig(n_samples=2),
+                system=OptimizerSystemConfig(
+                    algorithm_id=ALGORITHM_ID,
+                    debug_level="off",
+                    pre_eq_penalty_lambda=100.0,
+                    algorithm_params={
+                        "points": [
+                            {"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
+                            {"x1": 0.0, "x2": 0.0, "x3": 0.0, "x4": 0.0, "x5": 0.0},
+                        ],
+                    },
+                ),
+                cae=CAEConfig(
+                    user=CAEUserConfig(
+                        problem_name="rosenbrock_nodummy",
+                        seed=123,
+                        objective_sense="min",
+                    ),
+                    system=CAESystemConfig(use_timestamp=False),
+                ),
+            )
+
+            out = run_optimizer(config=config, run_context=run_context)
+
+            self.assertAlmostEqual(out["best_point"]["x1"], 0.0)
+            self.assertAlmostEqual(out["best_objective"], 5.0)
+            self.assertAlmostEqual(out["best_point_raw"]["x1"], 1.0)
+            self.assertAlmostEqual(out["best_objective_raw"], 1.0)
+
+            best_point_path = os.path.join(
+                tmpdir,
+                "OPT",
+                "artifacts",
+                "public",
+                "best_point.json",
+            )
+            with open(best_point_path, "r", encoding="utf-8") as f:
+                best_payload = json.load(f)
+
+            self.assertAlmostEqual(best_payload["best_objective"], 5.0)
+            self.assertAlmostEqual(best_payload["best_objective_raw"], 1.0)
+            self.assertTrue(best_payload["final_pre_best_feasible"])
+            self.assertEqual(best_payload["final_pre_best_status"], "ok")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_custom_runtime_marks_no_final_pre_feasible_best_as_exploratory(self) -> None:
+        tmpdir = tempfile.mkdtemp(prefix="optimizer_custom_runtime_no_preeq_")
+        try:
+            run_context = _build_temp_run_context(
+                tmpdir,
+                constraint_defs=[
+                    {
+                        "id": "x1_eq_zero",
+                        "scope": "pre",
+                        "type": "==",
+                        "expr": "x1",
+                        "limit": 0.0,
+                        "eps": 0.0,
+                    }
+                ],
+            )
+            config = OptimizerConfig(
+                user=OptimizerUserConfig(n_samples=1),
+                system=OptimizerSystemConfig(
+                    algorithm_id=ALGORITHM_ID,
+                    debug_level="off",
+                    pre_eq_penalty_lambda=100.0,
+                    algorithm_params={
+                        "points": [
+                            {"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
+                        ],
+                    },
+                ),
+                cae=CAEConfig(
+                    user=CAEUserConfig(
+                        problem_name="rosenbrock_nodummy",
+                        seed=123,
+                        objective_sense="min",
+                    ),
+                    system=CAESystemConfig(use_timestamp=False),
+                ),
+            )
+
+            run_optimizer(config=config, run_context=run_context)
+
+            best_point_path = os.path.join(
+                tmpdir,
+                "OPT",
+                "artifacts",
+                "public",
+                "best_point.json",
+            )
+            with open(best_point_path, "r", encoding="utf-8") as f:
+                best_payload = json.load(f)
+
+            self.assertEqual(best_payload["result_status"], "exploratory_best")
+            self.assertEqual(best_payload["optimizer_status_basis"], "no_hard_pre_feasible_best")
+            self.assertEqual(best_payload["best_point"], {})
+            self.assertFalse(best_payload["final_pre_best_feasible"])
+            self.assertEqual(best_payload["final_pre_best_status"], "no_pre_feasible_candidate")
+            self.assertAlmostEqual(best_payload["best_effort_point"]["x1"], 1.0)
+            self.assertAlmostEqual(best_payload["best_effort_objective"], 1.0)
+            self.assertGreater(best_payload["best_effort_pre_violation_score"], 0.0)
+            self.assertAlmostEqual(best_payload["least_violation_point"]["x1"], 1.0)
+            self.assertAlmostEqual(best_payload["raw_best_infeasible_point"]["x1"], 1.0)
+            self.assertGreaterEqual(len(best_payload["best_effort_pareto_points"]), 1)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

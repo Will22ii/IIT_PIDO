@@ -19,6 +19,9 @@ from utils.objective_sense import canonical_objective_for_result, objective_from
 from Optimizer.executor.goal_monitor import GoalMonitor
 from Optimizer.executor.history_core import update_goal_and_build_evaluation_row
 from Optimizer.executor.input_workflow import ResolvedOptimizerInputs
+from Optimizer.executor.final_best_policy import final_pre_candidate_payload, select_final_pre_feasible_best
+from Optimizer.executor.pre_equality_penalty import PreEqualityPenaltyPolicy, objective_penalty_scale
+from Optimizer.executor.pre_constraint_policy import PreInequalityPolicy
 from Optimizer.executor.result_core import build_optimizer_algorithm_result
 
 
@@ -84,6 +87,20 @@ class OptimizerRuntime:
         self._var_names = list(self._mapper.var_names)
         self._x_base = self._mapper.x_base.copy()
         self._selected_idx = self._mapper.selected_idx.copy()
+        self.pre_inequality_policy = PreInequalityPolicy(
+            constraint_defs=resolved.constraint_defs,
+            var_names=self._var_names,
+            to_full_x=self._mapper.to_full,
+        )
+        self.pre_equality_policy = PreEqualityPenaltyPolicy(
+            constraint_defs=resolved.constraint_defs,
+            var_names=self._var_names,
+            to_full_x=self._mapper.to_full,
+            enabled=bool(getattr(config.system, "pre_eq_penalty_enabled", True)),
+            penalty_lambda=float(getattr(config.system, "pre_eq_penalty_lambda", 10.0)),
+            violation_cap=float(getattr(config.system, "pre_eq_penalty_violation_cap", 1e6)),
+        )
+        self._pre_eq_scale_floor = float(max(float(getattr(config.system, "pre_eq_penalty_objective_scale_floor", 1.0)), 1e-12))
         goal = getattr(config.user, "goal", None)
         if goal is None:
             goal = getattr(config.user, "goal_objective", None)
@@ -98,9 +115,12 @@ class OptimizerRuntime:
         self._initial_archive_count = 0
         self._best_x: np.ndarray | None = None
         self._best_y = objective_initial_best(self.objective_sense)
+        self._best_y_raw_at_effective = objective_initial_best(self.objective_sense)
+        self._best_x_raw: np.ndarray | None = None
+        self._best_y_raw = objective_initial_best(self.objective_sense)
         self._load_initial_archive()
         self.goal_monitor.initialize(
-            best_objective=float(objective_from_minimize(self._best_y, self.raw_objective_sense))
+            best_objective=float(objective_from_minimize(self._best_y_raw, self.raw_objective_sense))
         )
 
     def _to_array(self, x: np.ndarray | list[float] | tuple[float, ...] | dict[str, float]) -> np.ndarray:
@@ -118,10 +138,57 @@ class OptimizerRuntime:
             constraint_defs=self.resolved.constraint_defs,
         )
 
+    @property
+    def pre_inequality_active(self) -> bool:
+        return bool(self.pre_inequality_policy.active)
+
+    def check_pre_inequality(
+        self,
+        x: np.ndarray | list[float] | tuple[float, ...] | dict[str, float],
+    ) -> tuple[dict, bool, float]:
+        x_arr = self._to_array(x)
+        return self.pre_inequality_policy.evaluate(x_arr)
+
+    def is_pre_inequality_feasible(
+        self,
+        x: np.ndarray | list[float] | tuple[float, ...] | dict[str, float],
+    ) -> bool:
+        _payload, feasible, _margin = self.check_pre_inequality(x)
+        return bool(feasible)
+
+    def filter_pre_inequality_candidates(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        X_arr = np.asarray(X, dtype=float)
+        if X_arr.ndim == 1:
+            X_arr = X_arr.reshape(1, -1)
+        mask, _payloads, margins = self.pre_inequality_policy.evaluate_batch(X_arr)
+        return X_arr[mask], mask, margins
+
+    @property
+    def pre_equality_penalty_active(self) -> bool:
+        return bool(self.pre_equality_policy.active)
+
+    def _pre_eq_objective_scale(self, extra_values: list[float] | None = None) -> float:
+        values = [
+            float(row.get("objective_raw", row.get("objective", float("nan"))))
+            for row in self._archive_rows
+            if isinstance(row, dict)
+        ]
+        if extra_values:
+            values.extend(float(v) for v in extra_values)
+        return objective_penalty_scale(values, floor=self._pre_eq_scale_floor)
+
     def _load_initial_archive(self) -> None:
         df = self.resolved.doe_df
         objective_col = str(self.config.system.objective_col)
         if not isinstance(df, pd.DataFrame) or df.empty or objective_col not in df.columns:
+            return
+        filter_result = self.pre_inequality_policy.filter_warm_start_df(
+            df,
+            selected_features=self.selected_features,
+            warn_prefix="[OptimizerRuntime][WarmStart]",
+        )
+        df = filter_result.df
+        if df.empty:
             return
         rows: list[dict[str, Any]] = []
         for _, row in df.iterrows():
@@ -133,6 +200,11 @@ class OptimizerRuntime:
                     if "objective_raw" in row and np.isfinite(float(row["objective_raw"]))
                     else float(objective_from_minimize(y, self.raw_objective_sense))
                 )
+                y_internal_raw = float(canonical_objective_for_result(
+                    raw_objective=float(y_raw),
+                    objective_sense=self.raw_objective_sense,
+                    success=True,
+                ))
             except Exception:
                 continue
             if x.shape[0] != len(self.selected_features) or not np.isfinite(y):
@@ -143,8 +215,11 @@ class OptimizerRuntime:
                     "iter": 0,
                     "segment": "initial_archive",
                     "source_mode": "input_csv",
-                    "objective": float(y),
+                    "objective": float(y_raw),
                     "objective_raw": float(y_raw),
+                    "objective_effective": float(objective_from_minimize(y, self.raw_objective_sense)),
+                    "objective_internal": float(y_internal_raw),
+                    "objective_effective_internal": float(y),
                     "success": True,
                     "feasible": True,
                     "pre_feasible": True,
@@ -152,14 +227,34 @@ class OptimizerRuntime:
                 }
             )
             rows.append(item)
+        if rows and self.pre_equality_policy.active:
+            scale = self._pre_eq_objective_scale([float(r["objective_internal"]) for r in rows])
+            for item in rows:
+                x_item = np.asarray([float(item[f]) for f in self.selected_features], dtype=float)
+                pre_eq_result = self.pre_equality_policy.penalty(x_item, objective_scale=scale)
+                y_eff_internal = float(item["objective_effective_internal"] + pre_eq_result.penalty)
+                item["objective_effective_internal"] = float(y_eff_internal)
+                item["objective_effective"] = float(objective_from_minimize(y_eff_internal, self.raw_objective_sense))
+                item["pre_eq_penalty"] = float(pre_eq_result.penalty)
+                item["pre_eq_feasible"] = bool(pre_eq_result.feasible)
+                item["pre_eq_violation_norm"] = float(pre_eq_result.violation_norm)
+                item["pre_eq_worst_id"] = str(pre_eq_result.worst_id)
         self._archive_rows.extend(rows)
         self._initial_archive_count = len(rows)
         if rows:
-            y_arr = np.asarray([float(r["objective"]) for r in rows], dtype=float)
-            best_idx = objective_best_index(y_arr, self.objective_sense)
-            self._best_y = float(y_arr[best_idx])
+            y_eff_arr = np.asarray([float(r["objective_effective_internal"]) for r in rows], dtype=float)
+            best_idx = objective_best_index(y_eff_arr, self.objective_sense)
+            self._best_y = float(y_eff_arr[best_idx])
+            self._best_y_raw_at_effective = float(rows[best_idx]["objective_internal"])
             self._best_x = np.asarray(
                 [float(rows[best_idx][f]) for f in self.selected_features],
+                dtype=float,
+            )
+            y_raw_arr = np.asarray([float(r["objective_internal"]) for r in rows], dtype=float)
+            raw_best_idx = objective_best_index(y_raw_arr, self.objective_sense)
+            self._best_y_raw = float(y_raw_arr[raw_best_idx])
+            self._best_x_raw = np.asarray(
+                [float(rows[raw_best_idx][f]) for f in self.selected_features],
                 dtype=float,
             )
 
@@ -247,7 +342,16 @@ class OptimizerRuntime:
             objective_sense=self.raw_objective_sense,
             success=True,
         )
+        pre_eq_scale = self._pre_eq_objective_scale([float(y_effective)])
+        pre_eq_result = self.pre_equality_policy.penalty(x_arr, objective_scale=pre_eq_scale)
+        y_effective = float(y_effective + float(pre_eq_result.penalty))
+        y_raw_internal = float(canonical_objective_for_result(
+            raw_objective=float(y_raw),
+            objective_sense=self.raw_objective_sense,
+            success=True,
+        ))
         previous_best = float(self._best_y)
+        previous_best_raw = float(self._best_y_raw)
         best_update = update_best_point(
             best_x=self._best_x if self._best_x is not None else x_arr,
             best_y=previous_best,
@@ -259,20 +363,32 @@ class OptimizerRuntime:
         if improved:
             self._best_y = float(best_update.best_y)
             self._best_x = best_update.best_x.copy()
+            self._best_y_raw_at_effective = float(y_raw_internal)
+        raw_best_update = update_best_point(
+            best_x=self._best_x_raw if self._best_x_raw is not None else x_arr,
+            best_y=previous_best_raw,
+            x_next=x_arr,
+            y_next=float(y_raw_internal),
+            objective_sense=self.objective_sense,
+        )
+        raw_improved = bool(raw_best_update.improved or self._best_x_raw is None)
+        if raw_improved:
+            self._best_y_raw = float(raw_best_update.best_y)
+            self._best_x_raw = raw_best_update.best_x.copy()
 
         iteration = int(len(self._history_rows) + 1)
         row, goal_state = update_goal_and_build_evaluation_row(
             goal_monitor=self.goal_monitor,
             iteration=iteration,
-            best_objective=float(objective_from_minimize(self._best_y, self.raw_objective_sense)),
-            improved=bool(improved),
+            best_objective=float(objective_from_minimize(self._best_y_raw, self.raw_objective_sense)),
+            improved=bool(raw_improved),
             segment=str(segment),
             opt_focus_level=-1,
             source_mode=str(source_mode),
             x_values={f: float(v) for f, v in zip(self.selected_features, x_arr)},
             objective_raw=float(y_raw),
             objective_effective=float(objective_from_minimize(y_effective, self.raw_objective_sense)),
-            previous_best_objective_raw=float(objective_from_minimize(previous_best, self.raw_objective_sense)),
+            previous_best_objective_raw=float(objective_from_minimize(previous_best_raw, self.raw_objective_sense)),
             objective_sense=self.raw_objective_sense,
             pre_feasible=bool(pre_feasible),
             pre_margin=float(pre_margin),
@@ -285,8 +401,16 @@ class OptimizerRuntime:
             )
             row["pre_constraint_worst_id"] = str(worst_id)
             row["pre_constraint_worst_margin"] = float(constraints[worst_id].get("margin", pre_margin))
+        row.update(
+            self.pre_equality_policy.debug_fields(
+                x_arr,
+                objective_scale=pre_eq_scale,
+            )
+        )
         if extra:
             row.update(dict(extra))
+        row["objective_internal"] = float(y_raw_internal)
+        row["objective_effective_internal"] = float(y_effective)
         self._history_rows.append(row)
         self._archive_rows.append(dict(row))
 
@@ -323,20 +447,107 @@ class OptimizerRuntime:
     def build_result(self, *, algorithm_id: str | None = None) -> OptimizerAlgorithmResult:
         history_df = self.history_df
         archive_df = self.archive_df
-        best_point = self.best_point
-        best_objective = float(self._best_y)
-        best_objective_raw = float(objective_from_minimize(best_objective, self.raw_objective_sense))
+        X_rows: list[list[float]] = []
+        y_rows: list[float] = []
+        for row in self._archive_rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                X_rows.append([float(row[f]) for f in self.selected_features])
+                if "objective_internal" in row:
+                    y_rows.append(float(row["objective_internal"]))
+                else:
+                    raw = float(row.get("objective_raw", row.get("objective", float("nan"))))
+                    y_rows.append(float(canonical_objective_for_result(
+                        raw_objective=raw,
+                        objective_sense=self.raw_objective_sense,
+                        success=True,
+                    )))
+            except Exception:
+                if X_rows and len(X_rows) > len(y_rows):
+                    X_rows.pop()
+                continue
+        X_archive = (
+            np.asarray(X_rows, dtype=float)
+            if X_rows
+            else np.empty((0, len(self.selected_features)), dtype=float)
+        )
+        y_archive = np.asarray(y_rows, dtype=float) if y_rows else np.empty((0,), dtype=float)
+        final_pre_best = select_final_pre_feasible_best(
+            X=X_archive,
+            y_raw_internal=y_archive,
+            objective_sense=self.objective_sense,
+            pre_inequality_policy=self.pre_inequality_policy,
+            pre_equality_policy=self.pre_equality_policy,
+            pre_eq_objective_scale=self._pre_eq_objective_scale(),
+        )
+        if final_pre_best.found:
+            best_point = self.point_dict(final_pre_best.x)
+            best_objective = float(objective_from_minimize(
+                final_pre_best.y_raw_internal,
+                self.raw_objective_sense,
+            ))
+        else:
+            best_point = {}
+            best_objective = float("nan")
+        best_effort_payload = final_pre_candidate_payload(
+            final_pre_best.best_effort,
+            feature_names=self.selected_features,
+            objective_from_internal=lambda value: float(objective_from_minimize(value, self.raw_objective_sense)),
+        )
+        least_violation_payload = final_pre_candidate_payload(
+            final_pre_best.least_violation,
+            feature_names=self.selected_features,
+            objective_from_internal=lambda value: float(objective_from_minimize(value, self.raw_objective_sense)),
+        )
+        raw_best_infeasible_payload = final_pre_candidate_payload(
+            final_pre_best.raw_best_infeasible,
+            feature_names=self.selected_features,
+            objective_from_internal=lambda value: float(objective_from_minimize(value, self.raw_objective_sense)),
+        )
+        pareto_payload = [
+            final_pre_candidate_payload(
+                candidate,
+                feature_names=self.selected_features,
+                objective_from_internal=lambda value: float(objective_from_minimize(value, self.raw_objective_sense)),
+            )
+            for candidate in final_pre_best.pareto_candidates
+        ]
+        best_point_raw = (
+            self.point_dict(self._best_x_raw)
+            if self._best_x_raw is not None
+            else dict(best_point)
+        )
+        best_objective_raw = float(objective_from_minimize(self._best_y_raw, self.raw_objective_sense))
+        best_objective_effective = float(objective_from_minimize(self._best_y, self.raw_objective_sense))
         return build_optimizer_algorithm_result(
             history_df=history_df,
             archive_df=archive_df,
             best_point=best_point,
-            best_objective=best_objective_raw,
+            best_objective=best_objective,
+            best_point_raw=best_point_raw,
             best_objective_raw=best_objective_raw,
+            best_effort_point=dict(best_effort_payload.get("point", {})),
+            best_effort_objective=float(best_effort_payload.get("objective", float("nan"))),
+            best_effort_pre_violation_score=float(best_effort_payload.get("pre_violation_score", float("nan"))),
+            best_effort_score=float(best_effort_payload.get("best_effort_score", float("nan"))),
+            least_violation_point=dict(least_violation_payload.get("point", {})),
+            least_violation_objective=float(least_violation_payload.get("objective", float("nan"))),
+            least_violation_pre_violation_score=float(least_violation_payload.get("pre_violation_score", float("nan"))),
+            raw_best_infeasible_point=dict(raw_best_infeasible_payload.get("point", {})),
+            raw_best_infeasible_objective=float(raw_best_infeasible_payload.get("objective", float("nan"))),
+            raw_best_infeasible_pre_violation_score=float(raw_best_infeasible_payload.get("pre_violation_score", float("nan"))),
+            best_effort_pareto_points=[p for p in pareto_payload if p],
             algorithm_id=str(algorithm_id or self.algorithm_id),
             engine="optimizer_runtime",
             feasibility_status="runtime_pre_constraints_only",
             initial_archive_count=int(self._initial_archive_count),
             final_train_count=int(len(archive_df)),
             goal_summary=self.goal_monitor.summary(),
+            algorithm_summary_extra={
+                "best_objective_selected_raw": float(best_objective),
+                "best_objective_effective": float(best_objective_effective),
+                **final_pre_best.summary(),
+            },
             focus_pipeline_summary={"mode": "custom_algorithm", "stages": []},
         )

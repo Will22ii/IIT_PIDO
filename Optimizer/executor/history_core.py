@@ -48,7 +48,7 @@ def build_evaluation_history_row(
         "pre_violation": float(max(0.0, -margin)) if math.isfinite(margin) else 0.0,
         "pre_constraint_worst_id": "",
         "pre_constraint_worst_margin": margin,
-        "objective": float(objective_effective),
+        "objective": float(objective_raw),
         "objective_raw": float(objective_raw),
         "objective_effective": float(objective_effective),
         "raw_improved": bool(improved),

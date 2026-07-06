@@ -15,6 +15,7 @@ from Modeler.executor.data_workflow import (
 from Modeler.executor.hpo_workflow import (
     resolve_hpo_params,
 )
+from Modeler.executor.hpo_runner import supported_hpo_models
 from Modeler.executor.input_workflow import (
     ensure_modeler_run_context,
     resolve_modeler_input,
@@ -98,7 +99,7 @@ def run_modeler(
     keep_debug = debug_level == "on"
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    if model_name != "xgb" and use_hpo:
+    if str(model_name).strip().lower() not in supported_hpo_models() and use_hpo:
         use_hpo = False
 
     data_policy = prepare_modeler_data_policy(

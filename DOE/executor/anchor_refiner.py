@@ -299,6 +299,7 @@ class AcquisitionOptimizer:
         kappa: float = 2.0,
         xi: float = 0.01,
         pre_feasible_fn: Callable[[np.ndarray], bool] | None = None,
+        soft_penalty_fn: Callable[[np.ndarray], float] | None = None,
         post_feasible_prob_fn: Callable[[np.ndarray], float] | None = None,
         post_penalty_lambda: float = 0.0,
         pre_hard_penalty: float = 1e9,
@@ -357,6 +358,13 @@ class AcquisitionOptimizer:
                         p_post = 1.0
                     p_post = float(np.clip(p_post, 0.0, 1.0))
                     base = float(base) + float(post_penalty_lambda) * (1.0 - p_post)
+                if soft_penalty_fn is not None:
+                    try:
+                        soft_penalty = float(soft_penalty_fn(x_arr))
+                    except Exception:
+                        soft_penalty = 0.0
+                    if np.isfinite(soft_penalty) and soft_penalty > 0.0:
+                        base = float(base) + float(soft_penalty)
                 return float(base)
 
             try:

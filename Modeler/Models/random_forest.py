@@ -15,6 +15,8 @@ class RandomForestModel(BaseModel):
         *,
         n_estimators: int = 300,
         max_depth: Optional[int] = None,
+        min_samples_leaf: int = 1,
+        max_features: str | float | None = "sqrt",
         random_state: Optional[int] = None,
         n_jobs: int = -1,
     ):
@@ -23,6 +25,8 @@ class RandomForestModel(BaseModel):
         self.params = dict(
             n_estimators=n_estimators,
             max_depth=max_depth,
+            min_samples_leaf=min_samples_leaf,
+            max_features=max_features,
             random_state=random_state,
             n_jobs=n_jobs,
         )

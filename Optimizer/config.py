@@ -677,6 +677,11 @@ class OptimizerSystemConfig:
     objective_sense_override: str | None = None
     # 현재는 기본 OFF (추후 pre/post 제약 로직 확장용)
     enforce_pre_constraints: bool = False
+    # pre equality는 hard retry가 아니라 effective objective penalty로 수렴을 유도한다.
+    pre_eq_penalty_enabled: bool = True
+    pre_eq_penalty_lambda: float = 10.0
+    pre_eq_penalty_objective_scale_floor: float = 1.0
+    pre_eq_penalty_violation_cap: float = 1e6
     # post feasibility penalty 사용 여부
     post_constraint_enabled: bool = True
     # score/acquisition 패널티 강도
@@ -708,6 +713,10 @@ OPTIMIZER_COMMON_SYSTEM_FIELDS: set[str] = {
     "objective_col",
     "objective_sense_override",
     "enforce_pre_constraints",
+    "pre_eq_penalty_enabled",
+    "pre_eq_penalty_lambda",
+    "pre_eq_penalty_objective_scale_floor",
+    "pre_eq_penalty_violation_cap",
     "post_constraint_enabled",
     "post_penalty_lambda",
     "post_p_feasible_min",

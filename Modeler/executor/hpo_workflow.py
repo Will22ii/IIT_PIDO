@@ -3,7 +3,13 @@ from typing import Any
 
 import numpy as np
 
-from Modeler.executor.hpo_runner import HPORunner
+from Modeler.executor.hpo_runner import (
+    HPORunner,
+    DEFAULT_GP_SEARCH_SPACE,
+    DEFAULT_RF_SEARCH_SPACE,
+    DEFAULT_XGB_SEARCH_SPACE,
+    supported_hpo_models,
+)
 
 
 # -------------------------------------------------
@@ -35,6 +41,22 @@ DEFAULT_LOW_DATA_XGB_SEARCH_SPACE: dict[str, tuple[float, float]] = {
     "colsample_bytree": (0.6, 0.9),
     "gamma": (0.05, 0.3),
 }
+DEFAULT_LOW_DATA_RF_SEARCH_SPACE: dict[str, Any] = {
+    "n_estimators": (150, 500),
+    "max_depth": [None, 3, 5, 8],
+    "min_samples_leaf": (1, 6),
+    "max_features": ["sqrt", "log2", None],
+}
+DEFAULT_LOW_DATA_GP_SEARCH_SPACE: dict[str, Any] = {
+    "kernel_id": ["matern_1.5", "matern_2.5", "rbf"],
+    "alpha": (1e-10, 1e-5),
+    "length_scale_bounds_id": ["additional_doe", "tight", "default"],
+    "use_white_kernel": [False],
+    "noise_level": (1e-8, 1e-4),
+    "noise_level_bounds_id": ["low_noise", "default"],
+    "n_restarts_optimizer": [0, 1, 2],
+    "normalize_y": [True],
+}
 
 
 @dataclass
@@ -64,10 +86,10 @@ def _safe_float(value: Any, *, default: float, min_value: float | None = None) -
     return out
 
 
-def _canonical_search_space(space: Any) -> dict[str, list[float]] | None:
+def _canonical_search_space(space: Any) -> dict[str, Any] | None:
     if not isinstance(space, dict):
         return None
-    out: dict[str, list[float]] = {}
+    out: dict[str, Any] = {}
     for key, value in space.items():
         if isinstance(value, (list, tuple)) and len(value) == 2:
             low_raw, high_raw = value
@@ -75,11 +97,19 @@ def _canonical_search_space(space: Any) -> dict[str, list[float]] | None:
             low_raw = value.get("low")
             high_raw = value.get("high")
         else:
+            if isinstance(value, (list, tuple)) and len(value) > 0:
+                out[str(key)] = list(value)
+            else:
+                out[str(key)] = value
             continue
         try:
             low = float(low_raw)
             high = float(high_raw)
         except (TypeError, ValueError):
+            if isinstance(value, (list, tuple)):
+                out[str(key)] = list(value)
+            elif isinstance(value, dict) and isinstance(value.get("choices"), (list, tuple)):
+                out[str(key)] = list(value.get("choices"))
             continue
         if not np.isfinite(low) or not np.isfinite(high):
             continue
@@ -89,12 +119,40 @@ def _canonical_search_space(space: Any) -> dict[str, list[float]] | None:
     return out if out else None
 
 
+def _model_hpo_section(*, hpo_config: dict | None, model_name: str) -> dict[str, Any]:
+    cfg = hpo_config or {}
+    key = str(model_name or "").strip().lower()
+    models_cfg = cfg.get("models")
+    if isinstance(models_cfg, dict) and isinstance(models_cfg.get(key), dict):
+        merged = dict(cfg)
+        merged.update(models_cfg.get(key) or {})
+        return merged
+    by_model_cfg = cfg.get(key)
+    if isinstance(by_model_cfg, dict):
+        merged = dict(cfg)
+        merged.update(by_model_cfg)
+        return merged
+    return dict(cfg)
+
+
+def _default_search_space_for_model(*, model_name: str, low_data: bool) -> dict[str, Any] | None:
+    key = str(model_name or "").strip().lower()
+    if key == "xgb":
+        return dict(DEFAULT_LOW_DATA_XGB_SEARCH_SPACE if bool(low_data) else DEFAULT_XGB_SEARCH_SPACE)
+    if key == "rf":
+        return dict(DEFAULT_LOW_DATA_RF_SEARCH_SPACE if bool(low_data) else DEFAULT_RF_SEARCH_SPACE)
+    if key == "gp":
+        return dict(DEFAULT_LOW_DATA_GP_SEARCH_SPACE if bool(low_data) else DEFAULT_GP_SEARCH_SPACE)
+    return None
+
+
 def _resolve_hpo_policy(
     *,
+    model_name: str,
     hpo_config: dict | None,
     low_data: bool,
-) -> tuple[str, int, float, dict[str, list[float]] | None]:
-    cfg = hpo_config or {}
+) -> tuple[str, int, float, dict[str, Any] | None]:
+    cfg = _model_hpo_section(hpo_config=hpo_config, model_name=model_name)
     constrained_enabled = bool(cfg.get("low_data_constrained_enabled", True))
     if bool(low_data) and constrained_enabled:
         mode = "low_data_constrained"
@@ -110,7 +168,9 @@ def _resolve_hpo_policy(
         )
         search_space = _canonical_search_space(cfg.get("low_data_search_space"))
         if search_space is None:
-            search_space = _canonical_search_space(DEFAULT_LOW_DATA_XGB_SEARCH_SPACE)
+            search_space = _canonical_search_space(
+                _default_search_space_for_model(model_name=model_name, low_data=True)
+            )
     else:
         mode = "default"
         n_trials = _safe_int(
@@ -124,17 +184,22 @@ def _resolve_hpo_policy(
             min_value=0.0,
         )
         search_space = _canonical_search_space(cfg.get("search_space"))
+        if search_space is None:
+            search_space = _canonical_search_space(
+                _default_search_space_for_model(model_name=model_name, low_data=False)
+            )
     return mode, int(n_trials), float(lambda_std), search_space
 
 
 def _resolve_pruning_policy(
     *,
+    model_name: str,
     hpo_config: dict | None,
     low_data: bool,
     n_trials: int,
     kfold_splits: int,
 ) -> dict[str, int | float | bool]:
-    cfg = hpo_config or {}
+    cfg = _model_hpo_section(hpo_config=hpo_config, model_name=model_name)
 
     if bool(low_data):
         enabled = bool(cfg.get("low_data_pruning_enabled", False))
@@ -185,8 +250,8 @@ def _resolve_pruning_policy(
     }
 
 
-def _resolve_sampler_policy(*, hpo_config: dict | None) -> str:
-    cfg = hpo_config or {}
+def _resolve_sampler_policy(*, hpo_config: dict | None, model_name: str = "") -> str:
+    cfg = _model_hpo_section(hpo_config=hpo_config, model_name=model_name)
     raw = str(cfg.get("sampler", "tpe")).strip().lower()
     if raw in {"tpe", "cmaes"}:
         return raw
@@ -215,27 +280,34 @@ def resolve_hpo_params(
     hpo_n_trials_effective: int | None = None
     hpo_lambda_std_effective: float | None = None
 
-    if model_name == "xgb":
+    model_key = str(model_name or "").strip().lower()
+    if model_key in supported_hpo_models():
         (
             hpo_mode,
             hpo_n_trials_effective,
             hpo_lambda_std_effective,
             hpo_search_space,
         ) = _resolve_hpo_policy(
+            model_name=model_key,
             hpo_config=hpo_config,
             low_data=bool(low_data),
         )
         hpo_pruning_policy = _resolve_pruning_policy(
+            model_name=model_key,
             hpo_config=hpo_config,
             low_data=bool(low_data),
             n_trials=int(hpo_n_trials_effective),
             kfold_splits=int(kfold_splits),
         )
-        hpo_sampler_name = _resolve_sampler_policy(hpo_config=hpo_config)
+        hpo_sampler_name = _resolve_sampler_policy(hpo_config=hpo_config, model_name=model_key)
     else:
         hpo_search_space = None
         hpo_pruning_policy = {"enabled": False}
         hpo_sampler_name = "tpe"
+
+    if bool(use_hpo) and model_key not in supported_hpo_models():
+        hpo_mode = "disabled_unsupported_model"
+        use_hpo = False
 
     if use_hpo:
         hpo_runner = HPORunner(
@@ -255,7 +327,8 @@ def resolve_hpo_params(
             f"sampler={hpo_sampler_name}"
         )
 
-        hpo_result = hpo_runner.run_xgb(
+        hpo_result = hpo_runner.run_model(
+            model_name=model_key,
             X=X,
             y=y,
             base_random_seed=base_seed,
@@ -267,8 +340,8 @@ def resolve_hpo_params(
         hpo_params_used = True
         print("- HPO executed")
 
-    elif model_name != "xgb":
-        hpo_mode = "disabled_non_xgb"
+    elif model_key not in supported_hpo_models():
+        hpo_mode = "disabled_unsupported_model"
 
     return HPOResolveResult(
         best_params=best_params,

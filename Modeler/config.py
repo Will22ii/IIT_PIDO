@@ -20,7 +20,7 @@ class ModelerSystemConfig:
     # -----------------------------
     # 1) HPO / 교차검증
     # -----------------------------
-    # HPO 상세 설정(옵션, model_name=xgb일 때만 사용)
+    # HPO 상세 설정(옵션, model_name별 registry가 있는 경우 사용)
     # - n_trials: 일반 모드 trial 수(기본 20)
     # - lambda_std: robust objective 가중치(기본 0.5)
     # - reuse_if_same_config: signature 일치 시 캐시 재사용 여부(기본 True)
@@ -30,6 +30,7 @@ class ModelerSystemConfig:
     # - sampler: HPO sampler 선택(tpe|cmaes, 기본 tpe)
     # - search_space: 일반 모드 탐색공간 override(dict)
     # - low_data_search_space: 저데이터 모드 탐색공간 override(dict)
+    # - models: 모델별 override 예: {"gp": {"search_space": {...}}}
     hpo_config: dict | None = None
     # 기본 CV split/repeat
     kfold_splits: int = 5

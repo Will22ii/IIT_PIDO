@@ -54,6 +54,12 @@ Contract:
 - `x` may be a vector in `runtime.feature_names` order or a
   `{feature: value}` dict.
 - Keep candidates inside `runtime.lb` / `runtime.ub` or `runtime.bounds`.
+- For pre-inequality constraints, use `runtime.filter_pre_inequality_candidates(X)`
+  or `runtime.is_pre_inequality_feasible(x)` before calling `runtime.evaluate(x)`.
+- Pre-equality constraints are handled by the runtime as an effective-objective
+  penalty. `RuntimeEvaluation.objective` and `runtime.best_objective` are
+  search/internal values; saved `objective`, `objective_raw`, `best_objective`,
+  and `best_objective_raw` stay raw CAE objective values.
 - Check `runtime.should_stop` after each evaluation.
 - Return `runtime.build_result(algorithm_id=ALGORITHM_ID)`.
 - Read custom knobs from `runtime.algorithm_params` or
@@ -90,6 +96,11 @@ Useful Runtime API:
 - `runtime.max_evaluations`
 - `runtime.remaining_budget`
 - `runtime.sample_uniform(n)`
+- `runtime.pre_inequality_active`
+- `runtime.pre_equality_penalty_active`
+- `runtime.is_pre_inequality_feasible(x)`
+- `runtime.check_pre_inequality(x)`
+- `runtime.filter_pre_inequality_candidates(X)`
 - `runtime.evaluate(x, source_mode="...", segment="custom")`
 - `runtime.evaluate_batch(X, source_mode="...", segment="custom")`
 - `runtime.archive_df`

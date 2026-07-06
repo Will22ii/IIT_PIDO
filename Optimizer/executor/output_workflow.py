@@ -87,6 +87,13 @@ def _optimizer_result_status(
         optimized = bool(evaluated)
         status_basis = "runtime_evaluated" if optimized else "runtime_no_evaluations"
 
+    final_pre_required = bool(_algorithm_summary_value(bo_result, "final_pre_best_required", False))
+    final_pre_feasible = bool(_algorithm_summary_value(bo_result, "final_pre_best_feasible", True))
+    final_pre_status = str(_algorithm_summary_value(bo_result, "final_pre_best_status", "") or "")
+    if final_pre_required and not final_pre_feasible:
+        optimized = False
+        status_basis = "no_hard_pre_feasible_best"
+
     if optimized:
         result_status = "optimized"
         converged = True
@@ -105,6 +112,9 @@ def _optimizer_result_status(
         "optimizer_algorithm_id": str(algorithm_id),
         "optimizer_algorithm_engine": str(algorithm_engine),
         "optimizer_status_basis": str(status_basis),
+        "final_pre_best_required": bool(final_pre_required),
+        "final_pre_best_feasible": bool(final_pre_feasible),
+        "final_pre_best_status": str(final_pre_status),
     }
 
 
@@ -230,6 +240,17 @@ def save_optimizer_outputs(
                 "best_objective": float(bo_result.best_objective),
                 "best_point_raw": bo_result.best_point_raw,
                 "best_objective_raw": float(bo_result.best_objective_raw),
+                "best_effort_point": bo_result.best_effort_point,
+                "best_effort_objective": float(bo_result.best_effort_objective),
+                "best_effort_pre_violation_score": float(bo_result.best_effort_pre_violation_score),
+                "best_effort_score": float(bo_result.best_effort_score),
+                "least_violation_point": bo_result.least_violation_point,
+                "least_violation_objective": float(bo_result.least_violation_objective),
+                "least_violation_pre_violation_score": float(bo_result.least_violation_pre_violation_score),
+                "raw_best_infeasible_point": bo_result.raw_best_infeasible_point,
+                "raw_best_infeasible_objective": float(bo_result.raw_best_infeasible_objective),
+                "raw_best_infeasible_pre_violation_score": float(bo_result.raw_best_infeasible_pre_violation_score),
+                "best_effort_pareto_points": list(bo_result.best_effort_pareto_points),
                 "objective_sense": str(resolved.objective_sense),
                 "algorithm_id": result_status_info.get("optimizer_algorithm_id", ""),
                 "algorithm_engine": result_status_info.get("optimizer_algorithm_engine", ""),
@@ -466,6 +487,17 @@ def save_optimizer_outputs(
         "best_objective_raw": float(bo_result.best_objective_raw),
         "best_point": dict(bo_result.best_point),
         "best_point_raw": dict(bo_result.best_point_raw),
+        "best_effort_point": dict(bo_result.best_effort_point),
+        "best_effort_objective": float(bo_result.best_effort_objective),
+        "best_effort_pre_violation_score": float(bo_result.best_effort_pre_violation_score),
+        "best_effort_score": float(bo_result.best_effort_score),
+        "least_violation_point": dict(bo_result.least_violation_point),
+        "least_violation_objective": float(bo_result.least_violation_objective),
+        "least_violation_pre_violation_score": float(bo_result.least_violation_pre_violation_score),
+        "raw_best_infeasible_point": dict(bo_result.raw_best_infeasible_point),
+        "raw_best_infeasible_objective": float(bo_result.raw_best_infeasible_objective),
+        "raw_best_infeasible_pre_violation_score": float(bo_result.raw_best_infeasible_pre_violation_score),
+        "best_effort_pareto_points": list(bo_result.best_effort_pareto_points),
         "post_penalty_active": bool(bo_result.post_penalty_active),
         "post_penalty_lambda": float(bo_result.post_penalty_lambda),
         "post_score_mode": str(bo_result.post_score_mode),

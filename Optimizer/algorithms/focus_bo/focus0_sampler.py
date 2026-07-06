@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+from typing import Callable
 
 import numpy as np
 
 from DOE.doe_algorithm.lhs import latin_hypercube_sampling
-from DOE.executor.constraint_filter import clamp_ratio, evaluate_constraints_batch
+from DOE.executor.constraint_filter import clamp_ratio
 from Optimizer.config import OptimizerSystemConfig
+from Optimizer.executor.pre_constraint_policy import PreInequalityPolicy
 from utils.boundary_sampling import sample_boundary_corners_random
 
 
@@ -61,6 +63,7 @@ def _filter_pre_constraints(
     var_names: list[str],
     constraint_defs: list[dict],
     has_pre_constraints: bool,
+    to_full_x: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> tuple[np.ndarray, list[dict], np.ndarray, np.ndarray]:
     X = np.asarray(X, dtype=float)
     if X.size == 0:
@@ -74,16 +77,12 @@ def _filter_pre_constraints(
         mask = np.ones((X.shape[0],), dtype=bool)
         return X, [{} for _ in range(X.shape[0])], np.full((X.shape[0],), float("inf")), mask
 
-    mask, payloads, margins = evaluate_constraints_batch(
-        X=X,
-        var_names=var_names,
+    policy = PreInequalityPolicy(
         constraint_defs=constraint_defs,
-        scope="pre",
+        var_names=var_names,
+        to_full_x=to_full_x,
     )
-    idx = np.where(mask)[0]
-    if idx.size == 0:
-        return np.empty((0, X.shape[1]), dtype=float), [], np.empty((0,), dtype=float), mask
-    return X[idx], [payloads[i] for i in idx], margins[idx], mask
+    return policy.filter_matrix(X)
 
 
 def _extract_pre_constraint_ids(constraints_payloads: list[dict]) -> list[str]:
@@ -296,6 +295,7 @@ def _sample_initial_corners(
     var_names: list[str],
     constraint_defs: list[dict],
     has_pre_constraints: bool,
+    to_full_x: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> tuple[np.ndarray, list[dict], np.ndarray, dict[str, int]]:
     n_target = int(max(n_target, 0))
     p = len(bounds)
@@ -347,6 +347,7 @@ def _sample_initial_corners(
             var_names=var_names,
             constraint_defs=constraint_defs,
             has_pre_constraints=True,
+            to_full_x=to_full_x,
         )
         generated += int(X_try.shape[0])
         feasible += int(np.sum(mask))
@@ -373,6 +374,7 @@ def build_focus0_initial_doe_points(
     constraint_defs: list[dict],
     rng: np.random.Generator,
     system: OptimizerSystemConfig,
+    to_full_x: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> Focus0SampleResult:
     n_total = int(max(n_samples, 0))
     p = len(bounds)
@@ -405,6 +407,7 @@ def build_focus0_initial_doe_points(
         var_names=var_names,
         constraint_defs=list(constraint_defs or []),
         has_pre_constraints=has_pre_constraints,
+        to_full_x=to_full_x,
     )
     n_corner_ok = int(X_corner.shape[0])
     n_regular_target = max(n_total - n_corner_ok, 0)
@@ -440,6 +443,7 @@ def build_focus0_initial_doe_points(
                     var_names=var_names,
                     constraint_defs=list(constraint_defs or []),
                     has_pre_constraints=True,
+                    to_full_x=to_full_x,
                 )
                 regular_generated += int(X_probe.shape[0])
                 regular_feasible += int(np.sum(mask))

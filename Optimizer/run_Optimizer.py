@@ -108,6 +108,10 @@ def run_optimizer(
     print(f"- Best objective: {bo_result.best_objective:.6f}")
     print(f"- Best objective (raw): {bo_result.best_objective_raw:.6f}")
     print(f"- Best point: {bo_result.best_point}")
+    if not bo_result.best_point and bo_result.best_effort_point:
+        print(f"- Best-effort objective: {bo_result.best_effort_objective:.6f}")
+        print(f"- Best-effort pre-violation: {bo_result.best_effort_pre_violation_score:.6g}")
+        print(f"- Best-effort point: {bo_result.best_effort_point}")
     if bo_result.post_penalty_active:
         print(
             f"- Post-constraint penalty active: mode={bo_result.post_score_mode}, "
@@ -125,6 +129,17 @@ def run_optimizer(
         "best_objective_raw": float(bo_result.best_objective_raw),
         "best_point": dict(bo_result.best_point),
         "best_point_raw": dict(bo_result.best_point_raw),
+        "best_effort_point": dict(bo_result.best_effort_point),
+        "best_effort_objective": float(bo_result.best_effort_objective),
+        "best_effort_pre_violation_score": float(bo_result.best_effort_pre_violation_score),
+        "best_effort_score": float(bo_result.best_effort_score),
+        "least_violation_point": dict(bo_result.least_violation_point),
+        "least_violation_objective": float(bo_result.least_violation_objective),
+        "least_violation_pre_violation_score": float(bo_result.least_violation_pre_violation_score),
+        "raw_best_infeasible_point": dict(bo_result.raw_best_infeasible_point),
+        "raw_best_infeasible_objective": float(bo_result.raw_best_infeasible_objective),
+        "raw_best_infeasible_pre_violation_score": float(bo_result.raw_best_infeasible_pre_violation_score),
+        "best_effort_pareto_points": list(bo_result.best_effort_pareto_points),
         "n_iterations": int(bo_result.n_iterations),
     }
 

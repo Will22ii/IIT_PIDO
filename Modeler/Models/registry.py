@@ -1,11 +1,13 @@
 from typing import Dict, Type
 
 from Modeler.Models.base import BaseModel
+from Modeler.Models.gaussian_process import GaussianProcessModel
 from Modeler.Models.random_forest import RandomForestModel
 from Modeler.Models.xgboost import XGBoostModel
 
 
 MODEL_REGISTRY: Dict[str, Type[BaseModel]] = {
+    "gp": GaussianProcessModel,
     "xgb": XGBoostModel,
     "rf": RandomForestModel,
 }

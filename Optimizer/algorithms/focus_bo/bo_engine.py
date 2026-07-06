@@ -9,7 +9,6 @@ import pandas as pd
 
 from DOE.doe_algorithm.lhs import latin_hypercube_sampling
 from DOE.executor.anchor_refiner import AcquisitionOptimizer, fit_gp_with_fallback
-from DOE.executor.constraint_filter import evaluate_constraints_batch
 from utils.boundary_sampling import sample_boundary_corners_random
 from Optimizer.algorithms.result import OptimizerAlgorithmResult
 from Optimizer.config import OptimizerSystemConfig
@@ -18,8 +17,6 @@ from Optimizer.algorithms.focus_bo.focus_pipeline import FocusPipelinePlan, buil
 from Optimizer.executor.archive_core import append_archive_point, update_raw_and_effective_best
 from Optimizer.executor.evaluation_core import (
     CaeObjectiveEvaluator,
-    build_pre_constraint_debug_fields,
-    evaluate_pre_constraints_raw,
     objective_best_index,
     objective_from_minimize,
     objective_initial_best,
@@ -28,6 +25,9 @@ from Optimizer.executor.evaluation_core import (
 )
 from Optimizer.executor.goal_monitor import GoalMonitor
 from Optimizer.executor.history_core import update_goal_and_build_evaluation_row
+from Optimizer.executor.final_best_policy import final_pre_candidate_payload, select_final_pre_feasible_best
+from Optimizer.executor.pre_equality_penalty import PreEqualityPenaltyPolicy, objective_penalty_scale
+from Optimizer.executor.pre_constraint_policy import PreInequalityPolicy
 from Optimizer.executor.result_core import build_optimizer_algorithm_result
 
 
@@ -172,21 +172,6 @@ def _gp_x_scaling_debug(
     ub: np.ndarray,
 ) -> dict[str, object]:
     return _gp_x_scaling_policy(system=system, lb=lb, ub=ub)
-
-
-def _pre_constraint_debug_fields(
-    *,
-    x: np.ndarray,
-    var_names: list[str],
-    constraint_defs: list[dict],
-    enforce_pre_constraints: bool,
-) -> dict[str, object]:
-    return build_pre_constraint_debug_fields(
-        x=x,
-        var_names=var_names,
-        constraint_defs=constraint_defs,
-        enforce_pre_constraints=enforce_pre_constraints,
-    )
 
 
 def _resolve_acq_policy(
@@ -2418,6 +2403,7 @@ def _select_focus3_dedup_fallback(
     min_rms_distance: float,
     post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
     post_penalty_lambda: float,
+    soft_penalty_fn: Callable[[np.ndarray], float] | None,
     random_attempts: int,
 ) -> tuple[np.ndarray | None, float, str]:
     min_dist = float(max(float(min_rms_distance), 0.0))
@@ -2433,6 +2419,7 @@ def _select_focus3_dedup_fallback(
             xi=xi,
             post_feasible_prob_fn=post_feasible_prob_fn,
             post_penalty_lambda=post_penalty_lambda,
+            soft_penalty_fn=soft_penalty_fn,
         )
         score_arr = np.asarray(scores, dtype=float).reshape(-1)
         score_arr = np.where(np.isfinite(score_arr), score_arr, float("inf"))
@@ -2739,8 +2726,14 @@ def _build_focus2_regions_from_archive(
     var_names: list[str],
     constraint_defs: list[dict],
     enforce_pre_constraints: bool,
+    to_full_x: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> dict[str, object]:
     p = int(lb.shape[0])
+    pre_policy = PreInequalityPolicy(
+        constraint_defs=constraint_defs if enforce_pre_constraints else [],
+        var_names=var_names,
+        to_full_x=to_full_x,
+    )
     min_archive = int(max(int(getattr(system, "focus2_region_min_archive_points", 5)), 1))
     min_good_candidates = int(max(int(getattr(system, "focus2_region_min_good_candidates", 10)), 1))
     min_volume = float(np.clip(float(getattr(system, "focus2_region_min_volume_ratio", 0.05)), 0.0, 1.0))
@@ -2771,13 +2764,8 @@ def _build_focus2_regions_from_archive(
         rng=rng,
         n_divisions=max(pool_size, 1),
     )
-    if enforce_pre_constraints and constraint_defs:
-        mask, _payloads, _margins = evaluate_constraints_batch(
-            X=pool,
-            var_names=var_names,
-            constraint_defs=constraint_defs,
-            scope="pre",
-        )
+    if pre_policy.active:
+        mask, _payloads, _margins = pre_policy.evaluate_batch(pool)
         pool = pool[mask]
     if pool.shape[0] == 0:
         return {
@@ -3397,10 +3385,12 @@ def _build_focus2_lite_batch(
     xi: float,
     post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
     post_penalty_lambda: float,
+    soft_penalty_fn: Callable[[np.ndarray], float] | None,
     max_candidates: int,
     var_names: list[str],
     constraint_defs: list[dict],
     enforce_pre_constraints: bool,
+    to_full_x: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     active = [s for s in region_states if str(s.get("status", "active")) == "active"]
     if not active:
@@ -3498,6 +3488,7 @@ def _build_focus2_lite_batch(
             var_names=var_names,
             constraint_defs=constraint_defs,
             enforce_pre_constraints=enforce_pre_constraints,
+            to_full_x=to_full_x,
         )
         pre_raw_count += int(pool_constraint_stats.get("raw_count", 0))
         pre_feasible_count += int(pool_constraint_stats.get("feasible_count", 0))
@@ -3520,6 +3511,7 @@ def _build_focus2_lite_batch(
             xi=float(xi),
             post_feasible_prob_fn=post_feasible_prob_fn,
             post_penalty_lambda=post_penalty_lambda,
+            soft_penalty_fn=soft_penalty_fn,
         )
         finite = np.where(np.isfinite(scores))[0]
         if finite.size == 0:
@@ -4769,41 +4761,53 @@ def _acquisition_scores_for_pool(
     xi: float,
     post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
     post_penalty_lambda: float,
+    soft_penalty_fn: Callable[[np.ndarray], float] | None = None,
 ) -> np.ndarray:
     if pool.ndim != 2 or pool.shape[0] == 0:
         return np.empty((0,), dtype=float)
+
     if model is None:
-        return np.zeros((pool.shape[0],), dtype=float)
+        scores = np.zeros((pool.shape[0],), dtype=float)
+    else:
+        acq = str(acq_type or "LCB").strip().upper()
+        try:
+            mu, sigma = model.predict(pool, return_std=True)
+            mu = np.asarray(mu, dtype=float).reshape(-1)
+            sigma = np.asarray(sigma, dtype=float).reshape(-1)
+            if acq == "EI":
+                safe_sigma = np.maximum(sigma, 1e-9)
+                if objective_sense == "max":
+                    imp = mu - float(y_best) - float(xi)
+                else:
+                    imp = float(y_best) - mu - float(xi)
+                z = imp / safe_sigma
+                from scipy.stats import norm
 
-    acq = str(acq_type or "LCB").strip().upper()
-    try:
-        mu, sigma = model.predict(pool, return_std=True)
-        mu = np.asarray(mu, dtype=float).reshape(-1)
-        sigma = np.asarray(sigma, dtype=float).reshape(-1)
-        if acq == "EI":
-            safe_sigma = np.maximum(sigma, 1e-9)
-            if objective_sense == "max":
-                imp = mu - float(y_best) - float(xi)
+                scores = -(imp * norm.cdf(z) + safe_sigma * norm.pdf(z))
+            elif acq == "MEAN":
+                if objective_sense == "max":
+                    scores = -mu
+                else:
+                    scores = mu
             else:
-                imp = float(y_best) - mu - float(xi)
-            z = imp / safe_sigma
-            from scipy.stats import norm
+                if objective_sense == "max":
+                    scores = -(mu + float(kappa) * sigma)
+                else:
+                    scores = mu - float(kappa) * sigma
+            scores = np.asarray(scores, dtype=float).reshape(-1)
+            scores[~np.isfinite(scores)] = float("inf")
+        except Exception:
+            scores = np.full((pool.shape[0],), float("inf"), dtype=float)
 
-            scores = -(imp * norm.cdf(z) + safe_sigma * norm.pdf(z))
-        elif acq == "MEAN":
-            if objective_sense == "max":
-                scores = -mu
-            else:
-                scores = mu
-        else:
-            if objective_sense == "max":
-                scores = -(mu + float(kappa) * sigma)
-            else:
-                scores = mu - float(kappa) * sigma
-        scores = np.asarray(scores, dtype=float).reshape(-1)
-        scores[~np.isfinite(scores)] = float("inf")
-    except Exception:
-        scores = np.full((pool.shape[0],), float("inf"), dtype=float)
+    if soft_penalty_fn is not None:
+        penalties: list[float] = []
+        for row in pool:
+            try:
+                penalty = float(soft_penalty_fn(np.asarray(row, dtype=float).reshape(-1)))
+            except Exception:
+                penalty = 0.0
+            penalties.append(float(penalty) if np.isfinite(penalty) and penalty > 0.0 else 0.0)
+        scores = scores + np.asarray(penalties, dtype=float)
 
     if post_feasible_prob_fn is not None and post_penalty_lambda > 0.0:
         penalties: list[float] = []
@@ -5105,8 +5109,14 @@ def _build_focus0_candidate_pool(
     var_names: list[str],
     constraint_defs: list[dict],
     enforce_pre_constraints: bool,
+    to_full_x: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> np.ndarray:
     p = int(lb.shape[0])
+    pre_policy = PreInequalityPolicy(
+        constraint_defs=constraint_defs if enforce_pre_constraints else [],
+        var_names=var_names,
+        to_full_x=to_full_x,
+    )
     n_target = int(max(n, 0))
     if n_target <= 0:
         return np.empty((0, p), dtype=float)
@@ -5119,7 +5129,7 @@ def _build_focus0_candidate_pool(
     parts: list[np.ndarray] = []
     if n_boundary > 0:
         n_boundary_pool = n_boundary
-        if enforce_pre_constraints and constraint_defs:
+        if pre_policy.active:
             n_boundary_pool = int(max(n_boundary_pool, math.ceil(n_boundary * float(getattr(system, "focus0_probe_multiplier", 2.0)))))
         X_boundary = sample_boundary_corners_random(
             bounds,
@@ -5131,7 +5141,7 @@ def _build_focus0_candidate_pool(
 
     if n_regular > 0:
         n_regular_pool = n_regular
-        if enforce_pre_constraints and constraint_defs:
+        if pre_policy.active:
             n_regular_pool = int(max(n_regular_pool, math.ceil(n_regular * float(getattr(system, "focus0_probe_multiplier", 2.0)))))
         X_regular = latin_hypercube_sampling(
             n_samples=n_regular_pool,
@@ -5146,13 +5156,8 @@ def _build_focus0_candidate_pool(
         return pool
     pool = np.unique(np.asarray(pool, dtype=float), axis=0)
 
-    if enforce_pre_constraints and constraint_defs:
-        mask, _payloads, _margins = evaluate_constraints_batch(
-            X=pool,
-            var_names=var_names,
-            constraint_defs=constraint_defs,
-            scope="pre",
-        )
+    if pre_policy.active:
+        mask, _payloads, _margins = pre_policy.evaluate_batch(pool)
         pool = pool[mask]
     if pool.shape[0] > n_target:
         idx = rng.choice(pool.shape[0], size=n_target, replace=False)
@@ -5167,67 +5172,14 @@ def _filter_pool_by_pre_constraints(
     var_names: list[str],
     constraint_defs: list[dict],
     enforce_pre_constraints: bool,
+    to_full_x: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> tuple[np.ndarray, list[str], np.ndarray, dict[str, object]]:
-    pool = np.asarray(pool, dtype=float)
-    n_raw = int(pool.shape[0]) if pool.ndim == 2 else 0
-    if pool.ndim != 2 or n_raw == 0:
-        return (
-            np.empty((0, 0), dtype=float) if pool.ndim != 2 else pool,
-            [],
-            np.empty((0,), dtype=float),
-            {
-                "active": bool(enforce_pre_constraints and constraint_defs),
-                "raw_count": 0,
-                "feasible_count": 0,
-                "feasible_ratio": float("nan"),
-                "margin_min": float("nan"),
-                "margin_median": float("nan"),
-                "margin_max": float("nan"),
-            },
-        )
-    label_list = list(labels or ["unknown"] * n_raw)
-    if len(label_list) < n_raw:
-        label_list.extend(["unknown"] * (n_raw - len(label_list)))
-    label_list = label_list[:n_raw]
-    if not enforce_pre_constraints or not constraint_defs:
-        return (
-            pool,
-            label_list,
-            np.full((n_raw,), float("inf"), dtype=float),
-            {
-                "active": False,
-                "raw_count": n_raw,
-                "feasible_count": n_raw,
-                "feasible_ratio": 1.0,
-                "margin_min": float("inf"),
-                "margin_median": float("inf"),
-                "margin_max": float("inf"),
-            },
-        )
-
-    mask, _payloads, margins = evaluate_constraints_batch(
-        X=pool,
+    policy = PreInequalityPolicy(
+        constraint_defs=constraint_defs if enforce_pre_constraints else [],
         var_names=var_names,
-        constraint_defs=constraint_defs,
-        scope="pre",
+        to_full_x=to_full_x,
     )
-    keep_idx = np.where(mask)[0]
-    finite_margins = margins[np.isfinite(margins)]
-    stats = {
-        "active": True,
-        "raw_count": n_raw,
-        "feasible_count": int(keep_idx.size),
-        "feasible_ratio": float(keep_idx.size) / float(max(n_raw, 1)),
-        "margin_min": float(np.min(finite_margins)) if finite_margins.size else float("nan"),
-        "margin_median": float(np.median(finite_margins)) if finite_margins.size else float("nan"),
-        "margin_max": float(np.max(finite_margins)) if finite_margins.size else float("nan"),
-    }
-    return (
-        pool[keep_idx],
-        [label_list[int(i)] for i in keep_idx.tolist()],
-        margins[keep_idx],
-        stats,
-    )
+    return policy.filter_pool(pool, labels)
 
 
 def _select_constraint_boundary_index(
@@ -5263,6 +5215,7 @@ def _build_focus0_batch(
     constraint_defs: list[dict],
     enforce_pre_constraints: bool,
     decimals: int,
+    to_full_x: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     n_batch = int(max(n, 0))
     p = int(lb.shape[0])
@@ -5276,6 +5229,7 @@ def _build_focus0_batch(
         constraint_defs=constraint_defs if enforce_pre_constraints else [],
         rng=rng,
         system=system,
+        to_full_x=to_full_x,
     )
     pool = _dedup_pool_against_reference(
         pool=result.X,
@@ -5368,6 +5322,7 @@ def _build_focus1_batch(
     constraint_defs: list[dict],
     enforce_pre_constraints: bool,
     decimals: int,
+    to_full_x: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     n_batch = int(max(n, 0))
     p = int(lb.shape[0])
@@ -5395,6 +5350,7 @@ def _build_focus1_batch(
         var_names=var_names,
         constraint_defs=constraint_defs,
         enforce_pre_constraints=False,
+        to_full_x=to_full_x,
     )
     pool, _pool_labels, pool_margins, constraint_stats = _filter_pool_by_pre_constraints(
         pool=raw_pool,
@@ -5402,6 +5358,7 @@ def _build_focus1_batch(
         var_names=var_names,
         constraint_defs=constraint_defs,
         enforce_pre_constraints=enforce_pre_constraints,
+        to_full_x=to_full_x,
     )
     pool = _dedup_pool_against_reference(
         pool=pool,
@@ -5426,6 +5383,7 @@ def _build_focus1_batch(
             constraint_defs=constraint_defs,
             enforce_pre_constraints=enforce_pre_constraints,
             decimals=decimals,
+            to_full_x=to_full_x,
         )
 
     mu, sigma = model.predict(pool, return_std=True)
@@ -5582,6 +5540,7 @@ def _build_focus3_plan_refine_starts(
     xi: float,
     post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
     post_penalty_lambda: float,
+    soft_penalty_fn: Callable[[np.ndarray], float] | None,
     has_constraints: bool,
     source_performance_info: dict[str, object] | None = None,
     recover_info: dict[str, object] | None = None,
@@ -5720,6 +5679,7 @@ def _build_focus3_plan_refine_starts(
             xi=xi,
             post_feasible_prob_fn=post_feasible_prob_fn,
             post_penalty_lambda=post_penalty_lambda,
+            soft_penalty_fn=soft_penalty_fn,
         )
         scores, penalty_info = _apply_focus3_boundary_score_penalty(
             system=system,
@@ -5969,6 +5929,7 @@ def _build_focus3_plan_discrete_candidate(
     xi: float,
     post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
     post_penalty_lambda: float,
+    soft_penalty_fn: Callable[[np.ndarray], float] | None,
     has_constraints: bool,
     source_performance_info: dict[str, object] | None = None,
     recover_info: dict[str, object] | None = None,
@@ -6088,6 +6049,7 @@ def _build_focus3_plan_discrete_candidate(
             xi=xi,
             post_feasible_prob_fn=post_feasible_prob_fn,
             post_penalty_lambda=post_penalty_lambda,
+            soft_penalty_fn=soft_penalty_fn,
         )
         scores, penalty_info = _apply_focus3_boundary_score_penalty(
             system=system,
@@ -6238,6 +6200,7 @@ def _select_best_scored_candidate(
     xi: float,
     post_feasible_prob_fn: Callable[[np.ndarray], float] | None,
     post_penalty_lambda: float,
+    soft_penalty_fn: Callable[[np.ndarray], float] | None,
 ) -> np.ndarray | None:
     arr = np.asarray(pool, dtype=float)
     if arr.ndim != 2 or arr.shape[0] == 0:
@@ -6252,6 +6215,7 @@ def _select_best_scored_candidate(
         xi=xi,
         post_feasible_prob_fn=post_feasible_prob_fn,
         post_penalty_lambda=post_penalty_lambda,
+        soft_penalty_fn=soft_penalty_fn,
     )
     finite = np.where(np.isfinite(scores))[0]
     if finite.size == 0:
@@ -6521,27 +6485,20 @@ def _sample_feasible_candidate(
     constraint_defs: list[dict],
     enforce_pre_constraints: bool,
     max_attempts: int = 128,
+    to_full_x: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> np.ndarray:
-    if not enforce_pre_constraints or not constraint_defs:
-        return x
-
-    x_cur = np.clip(np.asarray(x, dtype=float).reshape(-1), lb, ub)
-    best_x = x_cur.copy()
-    best_margin = float("-inf")
-    for _ in range(max(int(max_attempts), 1)):
-        _payload, feasible, _margin = evaluate_pre_constraints_raw(
-            x=x_cur,
-            var_names=var_names,
-            constraint_defs=constraint_defs,
-            fail_fast_output_missing=False,
-        )
-        if bool(feasible):
-            return x_cur
-        if float(_margin) > float(best_margin):
-            best_margin = float(_margin)
-            best_x = x_cur.copy()
-        x_cur = rng.uniform(lb, ub, size=(lb.shape[0],))
-    return best_x
+    policy = PreInequalityPolicy(
+        constraint_defs=constraint_defs if enforce_pre_constraints else [],
+        var_names=var_names,
+        to_full_x=to_full_x,
+    )
+    return policy.sample_feasible_candidate(
+        x=x,
+        rng=rng,
+        lb=lb,
+        ub=ub,
+        max_attempts=max_attempts,
+    )
 
 
 def _evaluate_pre_constraint(
@@ -6550,15 +6507,14 @@ def _evaluate_pre_constraint(
     var_names: list[str],
     constraint_defs: list[dict],
     enforce_pre_constraints: bool,
+    to_full_x: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> tuple[bool, float]:
-    if not enforce_pre_constraints or not constraint_defs:
-        return True, float("inf")
-    _payload, feasible, margin = evaluate_pre_constraints_raw(
-        x=x,
+    policy = PreInequalityPolicy(
+        constraint_defs=constraint_defs if enforce_pre_constraints else [],
         var_names=var_names,
-        constraint_defs=constraint_defs,
-        fail_fast_output_missing=False,
+        to_full_x=to_full_x,
     )
+    _payload, feasible, margin = policy.evaluate(np.asarray(x, dtype=float).reshape(-1))
     return bool(feasible), float(margin)
 
 
@@ -6582,12 +6538,18 @@ def _build_preconstrained_source_starts(
     feasible_multiplier: int,
     feasible_retry: int,
     min_starts: int,
+    to_full_x: Callable[[np.ndarray], np.ndarray] | None = None,
     best_local_sigma: float = 0.025,
     best_local_top_count: int = 3,
 ) -> tuple[np.ndarray, np.ndarray | None, float, int, int]:
     raw_pool_size = int(max(base_pool_size, 1))
     n_target = int(max(raw_pool_size, max(min_starts, 1)))
-    if not enforce_pre_constraints or not constraint_defs:
+    pre_policy = PreInequalityPolicy(
+        constraint_defs=constraint_defs if enforce_pre_constraints else [],
+        var_names=var_names,
+        to_full_x=to_full_x,
+    )
+    if not pre_policy.active:
         starts = _build_source_pool_starts(
             rng=rng,
             source=source,
@@ -6691,12 +6653,7 @@ def _build_preconstrained_source_starts(
                 best_local_anchor_best_prob=float(getattr(system, "focus3_best_local_anchor_best_prob", 0.45)),
             )
         generated_total += int(starts.shape[0])
-        mask, _payloads, margins = evaluate_constraints_batch(
-            X=starts,
-            var_names=var_names,
-            constraint_defs=constraint_defs,
-            scope="pre",
-        )
+        mask, _payloads, margins = pre_policy.evaluate_batch(starts)
         if starts.shape[0] > 0:
             best_i = int(np.argmax(margins))
             if float(margins[best_i]) > float(fallback_margin):
@@ -6937,12 +6894,48 @@ def run_bo_engine(
             if math.isfinite(flo) and math.isfinite(fhi) and fhi > flo:
                 policy_full_lb[idx] = float(flo)
                 policy_full_ub[idx] = float(fhi)
-    evaluate_objective = _build_cae_objective_evaluator(
+    cae_evaluator = CaeObjectiveEvaluator(
         problem_name=problem_name,
         variables=variables,
         selected_features=selected_features,
-        evaluation_base_values=evaluation_base_values,
+        base_values=evaluation_base_values,
+        error_context="optimizer iteration",
     )
+    evaluate_objective = cae_evaluator.evaluate_selected
+    pre_policy = PreInequalityPolicy(
+        constraint_defs=constraint_defs,
+        var_names=list(cae_evaluator.mapper.var_names),
+        to_full_x=cae_evaluator.mapper.to_full,
+    )
+    pre_hard_constraint_defs = pre_policy.constraint_defs
+    pre_hard_active = bool(pre_policy.active)
+    pre_var_names = list(pre_policy.var_names)
+    pre_to_full_x = pre_policy.to_full_x
+    pre_eq_policy = PreEqualityPenaltyPolicy(
+        constraint_defs=constraint_defs,
+        var_names=list(cae_evaluator.mapper.var_names),
+        to_full_x=cae_evaluator.mapper.to_full,
+        enabled=bool(getattr(system, "pre_eq_penalty_enabled", True)),
+        penalty_lambda=float(getattr(system, "pre_eq_penalty_lambda", 10.0)),
+        violation_cap=float(getattr(system, "pre_eq_penalty_violation_cap", 1e6)),
+    )
+    pre_eq_scale_floor = float(max(float(getattr(system, "pre_eq_penalty_objective_scale_floor", 1.0)), 1e-12))
+
+    def _pre_eq_objective_scale(values: np.ndarray | list[float] | tuple[float, ...]) -> float:
+        return objective_penalty_scale(values, floor=pre_eq_scale_floor)
+
+    def _current_pre_eq_objective_scale() -> float:
+        return _pre_eq_objective_scale(y_archive if y_archive.size > 0 else np.empty((0,), dtype=float))
+
+    def _pre_eq_soft_penalty(x_arr: np.ndarray) -> float:
+        if not pre_eq_policy.active:
+            return 0.0
+        return pre_eq_policy.penalty_value(
+            np.asarray(x_arr, dtype=float).reshape(-1),
+            objective_scale=_current_pre_eq_objective_scale(),
+        )
+
+    pre_eq_soft_penalty_fn: Callable[[np.ndarray], float] | None = _pre_eq_soft_penalty if pre_eq_policy.active else None
 
     post_score_mode = _normalize_post_score_mode(getattr(system, "post_score_mode", "add_penalty"))
     post_penalty_lambda = max(float(getattr(system, "post_penalty_lambda", 0.0)), 0.0)
@@ -6979,7 +6972,13 @@ def run_bo_engine(
     has_doe_objective = False
     if isinstance(doe_df, pd.DataFrame) and not doe_df.empty:
         if all(f in doe_df.columns for f in selected_features):
-            X_doe = doe_df[selected_features].to_numpy(dtype=float)
+            warm_result = pre_policy.filter_warm_start_df(
+                doe_df,
+                selected_features=selected_features,
+                warn_prefix="[Optimizer][WarmStart]",
+            )
+            doe_work = warm_result.df
+            X_doe = doe_work[selected_features].to_numpy(dtype=float)
             mask_finite = np.isfinite(X_doe).all(axis=1)
             X_doe = X_doe[mask_finite]
             if X_doe.shape[0] > 0:
@@ -6991,8 +6990,8 @@ def run_bo_engine(
                 if X_seed_from_doe.shape[0] > 0:
                     X_seed_from_doe = np.unique(X_seed_from_doe, axis=0)
 
-            if objective_col in doe_df.columns:
-                y_doe_raw = pd.to_numeric(doe_df[objective_col], errors="coerce").to_numpy(dtype=float)
+            if objective_col in doe_work.columns:
+                y_doe_raw = pd.to_numeric(doe_work[objective_col], errors="coerce").to_numpy(dtype=float)
                 if y_doe_raw.shape[0] == mask_finite.shape[0]:
                     y_doe_raw = y_doe_raw[mask_finite]
                     if X_doe.shape[0] == y_doe_raw.shape[0]:
@@ -7039,6 +7038,15 @@ def run_bo_engine(
         best_x_raw = 0.5 * (lb + ub)
         best_y_raw = objective_initial_best(objective_sense)
 
+    pre_eq_archive_objective_scale = _pre_eq_objective_scale(y_archive)
+    if pre_eq_policy.active and X_archive.shape[0] > 0:
+        y_archive_pre_eq = y_archive + pre_eq_policy.penalty_values(
+            X_archive,
+            objective_scale=pre_eq_archive_objective_scale,
+        )
+    else:
+        y_archive_pre_eq = y_archive.copy()
+
     if post_penalty_active:
         if X_archive.shape[0] > 0:
             p_archive = np.array([float(np.clip(post_prob_fn(x), 0.0, 1.0)) for x in X_archive], dtype=float)
@@ -7053,29 +7061,31 @@ def run_bo_engine(
                         p_feasible_min=post_p_feasible_min,
                         hard_penalty=post_p_feasible_hard_penalty,
                     )
-                    for y, p in zip(y_archive, p_archive)
+                    for y, p in zip(y_archive_pre_eq, p_archive)
                 ],
                 dtype=float,
             )
         else:
             y_archive_eff = np.empty((0,), dtype=float)
     else:
-        y_archive_eff = y_archive.copy()
+        y_archive_eff = y_archive_pre_eq.copy()
 
     if y_archive_eff.shape[0] > 0:
         best_i_eff = _best_index(y_archive_eff, objective_sense)
         best_x_eff = X_archive[best_i_eff].copy()
         best_y_eff = float(y_archive_eff[best_i_eff])
+        best_y_eff_raw = float(y_archive[best_i_eff])
     else:
         best_x_eff = best_x_raw.copy()
         best_y_eff = objective_initial_best(objective_sense)
+        best_y_eff_raw = float(best_y_raw)
 
     seen = {_round_key(x, decimals=int(system.dedup_decimals)) for x in X_archive}
     acq = AcquisitionOptimizer()
     history_rows: list[dict] = []
     gp_model = None
     gp_fallback_used = False
-    var_names = list(selected_features)
+    var_names = pre_var_names
     best_raw_history: list[float] = [float(best_y_raw)] if math.isfinite(float(best_y_raw)) else []
     goal_internal = (
         float(_to_optimizer_objective(float(goal)))
@@ -7425,9 +7435,10 @@ def run_bo_engine(
                         n=planned,
                         system=system,
                         var_names=var_names,
-                        constraint_defs=constraint_defs,
-                        enforce_pre_constraints=bool(system.enforce_pre_constraints),
+                        constraint_defs=pre_hard_constraint_defs,
+                        enforce_pre_constraints=pre_hard_active,
                         decimals=int(system.dedup_decimals),
+                        to_full_x=pre_to_full_x,
                     )
                     _timer_add("focus0_batch", t0)
                     if not batch_rows:
@@ -7496,9 +7507,10 @@ def run_bo_engine(
                         n=planned,
                         system=system,
                         var_names=var_names,
-                        constraint_defs=constraint_defs,
-                        enforce_pre_constraints=bool(system.enforce_pre_constraints),
+                        constraint_defs=pre_hard_constraint_defs,
+                        enforce_pre_constraints=pre_hard_active,
                         decimals=int(system.dedup_decimals),
+                        to_full_x=pre_to_full_x,
                     )
                     _timer_add("focus1_batch", t0)
                     if not batch_rows:
@@ -7600,8 +7612,9 @@ def run_bo_engine(
                     selected_features=selected_features,
                     system=system,
                     var_names=var_names,
-                    constraint_defs=constraint_defs,
-                    enforce_pre_constraints=bool(system.enforce_pre_constraints),
+                    constraint_defs=pre_hard_constraint_defs,
+                    enforce_pre_constraints=pre_hard_active,
+                    to_full_x=pre_to_full_x,
                 )
                 if not focus2_regions_payload.get("regions"):
                     primary_focus2_regions_payload = dict(focus2_regions_payload)
@@ -7689,10 +7702,12 @@ def run_bo_engine(
                         xi=float(system.ei_xi),
                         post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                         post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+                        soft_penalty_fn=pre_eq_soft_penalty_fn,
                         max_candidates=remaining_budget,
                         var_names=var_names,
-                        constraint_defs=constraint_defs,
-                        enforce_pre_constraints=bool(system.enforce_pre_constraints),
+                        constraint_defs=pre_hard_constraint_defs,
+                        enforce_pre_constraints=pre_hard_active,
+                        to_full_x=pre_to_full_x,
                     )
                     _timer_add("focus2_batch", t0)
                     if focus2_batch:
@@ -7917,7 +7932,7 @@ def run_bo_engine(
                     focus3_eval_count=int(focus3_eval_count),
                     recover_info=focus3_recover_info,
                 )
-                pre_active = bool(system.enforce_pre_constraints) and bool(constraint_defs)
+                pre_active = bool(pre_hard_active)
                 segment = "focus3"
                 focus3_requested_acq_type = _normalize_focus3_acq_type(getattr(system, "focus3_acq_type", "auto"))
                 acq_policy_full_lb = (
@@ -8042,11 +8057,12 @@ def run_bo_engine(
                         topk_sigma=float(getattr(system, "source_topk_perturb_sigma", 0.08)),
                         boundary_near_ratio=float(getattr(system, "source_boundary_near_ratio", 0.03)),
                         var_names=var_names,
-                        constraint_defs=constraint_defs,
+                        constraint_defs=pre_hard_constraint_defs,
                         enforce_pre_constraints=pre_active,
                         feasible_multiplier=int(getattr(system, "source_feasible_multiplier", 3)),
                         feasible_retry=int(getattr(system, "source_feasible_retry", 3)),
                         min_starts=int(getattr(system, "source_feasible_min_starts", 1)),
+                        to_full_x=pre_to_full_x,
                         best_local_sigma=float(focus3_best_local_sigma),
                         best_local_top_count=int(getattr(system, "focus3_best_local_top_count", 3)),
                     )
@@ -8057,8 +8073,9 @@ def run_bo_engine(
                             ok, _m = _evaluate_pre_constraint(
                                 x=x_arr,
                                 var_names=var_names,
-                                constraint_defs=constraint_defs,
+                                constraint_defs=pre_hard_constraint_defs,
                                 enforce_pre_constraints=pre_active,
+                                to_full_x=pre_to_full_x,
                             )
                             return bool(ok)
 
@@ -8076,6 +8093,7 @@ def run_bo_engine(
                             pre_feasible_fn=_pre_fn,
                             post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                             post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+                            soft_penalty_fn=pre_eq_soft_penalty_fn,
                             maxiter=int(getattr(system, "focus3_refine_maxiter", 35)),
                             maxfun=int(getattr(system, "focus3_refine_maxfun", 90)),
                         )
@@ -8147,6 +8165,7 @@ def run_bo_engine(
                             xi=float(system.ei_xi),
                             post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                             post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+                            soft_penalty_fn=pre_eq_soft_penalty_fn,
                             has_constraints=bool(constraint_defs),
                             source_performance_info=focus3_source_perf_info,
                             recover_info=focus3_recover_info,
@@ -8181,6 +8200,7 @@ def run_bo_engine(
                             xi=float(system.ei_xi),
                             post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                             post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+                            soft_penalty_fn=pre_eq_soft_penalty_fn,
                             has_constraints=bool(constraint_defs),
                             source_performance_info=focus3_source_perf_info,
                             recover_info=focus3_recover_info,
@@ -8279,6 +8299,7 @@ def run_bo_engine(
                             xi=float(system.ei_xi),
                             post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                             post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+                            soft_penalty_fn=pre_eq_soft_penalty_fn,
                         )
                         focus3_plan_mode = "refine_skipped"
                     elif gp_model is not None and refine_starts.shape[0] > 0:
@@ -8295,6 +8316,7 @@ def run_bo_engine(
                             xi=float(system.ei_xi),
                             post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                             post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+                            soft_penalty_fn=pre_eq_soft_penalty_fn,
                             maxiter=int(getattr(system, "focus3_refine_maxiter", 35)),
                             maxfun=int(getattr(system, "focus3_refine_maxfun", 90)),
                         )
@@ -8324,6 +8346,7 @@ def run_bo_engine(
                     xi=float(system.ei_xi),
                     post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                     post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+                    soft_penalty_fn=pre_eq_soft_penalty_fn,
                     maxiter=int(getattr(system, "focus3_refine_maxiter", 35)),
                     maxfun=int(getattr(system, "focus3_refine_maxfun", 90)),
                 )
@@ -8360,6 +8383,7 @@ def run_bo_engine(
                             min_rms_distance=min_dist,
                             post_feasible_prob_fn=post_prob_fn if post_penalty_active else None,
                             post_penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
+                            soft_penalty_fn=pre_eq_soft_penalty_fn,
                             random_attempts=int(getattr(system, "focus3_dedup_random_attempts", 64)),
                         )
                         _timer_add("focus3_dedup", t0)
@@ -8382,16 +8406,18 @@ def run_bo_engine(
                 lb=lb,
                 ub=ub,
                 var_names=var_names,
-                constraint_defs=constraint_defs,
-                enforce_pre_constraints=bool(system.enforce_pre_constraints),
+                constraint_defs=pre_hard_constraint_defs,
+                enforce_pre_constraints=pre_hard_active,
                 max_attempts=int(getattr(system, "pre_final_feasible_attempts", 256)),
+                to_full_x=pre_to_full_x,
             )
 
         pre_feasible_next, pre_margin_next = _evaluate_pre_constraint(
             x=x_next,
             var_names=var_names,
-            constraint_defs=constraint_defs,
-            enforce_pre_constraints=bool(system.enforce_pre_constraints),
+            constraint_defs=pre_hard_constraint_defs,
+            enforce_pre_constraints=pre_hard_active,
+            to_full_x=pre_to_full_x,
         )
         pre_violation_next = float(max(0.0, -float(pre_margin_next)))
 
@@ -8404,22 +8430,24 @@ def run_bo_engine(
                     x_next = trial
                     key = tkey
                     break
-        if bool(system.enforce_pre_constraints) and bool(constraint_defs):
+        if pre_hard_active:
             x_next = _sample_feasible_candidate(
                 x=x_next,
                 rng=rng,
                 lb=lb,
                 ub=ub,
                 var_names=var_names,
-                constraint_defs=constraint_defs,
+                constraint_defs=pre_hard_constraint_defs,
                 enforce_pre_constraints=True,
                 max_attempts=int(getattr(system, "pre_final_feasible_attempts", 256)),
+                to_full_x=pre_to_full_x,
             )
             pre_feasible_next, pre_margin_next = _evaluate_pre_constraint(
                 x=x_next,
                 var_names=var_names,
-                constraint_defs=constraint_defs,
+                constraint_defs=pre_hard_constraint_defs,
                 enforce_pre_constraints=True,
+                to_full_x=pre_to_full_x,
             )
             pre_violation_next = float(max(0.0, -float(pre_margin_next)))
             if not pre_feasible_next:
@@ -8428,12 +8456,7 @@ def run_bo_engine(
                     f"segment={segment} margin={pre_margin_next:.6g}"
                 )
             key = _round_key(x_next, decimals=int(system.dedup_decimals))
-        pre_constraint_debug_fields = _pre_constraint_debug_fields(
-            x=x_next,
-            var_names=var_names,
-            constraint_defs=constraint_defs,
-            enforce_pre_constraints=bool(system.enforce_pre_constraints),
-        )
+        pre_constraint_debug_fields = pre_policy.debug_fields(x_next)
         seen.add(key)
 
         if gp_model is not None:
@@ -8453,12 +8476,18 @@ def run_bo_engine(
         y_next = float(_to_optimizer_objective(y_next_raw))
         _timer_add("objective_eval", t0)
         objective_source = "cae_eval"
+        pre_eq_objective_scale_next = _current_pre_eq_objective_scale()
+        pre_eq_penalty_result = pre_eq_policy.penalty(
+            x_next,
+            objective_scale=pre_eq_objective_scale_next,
+        )
+        y_next_pre_eq = float(y_next + float(pre_eq_penalty_result.penalty))
 
         p_feasible = 1.0
         if post_penalty_active and post_prob_fn is not None:
             p_feasible = float(np.clip(post_prob_fn(x_next), 0.0, 1.0))
         y_next_effective = _apply_post_penalty_to_objective(
-            y_raw=y_next,
+            y_raw=y_next_pre_eq,
             p_feasible=p_feasible,
             objective_sense=objective_sense,
             penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
@@ -8507,6 +8536,8 @@ def run_bo_engine(
                         )
                     )
                 acq_effective = float(acq_base)
+                if pre_eq_policy.active:
+                    acq_effective = float(acq_effective + _pre_eq_soft_penalty(x_next))
                 if post_penalty_active:
                     acq_effective = float(
                         _apply_post_penalty_to_objective(
@@ -8551,6 +8582,8 @@ def run_bo_engine(
         )
         best_x_raw = best_update.best_x_raw.copy()
         best_y_raw = float(best_update.best_y_raw)
+        if bool(best_update.effective_improved):
+            best_y_eff_raw = float(y_next)
         best_x_eff = best_update.best_x_effective.copy()
         best_y_eff = float(best_update.best_y_effective)
         raw_improved = bool(best_update.raw_improved)
@@ -8940,6 +8973,7 @@ def run_bo_engine(
             "post_penalty_lambda": float(post_penalty_lambda if post_penalty_active else 0.0),
             "post_score_mode": str(post_score_mode),
             "p_feasible": float(p_feasible),
+            **pre_eq_policy.debug_fields(x_next, objective_scale=pre_eq_objective_scale_next),
             "pre_retry_used": int(pre_retry_used),
             "pre_generated_count": int(pre_generated_count),
             "pre_fallback_used": bool(pre_fallback_used),
@@ -9048,12 +9082,15 @@ def run_bo_engine(
 
     history_df = pd.DataFrame(history_rows)
     archive_rows = []
+    archive_pre_eq_scale = _pre_eq_objective_scale(y_archive)
     for x, y in zip(X_archive, y_archive):
         p = 1.0
         if post_penalty_active and post_prob_fn is not None:
             p = float(np.clip(post_prob_fn(x), 0.0, 1.0))
+        pre_eq_result = pre_eq_policy.penalty(x, objective_scale=archive_pre_eq_scale)
+        y_pre_eq = float(y + float(pre_eq_result.penalty))
         y_eff = _apply_post_penalty_to_objective(
-            y_raw=float(y),
+            y_raw=float(y_pre_eq),
             p_feasible=p,
             objective_sense=objective_sense,
             penalty_lambda=post_penalty_lambda if post_penalty_active else 0.0,
@@ -9064,22 +9101,65 @@ def run_bo_engine(
         y_raw_out = float(_from_optimizer_objective(y))
         y_eff_out = float(_from_optimizer_objective(y_eff))
         item = {
-            "objective": float(y_eff_out),
+            "objective": float(y_raw_out),
             "objective_raw": float(y_raw_out),
             "objective_effective": float(y_eff_out),
             "objective_internal": float(y),
             "objective_effective_internal": float(y_eff),
             "p_feasible": float(p),
+            "pre_eq_penalty": float(pre_eq_result.penalty),
+            "pre_eq_feasible": bool(pre_eq_result.feasible),
+            "pre_eq_violation_norm": float(pre_eq_result.violation_norm),
+            "pre_eq_worst_id": str(pre_eq_result.worst_id),
         }
         for fname, value in zip(selected_features, x):
             item[fname] = float(value)
         archive_rows.append(item)
     archive_df = pd.DataFrame(archive_rows)
 
-    best_point = {f: float(v) for f, v in zip(selected_features, best_x_eff)}
+    final_pre_best = select_final_pre_feasible_best(
+        X=X_archive,
+        y_raw_internal=y_archive,
+        objective_sense=objective_sense,
+        pre_inequality_policy=pre_policy,
+        pre_equality_policy=pre_eq_policy,
+        pre_eq_objective_scale=archive_pre_eq_scale,
+    )
+    if final_pre_best.found:
+        best_x_final = final_pre_best.x.copy()
+        best_y_final_raw = float(final_pre_best.y_raw_internal)
+        best_point = {f: float(v) for f, v in zip(selected_features, best_x_final)}
+        best_objective_selected_raw = float(_from_optimizer_objective(best_y_final_raw))
+    else:
+        best_point = {}
+        best_objective_selected_raw = float("nan")
+    best_effort_payload = final_pre_candidate_payload(
+        final_pre_best.best_effort,
+        feature_names=selected_features,
+        objective_from_internal=lambda value: float(_from_optimizer_objective(value)),
+    )
+    least_violation_payload = final_pre_candidate_payload(
+        final_pre_best.least_violation,
+        feature_names=selected_features,
+        objective_from_internal=lambda value: float(_from_optimizer_objective(value)),
+    )
+    raw_best_infeasible_payload = final_pre_candidate_payload(
+        final_pre_best.raw_best_infeasible,
+        feature_names=selected_features,
+        objective_from_internal=lambda value: float(_from_optimizer_objective(value)),
+    )
+    pareto_payload = [
+        final_pre_candidate_payload(
+            candidate,
+            feature_names=selected_features,
+            objective_from_internal=lambda value: float(_from_optimizer_objective(value)),
+        )
+        for candidate in final_pre_best.pareto_candidates
+    ]
     best_point_raw = {f: float(v) for f, v in zip(selected_features, best_x_raw)}
     if not math.isfinite(float(best_y_eff)) or not math.isfinite(float(best_y_raw)):
         raise RuntimeError("Optimizer finished with non-finite best objective.")
+    best_objective_effective = float(_from_optimizer_objective(best_y_eff))
 
     if focus2_regions_payload:
         focus2_regions_summary = dict(focus2_regions_payload)
@@ -9109,8 +9189,9 @@ def run_bo_engine(
             selected_features=selected_features,
             system=system,
             var_names=var_names,
-            constraint_defs=constraint_defs,
-            enforce_pre_constraints=bool(system.enforce_pre_constraints),
+            constraint_defs=pre_hard_constraint_defs,
+            enforce_pre_constraints=pre_hard_active,
+            to_full_x=pre_to_full_x,
         )
     else:
         focus2_regions_summary = {
@@ -9219,9 +9300,20 @@ def run_bo_engine(
         history_df=history_df,
         archive_df=archive_df,
         best_point=best_point,
-        best_objective=float(_from_optimizer_objective(best_y_eff)),
+        best_objective=best_objective_selected_raw,
         best_point_raw=best_point_raw,
         best_objective_raw=float(_from_optimizer_objective(best_y_raw)),
+        best_effort_point=dict(best_effort_payload.get("point", {})),
+        best_effort_objective=float(best_effort_payload.get("objective", float("nan"))),
+        best_effort_pre_violation_score=float(best_effort_payload.get("pre_violation_score", float("nan"))),
+        best_effort_score=float(best_effort_payload.get("best_effort_score", float("nan"))),
+        least_violation_point=dict(least_violation_payload.get("point", {})),
+        least_violation_objective=float(least_violation_payload.get("objective", float("nan"))),
+        least_violation_pre_violation_score=float(least_violation_payload.get("pre_violation_score", float("nan"))),
+        raw_best_infeasible_point=dict(raw_best_infeasible_payload.get("point", {})),
+        raw_best_infeasible_objective=float(raw_best_infeasible_payload.get("objective", float("nan"))),
+        raw_best_infeasible_pre_violation_score=float(raw_best_infeasible_payload.get("pre_violation_score", float("nan"))),
+        best_effort_pareto_points=[p for p in pareto_payload if p],
         post_penalty_active=bool(post_penalty_active),
         post_penalty_lambda=float(post_penalty_lambda if post_penalty_active else 0.0),
         post_score_mode=str(post_score_mode),
@@ -9238,6 +9330,16 @@ def run_bo_engine(
             "objective_sense": str(external_objective_sense),
             "internal_objective_sense": "min",
             "internal_objective_transform": "negate" if external_objective_sense == "max" else "identity",
+            "pre_hard_filter_active": bool(pre_hard_active),
+            "pre_hard_filter_constraint_count": int(len(pre_hard_constraint_defs)),
+            "pre_hard_filter_auto_enabled": bool(pre_hard_active and not bool(getattr(system, "enforce_pre_constraints", False))),
+            "pre_eq_penalty_active": bool(pre_eq_policy.active),
+            "pre_eq_penalty_constraint_count": int(pre_eq_policy.constraint_count),
+            "pre_eq_penalty_lambda": float(pre_eq_policy.penalty_lambda if pre_eq_policy.active else 0.0),
+            "pre_eq_penalty_objective_scale_floor": float(pre_eq_scale_floor),
+            "best_objective_selected_raw": float(best_objective_selected_raw),
+            "best_objective_effective": float(best_objective_effective),
+            **final_pre_best.summary(),
         },
         focus2_summary=focus2_summary,
         focus_pipeline_summary=focus_pipeline_plan.as_dict(),

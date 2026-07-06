@@ -8,13 +8,14 @@ import numpy as np
 import optuna
 
 from Modeler.executor.splitter import FixedKFoldSplitter
-from Modeler.Models.xgboost import XGBoostModel
+from Modeler.Models.registry import get_model_class
 
 
 def make_robust_objective(
     *,
     X: np.ndarray,
     y: np.ndarray,
+    model_name: str,
     base_random_seed: int,
     search_space_fn: Callable,
     lambda_std: float,
@@ -36,6 +37,7 @@ def make_robust_objective(
 
     def objective(trial: optuna.Trial) -> float:
         params = search_space_fn(trial)
+        model_cls = get_model_class(model_name)
 
         valid_rmses = []
         train_rmses = []
@@ -44,7 +46,7 @@ def make_robust_objective(
         for run_id, train_idx, valid_idx in splitter.split(X):
             model_seed = base_random_seed + (run_id + 1)
 
-            model = XGBoostModel(
+            model = model_cls(
                 **params,
                 random_state=model_seed,
             )

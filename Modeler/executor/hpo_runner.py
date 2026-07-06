@@ -19,6 +19,22 @@ DEFAULT_XGB_SEARCH_SPACE: dict[str, tuple[float, float]] = {
     "colsample_bytree": (0.6, 1.0),
     "gamma": (0.0, 0.3),
 }
+DEFAULT_RF_SEARCH_SPACE: dict[str, Any] = {
+    "n_estimators": (150, 600),
+    "max_depth": [None, 3, 5, 8, 12],
+    "min_samples_leaf": (1, 8),
+    "max_features": ["sqrt", "log2", None],
+}
+DEFAULT_GP_SEARCH_SPACE: dict[str, Any] = {
+    "kernel_id": ["matern_1.5", "matern_2.5", "rbf"],
+    "alpha": (1e-10, 1e-4),
+    "length_scale_bounds_id": ["additional_doe", "tight", "default", "wide"],
+    "use_white_kernel": [False],
+    "noise_level": (1e-8, 1e-3),
+    "noise_level_bounds_id": ["low_noise", "default"],
+    "n_restarts_optimizer": [0, 1, 2],
+    "normalize_y": [True],
+}
 DEFAULT_HPO_SAMPLER = "tpe"
 
 
@@ -138,6 +154,161 @@ def make_xgb_search_space(
     return _search_space_fn
 
 
+def _resolve_choices(*, space: dict[str, Any] | None, key: str, default: list[Any]) -> list[Any]:
+    if not isinstance(space, dict):
+        return list(default)
+    raw = space.get(key)
+    if isinstance(raw, dict):
+        raw = raw.get("choices", raw.get("values"))
+    if isinstance(raw, (list, tuple)) and len(raw) > 0:
+        return list(raw)
+    return list(default)
+
+
+def _suggest_log_float(
+    trial: optuna.Trial,
+    *,
+    name: str,
+    space: dict[str, Any] | None,
+    default_low: float,
+    default_high: float,
+) -> float:
+    low, high = _resolve_bounds(
+        space=space,
+        key=name,
+        default_low=default_low,
+        default_high=default_high,
+    )
+    low = max(float(low), 1e-300)
+    high = max(float(high), low)
+    return float(trial.suggest_float(name, low, high, log=True))
+
+
+def make_rf_search_space(*, search_space: dict[str, Any] | None = None):
+    n_low, n_high = _resolve_bounds(
+        space=search_space,
+        key="n_estimators",
+        default_low=DEFAULT_RF_SEARCH_SPACE["n_estimators"][0],
+        default_high=DEFAULT_RF_SEARCH_SPACE["n_estimators"][1],
+    )
+    leaf_low, leaf_high = _resolve_bounds(
+        space=search_space,
+        key="min_samples_leaf",
+        default_low=DEFAULT_RF_SEARCH_SPACE["min_samples_leaf"][0],
+        default_high=DEFAULT_RF_SEARCH_SPACE["min_samples_leaf"][1],
+    )
+    max_depth_choices = _resolve_choices(
+        space=search_space,
+        key="max_depth",
+        default=list(DEFAULT_RF_SEARCH_SPACE["max_depth"]),
+    )
+    max_features_choices = _resolve_choices(
+        space=search_space,
+        key="max_features",
+        default=list(DEFAULT_RF_SEARCH_SPACE["max_features"]),
+    )
+    n_low_i = max(int(round(n_low)), 1)
+    n_high_i = max(int(round(n_high)), n_low_i)
+    leaf_low_i = max(int(round(leaf_low)), 1)
+    leaf_high_i = max(int(round(leaf_high)), leaf_low_i)
+
+    def _search_space_fn(trial: optuna.Trial) -> Dict:
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", n_low_i, n_high_i),
+            "max_depth": trial.suggest_categorical("max_depth", max_depth_choices),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", leaf_low_i, leaf_high_i),
+            "max_features": trial.suggest_categorical("max_features", max_features_choices),
+        }
+
+    return _search_space_fn
+
+
+def make_gp_search_space(*, search_space: dict[str, Any] | None = None):
+    kernel_choices = _resolve_choices(
+        space=search_space,
+        key="kernel_id",
+        default=list(DEFAULT_GP_SEARCH_SPACE["kernel_id"]),
+    )
+    length_bounds_choices = _resolve_choices(
+        space=search_space,
+        key="length_scale_bounds_id",
+        default=list(DEFAULT_GP_SEARCH_SPACE["length_scale_bounds_id"]),
+    )
+    noise_bounds_choices = _resolve_choices(
+        space=search_space,
+        key="noise_level_bounds_id",
+        default=list(DEFAULT_GP_SEARCH_SPACE["noise_level_bounds_id"]),
+    )
+    restarts_choices = _resolve_choices(
+        space=search_space,
+        key="n_restarts_optimizer",
+        default=list(DEFAULT_GP_SEARCH_SPACE["n_restarts_optimizer"]),
+    )
+    normalize_choices = _resolve_choices(
+        space=search_space,
+        key="normalize_y",
+        default=list(DEFAULT_GP_SEARCH_SPACE["normalize_y"]),
+    )
+    use_white_choices = _resolve_choices(
+        space=search_space,
+        key="use_white_kernel",
+        default=list(DEFAULT_GP_SEARCH_SPACE["use_white_kernel"]),
+    )
+
+    def _search_space_fn(trial: optuna.Trial) -> Dict:
+        return {
+            "kernel_id": trial.suggest_categorical("kernel_id", kernel_choices),
+            "alpha": _suggest_log_float(
+                trial,
+                name="alpha",
+                space=search_space,
+                default_low=DEFAULT_GP_SEARCH_SPACE["alpha"][0],
+                default_high=DEFAULT_GP_SEARCH_SPACE["alpha"][1],
+            ),
+            "length_scale_bounds_id": trial.suggest_categorical(
+                "length_scale_bounds_id",
+                length_bounds_choices,
+            ),
+            "use_white_kernel": trial.suggest_categorical(
+                "use_white_kernel",
+                use_white_choices,
+            ),
+            "noise_level": _suggest_log_float(
+                trial,
+                name="noise_level",
+                space=search_space,
+                default_low=DEFAULT_GP_SEARCH_SPACE["noise_level"][0],
+                default_high=DEFAULT_GP_SEARCH_SPACE["noise_level"][1],
+            ),
+            "noise_level_bounds_id": trial.suggest_categorical(
+                "noise_level_bounds_id",
+                noise_bounds_choices,
+            ),
+            "n_restarts_optimizer": trial.suggest_categorical(
+                "n_restarts_optimizer",
+                restarts_choices,
+            ),
+            "normalize_y": trial.suggest_categorical("normalize_y", normalize_choices),
+        }
+
+    return _search_space_fn
+
+
+def make_model_search_space(*, model_name: str, search_space: dict[str, Any] | None = None):
+    key = str(model_name or "").strip().lower()
+    if key == "xgb":
+        return make_xgb_search_space(search_space=search_space)
+    if key == "rf":
+        return make_rf_search_space(search_space=search_space)
+    if key == "gp":
+        return make_gp_search_space(search_space=search_space)
+    raise ValueError(f"HPO search space is not registered for model: {model_name}")
+
+
+def supported_hpo_models() -> set[str]:
+    return {"xgb", "rf", "gp"}
+
+
 def _resolve_pruning_config(config: dict[str, Any] | None) -> dict[str, float | int | bool]:
     cfg = dict(DEFAULT_PRUNING_CONFIG)
     if isinstance(config, dict):
@@ -192,7 +363,7 @@ class HPORunner:
     MODELER-compliant HPO runner.
 
     - FixedKFoldSplitter
-    - XGBoost only (current policy)
+    - Model registry based training
     - Robust objective (mean + lambda * std)
     - ResultSaver based persistence
     """
@@ -230,13 +401,27 @@ class HPORunner:
         problem_name: str,
         kfold_splits: int = 5,
     ) -> Dict:
-        """
-        Run HPO for XGBoost.
+        """Backward-compatible XGB entrypoint."""
+        return self.run_model(
+            model_name="xgb",
+            X=X,
+            y=y,
+            base_random_seed=base_random_seed,
+            problem_name=problem_name,
+            kfold_splits=kfold_splits,
+        )
 
-        Returns
-        -------
-        dict with best_params and metrics
-        """
+    def run_model(
+        self,
+        *,
+        model_name: str,
+        X: np.ndarray,
+        y: np.ndarray,
+        base_random_seed: int,
+        problem_name: str,
+        kfold_splits: int = 5,
+    ) -> Dict:
+        """Run HPO for a registered Modeler model."""
         if self.show_optuna_log:
             optuna.logging.set_verbosity(optuna.logging.INFO)
         else:
@@ -262,8 +447,12 @@ class HPORunner:
         objective = make_robust_objective(
             X=X,
             y=y,
+            model_name=str(model_name),
             base_random_seed=base_random_seed,
-            search_space_fn=make_xgb_search_space(search_space=self.search_space),
+            search_space_fn=make_model_search_space(
+                model_name=str(model_name),
+                search_space=self.search_space,
+            ),
             lambda_std=self.lambda_std,
             kfold_splits=kfold_splits,
             pruning_enabled=bool(self.pruning_config["enabled"]),
@@ -276,6 +465,7 @@ class HPORunner:
 
         result = format_hpo_result(
             best_trial=best_trial,
+            model_name=str(model_name),
             base_random_seed=base_random_seed,
             n_trials=self.n_trials,
             lambda_std=self.lambda_std,
@@ -297,10 +487,11 @@ class HPORunner:
         Returns
         -------
         best_params : dict
-            XGBoost best hyperparameters
+            best hyperparameters
         """
 
-        result = self.run_xgb(
+        result = self.run_model(
+            model_name="xgb",
             X=X,
             y=y,
             base_random_seed=base_random_seed,
