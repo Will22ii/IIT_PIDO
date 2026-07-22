@@ -849,6 +849,11 @@ def _apply_constrained_boundary_preserve(
     require_signal = bool(
         getattr(system, "constrained_boundary_preserve_require_policy_or_touch", True)
     )
+    min_gap_ratio = float(np.clip(
+        float(getattr(system, "constrained_boundary_preserve_min_gap_ratio", 0.001)),
+        0.0,
+        0.5,
+    ))
     touch_lb, touch_ub = _infer_boundary_touch_sides(
         selected_points=selected_points,
         global_bounds=global_bounds,
@@ -883,16 +888,24 @@ def _apply_constrained_boundary_preserve(
             out.append((lo, hi))
             continue
 
-        edge_tol = eps_ratio * span
+        # 보호 판정이 내려진 축은 간격이 작다는 이유로 복원을 취소하지 않는다.
+        # 이전 구현은 취소 임계를 touch 판정 비율에서 파생시켰는데(그 1/4),
+        # 두 값은 목적이 다르다. touch는 "얼마나 가까우면 경계에 닿은 것으로 볼까"이고
+        # 여기는 "얼마나 떨어져야 되돌릴까"다. 파생 관계를 끊고 독립 설정으로 둔다.
+        min_gap = min_gap_ratio * span
+        legacy_deadband = 0.25 * eps_ratio * span
         new_lo, new_hi = lo, hi
         side: str | None = None
-        if use_lb and (lo - gl) > edge_tol * 0.25:
+        gap_used = 0.0
+        if use_lb and (lo - gl) > min_gap:
+            gap_used = float(lo - gl)
             target_lo = gl
             target_hi = float(min(gl + width, gu))
             new_lo = float(lo + shift_fraction * (target_lo - lo))
             new_hi = float(hi + shift_fraction * (target_hi - hi))
             side = "lb"
-        elif use_ub and (gu - hi) > edge_tol * 0.25:
+        elif use_ub and (gu - hi) > min_gap:
+            gap_used = float(gu - hi)
             target_hi = gu
             target_lo = float(max(gu - width, gl))
             new_lo = float(lo + shift_fraction * (target_lo - lo))
@@ -914,6 +927,11 @@ def _apply_constrained_boundary_preserve(
                     "policy_ub": bool(pin_ub),
                     "touch_lb": bool(touch_l),
                     "touch_ub": bool(touch_u),
+                    "gap": float(gap_used),
+                    "gap_ratio": float(gap_used / span),
+                    # 구 임계(touch 비율의 1/4)였다면 취소됐을 복원인가.
+                    # 이번 변경이 실제로 무엇을 살렸는지 배치 stats에서 바로 셀 수 있다.
+                    "below_legacy_deadband": bool(gap_used <= legacy_deadband),
                 }
             )
         out.append((new_lo, new_hi))

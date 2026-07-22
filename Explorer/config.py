@@ -129,6 +129,13 @@ class ExplorerSystemConfig:
     constrained_boundary_preserve_touch_eps_ratio: float = 0.10
     constrained_boundary_preserve_shift_fraction: float = 1.0
     constrained_boundary_preserve_require_policy_or_touch: bool = True
+    # 복원을 실행할 최소 간격(축 span 대비). 보호 판정이 이미 내려진 뒤에도 경계와의
+    # 간격이 이 값 이하면 실행하지 않는다.
+    # 이 장치는 width를 보존한 채 미끄러지므로 부피가 늘지 않는다. 즉 불필요하게
+    # 복원했을 때의 비용은 사실상 없고, 필요한데 하지 않으면 최적해가 bounds 밖에
+    # 남는다. 따라서 하한은 "이미 경계에 붙은 축을 부동소수점 비교로 걸러내는" 수준만
+    # 남기고, 판단은 보호 판정(policy/touch)에 맡긴다.
+    constrained_boundary_preserve_min_gap_ratio: float = 0.001
     # 저차원·무제약에서 cap 이후 bounds가 한쪽으로 과하게 치우치면,
     # 부피와 width는 유지하고 설계공간 중심 쪽으로 recenter한다.
     # SH처럼 multimodal 저차원 문제에서 과도한 one-sided shrink를 줄이기 위한

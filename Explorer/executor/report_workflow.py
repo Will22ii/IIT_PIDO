@@ -154,6 +154,9 @@ def build_explorer_report_payload(
             "constrained_boundary_preserve_shift_fraction": float(
                 getattr(system_config, "constrained_boundary_preserve_shift_fraction", 1.0)
             ),
+            "constrained_boundary_preserve_min_gap_ratio": float(
+                getattr(system_config, "constrained_boundary_preserve_min_gap_ratio", 0.001)
+            ),
             "low_dim_balance_guard_enabled": bool(
                 getattr(system_config, "low_dim_balance_guard_enabled", True)
             ),
