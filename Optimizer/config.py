@@ -319,6 +319,45 @@ class OptimizerSystemConfig:
     focus3_aion_near_goal_short_budget_random_floor: float = 0.05
     focus3_aion_near_goal_short_budget_topk_floor: float = 0.38
     focus3_aion_near_goal_boundary_max: float = 0.005
+    # Goal 없이도 Focus3가 정체 상태를 감지하면 source 비중을 조정한다.
+    # benchmark 목표값이나 known optimum은 쓰지 않고, 최근 개선량과 source별 개선률만 사용한다.
+    focus3_goal_free_plateau_enabled: bool = True
+    focus3_goal_free_plateau_min_focus3_evals: int = 60
+    focus3_aion_goal_free_plateau_min_focus3_evals: int = 20
+    focus3_goal_free_plateau_window: int = 80
+    focus3_goal_free_plateau_min_no_improve: int = 60
+    focus3_aion_goal_free_plateau_min_no_improve: int = 20
+    focus3_goal_free_plateau_tol: float = 1e-8
+    focus3_goal_free_plateau_relative_tol: float = 1e-4
+    focus3_goal_free_plateau_min_local_count: int = 6
+    focus3_goal_free_plateau_local_advantage: float = 0.0
+    focus3_goal_free_plateau_exploit_bonus: float = 0.08
+    focus3_goal_free_plateau_exploit_max_best_local: float = 0.84
+    focus3_goal_free_plateau_escape_best_local_scale: float = 0.75
+    focus3_goal_free_plateau_escape_random_bonus: float = 0.04
+    focus3_goal_free_plateau_escape_topk_bonus: float = 0.06
+    focus3_goal_free_plateau_acq: str = "MEAN"
+    focus3_goal_free_plateau_escape_acq: str = "LCB"
+    # AION의 고차원·대예산 Focus3는 개선 간격이 길다. 짧은 예산 문제와 같은
+    # recovery/plateau 기준을 쓰면 LCB escape가 대부분의 budget을 점유한다.
+    focus3_aion_high_dim_policy_enabled: bool = True
+    focus3_aion_high_dim_min_dim: int = 5
+    focus3_aion_high_dim_min_budget: int = 200
+    focus3_aion_high_dim_plateau_min_focus3_evals: int = 60
+    focus3_aion_high_dim_plateau_window: int = 80
+    focus3_aion_high_dim_plateau_min_no_improve: int = 60
+    focus3_aion_high_dim_plateau_min_local_count: int = 12
+    focus3_aion_high_dim_plateau_min_nonlocal_count: int = 24
+    focus3_aion_high_dim_plateau_rate_prior_improved: float = 0.5
+    focus3_aion_high_dim_plateau_rate_prior_total: float = 20.0
+    focus3_aion_high_dim_plateau_escape_min_nonlocal_improved: int = 2
+    focus3_aion_high_dim_plateau_escape_advantage: float = 0.004
+    focus3_aion_high_dim_plateau_escape_period: int = 5
+    # plateau_hold의 시간 상한. escape 판정은 window 내 nonlocal 개선 횟수를 요구하는데,
+    # plateau는 정의상 개선이 없는 상태라 정체가 깊어질수록 그 증거가 영구히 모이지 않는다.
+    # 이 값 이상 정체하면 "국소 심화가 실패했다"는 사실 자체를 증거로 인정하고 escape를 허용한다.
+    # 0이면 상한 없음(기존 동작).
+    focus3_aion_high_dim_plateau_hold_max_no_improve: int = 280
     # Focus3 source ratio = budget class + data reliability + GP/recent improvement 보정.
     focus3_source_adaptive_enabled: bool = True
     focus3_data_ratio_low: float = 5.0
@@ -447,6 +486,11 @@ class OptimizerSystemConfig:
     focus3_aion_recover_window: int = 12
     focus3_aion_recover_min_history: int = 20
     focus3_aion_recover_strong_no_improve: int = 32
+    focus3_aion_high_dim_recover_window: int = 32
+    focus3_aion_high_dim_recover_min_history: int = 40
+    focus3_aion_high_dim_recover_strong_no_improve: int = 80
+    focus3_aion_high_dim_recover_mild_topk_scale: float = 0.35
+    focus3_aion_high_dim_best_local_sigma_late: float = 0.006
     # 무제약 recovery는 boundary보다 random/topk 쪽으로 기울인다.
     focus3_no_constraint_recover_boundary_scale: float = 0.0
     focus3_no_constraint_recover_random_scale: float = 0.15
@@ -464,6 +508,12 @@ class OptimizerSystemConfig:
     focus3_aion_recover_best_local_late_no_improve: int = 180
     focus3_aion_recover_best_local_late_bonus: float = 0.05
     focus3_aion_recover_best_local_late_max: float = 0.85
+    # recover_best_local은 best_local quota를 random -> boundary -> topk 순으로 회수한다.
+    # 하한이 없으면 random이 0까지 말라 탐색 샘플이 사라지고, 그 결과 random의
+    # improve_rate가 "샘플이 없어서 0"이 되어 plateau escape 증거와 source 성능 판정이
+    # 동시에 무력화된다. 회수 총량은 유지하고 부족분은 topk에서 가져오게 해 탐색만 보존한다.
+    focus3_aion_recover_best_local_explore_floor_enabled: bool = True
+    focus3_aion_recover_best_local_explore_floor: float = 0.03
     focus3_recover_random_discrete_gate_enabled: bool = True
     focus3_recover_random_discrete_gate_margin_ratio: float = 0.06
     focus3_recover_random_discrete_gate_min_no_improve: int = 180

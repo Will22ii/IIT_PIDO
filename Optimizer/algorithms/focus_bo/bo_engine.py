@@ -608,6 +608,8 @@ def _apply_focus3_recover_policy(
     best_raw_history: list[float],
     objective_sense: str,
     has_constraints: bool,
+    p_dim: int,
+    focus3_available_budget: int,
 ) -> tuple[float, float, float, float, dict[str, object]]:
     info: dict[str, object] = {
         "enabled": bool(getattr(system, "focus3_recover_enabled", True)),
@@ -625,12 +627,27 @@ def _apply_focus3_recover_policy(
 
     win = int(info["window"])
     is_aion_profile = _focus3_is_aion_profile(system)
+    high_dim_policy = _focus3_use_aion_high_dim_policy(
+        system=system,
+        p_dim=int(p_dim),
+        focus3_available_budget=int(focus3_available_budget),
+    )
+    info["aion_high_dim_policy"] = bool(high_dim_policy)
+    info["p_dim"] = int(p_dim)
+    info["focus3_available_budget"] = int(focus3_available_budget)
     if bool(is_aion_profile):
         win = int(max(int(getattr(system, "focus3_aion_recover_window", win)), 2))
+        if bool(high_dim_policy):
+            win = int(max(int(getattr(system, "focus3_aion_high_dim_recover_window", win)), 2))
         info["window"] = int(win)
     min_history = int(max(int(getattr(system, "focus3_recover_min_history", win)), win))
     if bool(is_aion_profile):
         min_history = int(max(int(getattr(system, "focus3_aion_recover_min_history", min_history)), win))
+        if bool(high_dim_policy):
+            min_history = int(max(
+                int(getattr(system, "focus3_aion_high_dim_recover_min_history", min_history)),
+                win,
+            ))
     info["min_history"] = int(min_history)
     if len(best_raw_history) < min_history:
         info["reason"] = "insufficient_history"
@@ -666,6 +683,11 @@ def _apply_focus3_recover_policy(
     strong_after = int(max(int(getattr(system, "focus3_recover_strong_no_improve", 20)), win))
     if bool(is_aion_profile):
         strong_after = int(max(int(getattr(system, "focus3_aion_recover_strong_no_improve", strong_after)), win))
+        if bool(high_dim_policy):
+            strong_after = int(max(
+                int(getattr(system, "focus3_aion_high_dim_recover_strong_no_improve", strong_after)),
+                win,
+            ))
     elif not bool(has_constraints):
         strong_after = int(max(
             strong_after,
@@ -689,6 +711,13 @@ def _apply_focus3_recover_policy(
         topk_bonus = float(max(float(getattr(system, "focus3_no_constraint_recover_topk_bonus", 0.05)), 0.0))
         boundary_bonus *= boundary_scale
         random_bonus *= random_scale
+        if level == "mild" and bool(high_dim_policy):
+            mild_topk_scale = float(np.clip(
+                float(getattr(system, "focus3_aion_high_dim_recover_mild_topk_scale", 0.35)),
+                0.0,
+                1.0,
+            ))
+            topk_bonus *= mild_topk_scale
 
     p_topk += topk_bonus
     p_boundary += boundary_bonus
@@ -712,6 +741,7 @@ def _apply_focus3_recover_policy(
         "boundary_bonus": float(boundary_bonus),
         "random_bonus": float(random_bonus),
         "kappa_after": float(kappa_after),
+        "force_exploration_acq": bool(not (bool(high_dim_policy) and level == "mild")),
     })
     return p_topk, p_boundary, p_random, float(kappa_after), info
 
@@ -988,6 +1018,8 @@ def _apply_focus3_recover_best_local_policy(
     p_best_local: float,
     recover_info: dict[str, object],
     has_constraints: bool,
+    p_dim: int,
+    focus3_available_budget: int,
 ) -> tuple[float, float, float, float, dict[str, object]]:
     p_topk, p_boundary, p_random, p_best_local = _normalize_focus3_source_probs4(
         topk=p_topk,
@@ -1058,9 +1090,25 @@ def _apply_focus3_recover_best_local_policy(
         info["after"] = dict(info["before"])
         return p_topk, p_boundary, p_random, p_best_local, info
 
+    # 고차원·대예산에서는 random을 0까지 회수하면 탐색 샘플이 사라지고, 그 결과
+    # random의 improve_rate가 "샘플이 없어서 0"이 되어 plateau escape 증거와
+    # source 성능 판정이 함께 무력화된다. 하한을 남겨 측정 가능성을 보존한다.
+    # best_local이 받는 총량은 바뀌지 않는다. 부족분은 아래 topk 회수에서 충당된다.
+    explore_floor = 0.0
+    if _focus3_use_aion_high_dim_policy(
+        system=system,
+        p_dim=int(p_dim),
+        focus3_available_budget=int(focus3_available_budget),
+    ) and bool(getattr(system, "focus3_aion_recover_best_local_explore_floor_enabled", True)):
+        explore_floor = float(np.clip(
+            float(getattr(system, "focus3_aion_recover_best_local_explore_floor", 0.03)),
+            0.0,
+            1.0,
+        ))
+
     # 무제약 Focus3 recovery에서는 local intensification을 우선한다.
     # quota는 boundary/random 탐색에서 먼저 가져오고, 필요하면 top-k에서도 가져온다.
-    take_random = min(need, p_random)
+    take_random = min(need, max(p_random - explore_floor, 0.0))
     p_random -= take_random
     p_best_local += take_random
     need -= take_random
@@ -1094,6 +1142,330 @@ def _apply_focus3_recover_best_local_policy(
         "late_active": bool(late_active),
         "late_no_improve_threshold": int(late_after),
         "aion_profile": bool(is_aion_profile),
+        "explore_floor": float(explore_floor),
+        "explore_floor_applied": bool(explore_floor > 0.0),
+        "after": after,
+    })
+    return p_topk, p_boundary, p_random, p_best_local, info
+
+
+def _apply_focus3_goal_free_plateau_policy(
+    *,
+    system: OptimizerSystemConfig,
+    p_topk: float,
+    p_boundary: float,
+    p_random: float,
+    p_best_local: float,
+    best_raw_history: list[float],
+    objective_sense: str,
+    focus3_eval_count: int,
+    recover_info: dict[str, object] | None,
+    source_performance_info: dict[str, object] | None,
+    has_constraints: bool,
+    p_dim: int,
+    focus3_available_budget: int,
+) -> tuple[float, float, float, float, dict[str, object]]:
+    p_topk, p_boundary, p_random, p_best_local = _normalize_focus3_source_probs4(
+        topk=p_topk,
+        boundary=p_boundary,
+        random_p=p_random,
+        best_local=p_best_local,
+    )
+    is_aion_profile = _focus3_is_aion_profile(system)
+    high_dim_policy = _focus3_use_aion_high_dim_policy(
+        system=system,
+        p_dim=int(p_dim),
+        focus3_available_budget=int(focus3_available_budget),
+    )
+    enabled = bool(getattr(system, "focus3_goal_free_plateau_enabled", True))
+    window = int(max(int(getattr(system, "focus3_goal_free_plateau_window", 80)), 2))
+    min_evals = int(max(int(getattr(system, "focus3_goal_free_plateau_min_focus3_evals", 60)), 0))
+    min_no_improve = int(max(int(getattr(system, "focus3_goal_free_plateau_min_no_improve", window)), 0))
+    if bool(is_aion_profile):
+        min_evals = int(max(int(getattr(system, "focus3_aion_goal_free_plateau_min_focus3_evals", min_evals)), 0))
+        min_no_improve = int(max(int(getattr(system, "focus3_aion_goal_free_plateau_min_no_improve", min_no_improve)), 0))
+        if bool(high_dim_policy):
+            min_evals = int(max(int(getattr(
+                system,
+                "focus3_aion_high_dim_plateau_min_focus3_evals",
+                min_evals,
+            )), 0))
+            window = int(max(int(getattr(
+                system,
+                "focus3_aion_high_dim_plateau_window",
+                window,
+            )), 2))
+            min_no_improve = int(max(int(getattr(
+                system,
+                "focus3_aion_high_dim_plateau_min_no_improve",
+                min_no_improve,
+            )), 0))
+    info: dict[str, object] = {
+        "enabled": bool(enabled),
+        "applied": False,
+        "state": "disabled" if not enabled else "inactive",
+        "reason": "disabled" if not enabled else "",
+        "before": {
+            "topk": float(p_topk),
+            "boundary": float(p_boundary),
+            "random": float(p_random),
+            "best_local": float(p_best_local),
+        },
+        "focus3_eval_count": int(focus3_eval_count),
+        "min_focus3_evals": int(min_evals),
+        "window": int(window),
+        "min_no_improve": int(min_no_improve),
+        "recent_improvement": float("nan"),
+        "tol_effective": float("nan"),
+        "no_improve_count": 0,
+        "local_count": 0,
+        "local_improve_rate": float("nan"),
+        "nonlocal_improve_rate": float("nan"),
+        "aion_profile": bool(is_aion_profile),
+        "aion_high_dim_policy": bool(high_dim_policy),
+        "p_dim": int(p_dim),
+        "focus3_available_budget": int(focus3_available_budget),
+    }
+    if not enabled:
+        info["after"] = dict(info["before"])
+        return p_topk, p_boundary, p_random, p_best_local, info
+    if bool(has_constraints):
+        info["reason"] = "constraints_present"
+        info["after"] = dict(info["before"])
+        return p_topk, p_boundary, p_random, p_best_local, info
+    if int(focus3_eval_count) < min_evals:
+        info["reason"] = "insufficient_focus3_evals"
+        info["after"] = dict(info["before"])
+        return p_topk, p_boundary, p_random, p_best_local, info
+    if len(best_raw_history) < 2:
+        info["reason"] = "insufficient_best_history"
+        info["after"] = dict(info["before"])
+        return p_topk, p_boundary, p_random, p_best_local, info
+
+    ref_idx = max(len(best_raw_history) - window, 0)
+    if objective_sense == "max":
+        recent_improvement = float(best_raw_history[-1] - best_raw_history[ref_idx])
+    else:
+        recent_improvement = float(best_raw_history[ref_idx] - best_raw_history[-1])
+    ref_scale = float(max(abs(float(best_raw_history[ref_idx])), abs(float(best_raw_history[-1])), 1.0))
+    tol_abs = float(max(float(getattr(system, "focus3_goal_free_plateau_tol", 1e-8)), 0.0))
+    tol_rel = float(max(float(getattr(system, "focus3_goal_free_plateau_relative_tol", 1e-4)), 0.0))
+    tol = float(max(tol_abs, tol_rel * ref_scale))
+    info["recent_improvement"] = float(recent_improvement)
+    info["tol_effective"] = float(tol)
+
+    no_improve_count = 0
+    for idx in range(len(best_raw_history) - 1, 0, -1):
+        if objective_sense == "max":
+            step_improvement = float(best_raw_history[idx] - best_raw_history[idx - 1])
+        else:
+            step_improvement = float(best_raw_history[idx - 1] - best_raw_history[idx])
+        if step_improvement > tol:
+            break
+        no_improve_count += 1
+    if isinstance(recover_info, dict):
+        no_improve_count = max(no_improve_count, int(max(int(recover_info.get("no_improve_count", 0) or 0), 0)))
+    info["no_improve_count"] = int(no_improve_count)
+    plateau = bool(recent_improvement <= tol or int(no_improve_count) >= int(min_no_improve))
+    if not plateau:
+        info["reason"] = "not_plateau"
+        info["state"] = "normal"
+        info["after"] = dict(info["before"])
+        return p_topk, p_boundary, p_random, p_best_local, info
+
+    perf = source_performance_info if isinstance(source_performance_info, dict) else {}
+
+    def _count(name: str) -> int:
+        try:
+            return int(float(perf.get(f"{name}_refine_count", 0) or 0))
+        except Exception:
+            return 0
+
+    def _rate(name: str) -> float:
+        try:
+            return float(perf.get(f"{name}_refine_improve_rate", float("nan")))
+        except Exception:
+            return float("nan")
+
+    def _improved_count(name: str) -> int:
+        try:
+            return int(float(perf.get(f"{name}_refine_improved_count", 0) or 0))
+        except Exception:
+            return 0
+
+    local_sources = ("best_local", "correlated_local", "local_probe")
+    nonlocal_sources = ("topk", "random", "boundary")
+    local_counts = [_count(src) for src in local_sources]
+    local_count = int(sum(local_counts))
+    nonlocal_count = int(sum(_count(src) for src in nonlocal_sources))
+    local_improved = int(sum(_improved_count(src) for src in local_sources))
+    nonlocal_improved = int(sum(_improved_count(src) for src in nonlocal_sources))
+    local_rates = [_rate(src) for src in local_sources if math.isfinite(_rate(src))]
+    nonlocal_rates = [_rate(src) for src in nonlocal_sources if math.isfinite(_rate(src))]
+    local_rate = float(max(local_rates)) if local_rates else float("nan")
+    nonlocal_rate = float(max(nonlocal_rates)) if nonlocal_rates else float("nan")
+    info["local_count"] = int(local_count)
+    info["nonlocal_count"] = int(nonlocal_count)
+    info["local_improved_count"] = int(local_improved)
+    info["nonlocal_improved_count"] = int(nonlocal_improved)
+    info["local_improve_rate"] = float(local_rate)
+    info["nonlocal_improve_rate"] = float(nonlocal_rate)
+
+    min_local_count = int(max(int(getattr(system, "focus3_goal_free_plateau_min_local_count", 6)), 0))
+    local_advantage = float(getattr(system, "focus3_goal_free_plateau_local_advantage", 0.0))
+    escape_supported = False
+    escape_pulse = False
+    escape_evidence_waived = False
+    if bool(high_dim_policy):
+        min_local_count = int(max(int(getattr(
+            system,
+            "focus3_aion_high_dim_plateau_min_local_count",
+            min_local_count,
+        )), 1))
+        min_nonlocal_count = int(max(int(getattr(
+            system,
+            "focus3_aion_high_dim_plateau_min_nonlocal_count",
+            24,
+        )), 1))
+        prior_improved = float(max(float(getattr(
+            system,
+            "focus3_aion_high_dim_plateau_rate_prior_improved",
+            0.5,
+        )), 0.0))
+        prior_total = float(max(float(getattr(
+            system,
+            "focus3_aion_high_dim_plateau_rate_prior_total",
+            20.0,
+        )), prior_improved, 1e-12))
+        local_rate = float((local_improved + prior_improved) / (local_count + prior_total))
+        nonlocal_rate = float((nonlocal_improved + prior_improved) / (nonlocal_count + prior_total))
+        min_nonlocal_improved = int(max(int(getattr(
+            system,
+            "focus3_aion_high_dim_plateau_escape_min_nonlocal_improved",
+            2,
+        )), 1))
+        escape_advantage = float(max(float(getattr(
+            system,
+            "focus3_aion_high_dim_plateau_escape_advantage",
+            0.004,
+        )), 0.0))
+        local_supported = bool(
+            local_count >= min_local_count
+            and local_improved > 0
+            and local_rate + 1e-12 >= nonlocal_rate + local_advantage
+        )
+        escape_supported = bool(
+            local_count >= min_local_count
+            and nonlocal_count >= min_nonlocal_count
+            and nonlocal_improved >= min_nonlocal_improved
+            and nonlocal_rate >= local_rate + escape_advantage
+        )
+        # escape 증거는 window 내 nonlocal 개선 횟수를 요구한다. 그런데 plateau는 정의상
+        # 개선이 없는 상태이므로, 정체가 깊어질수록 그 증거는 오히려 모이지 않는다.
+        # 상한을 넘기면 국소 심화가 실패했다는 사실 자체를 증거로 보고 요구를 면제한다.
+        hold_max_no_improve = int(max(int(getattr(
+            system,
+            "focus3_aion_high_dim_plateau_hold_max_no_improve",
+            280,
+        )), 0))
+        escape_evidence_waived = bool(
+            hold_max_no_improve > 0
+            and int(no_improve_count) >= hold_max_no_improve
+            and not escape_supported
+        )
+        escape_supported = bool(escape_supported or escape_evidence_waived)
+        escape_period = int(max(int(getattr(
+            system,
+            "focus3_aion_high_dim_plateau_escape_period",
+            5,
+        )), 1))
+        escape_pulse = bool(escape_supported and int(no_improve_count) % escape_period == 0)
+        info.update({
+            "local_improve_rate": float(local_rate),
+            "nonlocal_improve_rate": float(nonlocal_rate),
+            "min_nonlocal_count": int(min_nonlocal_count),
+            "rate_prior_improved": float(prior_improved),
+            "rate_prior_total": float(prior_total),
+            "escape_min_nonlocal_improved": int(min_nonlocal_improved),
+            "escape_advantage": float(escape_advantage),
+            "escape_supported": bool(escape_supported),
+            "escape_period": int(escape_period),
+            "escape_pulse": bool(escape_pulse),
+            "hold_max_no_improve": int(hold_max_no_improve),
+            "escape_evidence_waived": bool(escape_evidence_waived),
+        })
+    elif local_count >= min_local_count and math.isfinite(local_rate):
+        baseline = float(nonlocal_rate) if math.isfinite(nonlocal_rate) else 0.0
+        local_supported = bool(local_rate > 0.0 and local_rate + 1e-12 >= baseline + local_advantage)
+    else:
+        # 기존 저차원/standalone 경로의 동작은 보존한다.
+        local_supported = bool(p_best_local > 0.0 and int(no_improve_count) >= int(min_no_improve))
+    info["min_local_count"] = int(min_local_count)
+    info["local_advantage"] = float(local_advantage)
+    info["local_supported"] = bool(local_supported)
+
+    if local_supported:
+        bonus = float(max(float(getattr(system, "focus3_goal_free_plateau_exploit_bonus", 0.08)), 0.0))
+        max_best = float(np.clip(float(getattr(system, "focus3_goal_free_plateau_exploit_max_best_local", 0.84)), 0.0, 1.0))
+        target = float(min(max_best, p_best_local + bonus))
+        need = float(max(target - p_best_local, 0.0))
+        take_random = min(need, p_random)
+        p_random -= take_random
+        p_best_local += take_random
+        need -= take_random
+        take_boundary = min(need, p_boundary)
+        p_boundary -= take_boundary
+        p_best_local += take_boundary
+        need -= take_boundary
+        take_topk = min(need, p_topk)
+        p_topk -= take_topk
+        p_best_local += take_topk
+        state = "plateau_exploit"
+        reason = "plateau_local_supported"
+        info["target_best_local"] = float(target)
+        info["exploit_bonus"] = float(bonus)
+        info["max_best_local"] = float(max_best)
+    elif bool(high_dim_policy) and not bool(escape_pulse):
+        state = "plateau_hold"
+        reason = "plateau_escape_pulse_wait" if bool(escape_supported) else "plateau_evidence_inconclusive"
+    else:
+        scale = float(np.clip(float(getattr(system, "focus3_goal_free_plateau_escape_best_local_scale", 0.75)), 0.0, 1.0))
+        freed = float(p_best_local * (1.0 - scale))
+        p_best_local *= scale
+        random_bonus = float(max(float(getattr(system, "focus3_goal_free_plateau_escape_random_bonus", 0.04)), 0.0))
+        topk_bonus = float(max(float(getattr(system, "focus3_goal_free_plateau_escape_topk_bonus", 0.06)), 0.0))
+        total_bonus = max(random_bonus + topk_bonus, 1e-12)
+        p_random += freed * (random_bonus / total_bonus)
+        p_topk += freed * (topk_bonus / total_bonus)
+        state = "plateau_escape"
+        reason = (
+            "plateau_escape_evidence_waived"
+            if bool(escape_evidence_waived)
+            else "plateau_local_unsupported"
+        )
+        info["escape_best_local_scale"] = float(scale)
+        info["escape_random_bonus"] = float(random_bonus)
+        info["escape_topk_bonus"] = float(topk_bonus)
+
+    p_topk, p_boundary, p_random, p_best_local = _normalize_focus3_source_probs4(
+        topk=p_topk,
+        boundary=p_boundary,
+        random_p=p_random,
+        best_local=p_best_local,
+    )
+    after = {
+        "topk": float(p_topk),
+        "boundary": float(p_boundary),
+        "random": float(p_random),
+        "best_local": float(p_best_local),
+    }
+    probability_adjusted = any(abs(after[k] - float(info["before"][k])) > 1e-12 for k in after)
+    # hold는 진단 상태일 뿐이며 source 확률과 acquisition을 변경하지 않는다.
+    info.update({
+        "applied": bool(probability_adjusted),
+        "probability_adjusted": bool(probability_adjusted),
+        "state": str(state),
+        "reason": str(reason),
         "after": after,
     })
     return p_topk, p_boundary, p_random, p_best_local, info
@@ -1104,8 +1476,15 @@ def _resolve_focus3_best_local_sigma(
     system: OptimizerSystemConfig,
     focus3_eval_count: int,
     recover_info: dict[str, object] | None,
+    p_dim: int,
+    focus3_available_budget: int,
 ) -> tuple[float, dict[str, object]]:
     is_aion_profile = _focus3_is_aion_profile(system)
+    high_dim_policy = _focus3_use_aion_high_dim_policy(
+        system=system,
+        p_dim=int(p_dim),
+        focus3_available_budget=int(focus3_available_budget),
+    )
     base = float(max(float(getattr(system, "focus3_best_local_sigma", 0.015)), 1e-9))
     enabled = bool(getattr(system, "focus3_best_local_sigma_schedule_enabled", True))
     if bool(is_aion_profile):
@@ -1123,6 +1502,12 @@ def _resolve_focus3_best_local_sigma(
             late_eval = int(max(int(getattr(system, "focus3_aion_best_local_sigma_late_eval", late_eval)), mid_eval))
             mid_sigma = float(max(float(getattr(system, "focus3_aion_best_local_sigma_mid", mid_sigma)), 1e-9))
             late_sigma = float(max(float(getattr(system, "focus3_aion_best_local_sigma_late", late_sigma)), 1e-9))
+            if bool(high_dim_policy):
+                late_sigma = float(max(float(getattr(
+                    system,
+                    "focus3_aion_high_dim_best_local_sigma_late",
+                    late_sigma,
+                )), 1e-9))
         if int(focus3_eval_count) >= late_eval:
             sigma = late_sigma
             reason = "late_focus3"
@@ -1142,6 +1527,7 @@ def _resolve_focus3_best_local_sigma(
         "reason": str(reason),
         "focus3_eval_count": int(focus3_eval_count),
         "aion_profile": bool(is_aion_profile),
+        "aion_high_dim_policy": bool(high_dim_policy),
     }
 
 
@@ -1869,6 +2255,21 @@ def _focus3_penalized_sources(
 def _focus3_is_aion_profile(system: OptimizerSystemConfig) -> bool:
     profile = str(getattr(system, "focus_planner_profile", "standalone") or "standalone").strip().lower()
     return profile in {"aion", "aion_trusted_bounds", "trusted_bounds"}
+
+
+def _focus3_use_aion_high_dim_policy(
+    *,
+    system: OptimizerSystemConfig,
+    p_dim: int,
+    focus3_available_budget: int,
+) -> bool:
+    if not _focus3_is_aion_profile(system):
+        return False
+    if not bool(getattr(system, "focus3_aion_high_dim_policy_enabled", True)):
+        return False
+    min_dim = int(max(int(getattr(system, "focus3_aion_high_dim_min_dim", 5)), 1))
+    min_budget = int(max(int(getattr(system, "focus3_aion_high_dim_min_budget", 200)), 0))
+    return bool(int(p_dim) >= min_dim and int(focus3_available_budget) >= min_budget)
 
 
 def _focus3_best_plan_filter_sources(system: OptimizerSystemConfig) -> set[str]:
@@ -7342,6 +7743,7 @@ def run_bo_engine(
         focus3_boundary_score_penalty_info: dict[str, object] = {}
         focus3_source_perf_info: dict[str, object] = {}
         focus3_source_perf_best_plan_filter_info: dict[str, object] = {}
+        focus3_goal_free_plateau_info: dict[str, object] = {}
         focus3_recover_info: dict[str, object] = {}
         focus3_source_cap_info: dict[str, object] = {}
         focus3_best_local_info: dict[str, object] = {}
@@ -7883,6 +8285,8 @@ def run_bo_engine(
                     best_raw_history=best_raw_history,
                     objective_sense=objective_sense,
                     has_constraints=bool(constraint_defs),
+                    p_dim=int(p_dim),
+                    focus3_available_budget=int(focus3_available_budget),
                 )
                 p_topk, p_bnd, p_rand, focus3_source_cap_info = _apply_focus3_no_constraint_source_cap(
                     system=system,
@@ -7922,6 +8326,8 @@ def run_bo_engine(
                     p_best_local=p_best_local,
                     recover_info=focus3_recover_info,
                     has_constraints=bool(constraint_defs),
+                    p_dim=int(p_dim),
+                    focus3_available_budget=int(focus3_available_budget),
                 )
                 source_prob_topk = float(p_topk)
                 source_prob_boundary = float(p_bnd)
@@ -7931,6 +8337,8 @@ def run_bo_engine(
                     system=system,
                     focus3_eval_count=int(focus3_eval_count),
                     recover_info=focus3_recover_info,
+                    p_dim=int(p_dim),
+                    focus3_available_budget=int(focus3_available_budget),
                 )
                 pre_active = bool(pre_hard_active)
                 segment = "focus3"
@@ -7994,6 +8402,7 @@ def run_bo_engine(
                     source_prob_best_local = float(p_best_local)
                 if (
                     bool(focus3_recover_info.get("active", False))
+                    and bool(focus3_recover_info.get("force_exploration_acq", True))
                     and focus3_requested_acq_type == "AUTO"
                     and str(focus3_acq_type).upper() in {"EI", "MEAN"}
                     and not bool(focus3_near_goal_exploitation_info.get("active", False))
@@ -8133,6 +8542,41 @@ def run_bo_engine(
                         has_constraints=bool(constraint_defs),
                         recovery_active=bool(focus3_recover_info.get("active", False)),
                     )
+                    p_topk, p_bnd, p_rand, p_best_local, focus3_goal_free_plateau_info = _apply_focus3_goal_free_plateau_policy(
+                        system=system,
+                        p_topk=p_topk,
+                        p_boundary=p_bnd,
+                        p_random=p_rand,
+                        p_best_local=p_best_local,
+                        best_raw_history=best_raw_history,
+                        objective_sense=objective_sense,
+                        focus3_eval_count=int(focus3_eval_count),
+                        recover_info=focus3_recover_info,
+                        source_performance_info=focus3_source_perf_info,
+                        has_constraints=bool(constraint_defs),
+                        p_dim=int(p_dim),
+                        focus3_available_budget=int(focus3_available_budget),
+                    )
+                    if bool(focus3_goal_free_plateau_info.get("applied", False)):
+                        source_prob_topk = float(p_topk)
+                        source_prob_boundary = float(p_bnd)
+                        source_prob_random = float(p_rand)
+                        source_prob_best_local = float(p_best_local)
+                        if focus3_requested_acq_type == "AUTO":
+                            plateau_state = str(focus3_goal_free_plateau_info.get("state", ""))
+                            if plateau_state == "plateau_exploit":
+                                focus3_acq_type = _normalize_focus3_acq_type(
+                                    getattr(system, "focus3_goal_free_plateau_acq", "MEAN")
+                                )
+                            elif plateau_state == "plateau_escape":
+                                focus3_acq_type = _normalize_focus3_acq_type(
+                                    getattr(system, "focus3_goal_free_plateau_escape_acq", "LCB")
+                                )
+                            focus3_acq_policy_info["effective"] = str(focus3_acq_type)
+                            focus3_acq_policy_info["reason"] = (
+                                str(focus3_acq_policy_info.get("reason", ""))
+                                + f"+goal_free_{plateau_state}"
+                            )
                     t0 = _timer_start()
                     if refine_this_iter:
                         refine_starts, pool_counts, selected_counts, focus3_plan_diag = _build_focus3_plan_refine_starts(
@@ -8895,6 +9339,26 @@ def run_bo_engine(
             "focus3_near_goal_exploitation_reason": str(focus3_near_goal_exploitation_info.get("reason", "")) if focus3_near_goal_exploitation_info else "",
             "focus3_near_goal_exploitation_threshold": float(focus3_near_goal_exploitation_info.get("threshold", float("nan"))) if focus3_near_goal_exploitation_info else float("nan"),
             "focus3_near_goal_exploitation_acq": str(focus3_near_goal_exploitation_info.get("requested_acq", "")) if focus3_near_goal_exploitation_info else "",
+            "focus3_goal_free_plateau_enabled": bool(focus3_goal_free_plateau_info.get("enabled", False)) if focus3_goal_free_plateau_info else False,
+            "focus3_goal_free_plateau_applied": bool(focus3_goal_free_plateau_info.get("applied", False)) if focus3_goal_free_plateau_info else False,
+            "focus3_goal_free_plateau_state": str(focus3_goal_free_plateau_info.get("state", "")) if focus3_goal_free_plateau_info else "",
+            "focus3_goal_free_plateau_reason": str(focus3_goal_free_plateau_info.get("reason", "")) if focus3_goal_free_plateau_info else "",
+            "focus3_goal_free_plateau_recent_improvement": float(focus3_goal_free_plateau_info.get("recent_improvement", float("nan"))) if focus3_goal_free_plateau_info else float("nan"),
+            "focus3_goal_free_plateau_tol": float(focus3_goal_free_plateau_info.get("tol_effective", float("nan"))) if focus3_goal_free_plateau_info else float("nan"),
+            "focus3_goal_free_plateau_no_improve_count": int(focus3_goal_free_plateau_info.get("no_improve_count", 0)) if focus3_goal_free_plateau_info else 0,
+            "focus3_goal_free_plateau_local_count": int(focus3_goal_free_plateau_info.get("local_count", 0)) if focus3_goal_free_plateau_info else 0,
+            "focus3_goal_free_plateau_nonlocal_count": int(focus3_goal_free_plateau_info.get("nonlocal_count", 0)) if focus3_goal_free_plateau_info else 0,
+            "focus3_goal_free_plateau_local_improved_count": int(focus3_goal_free_plateau_info.get("local_improved_count", 0)) if focus3_goal_free_plateau_info else 0,
+            "focus3_goal_free_plateau_nonlocal_improved_count": int(focus3_goal_free_plateau_info.get("nonlocal_improved_count", 0)) if focus3_goal_free_plateau_info else 0,
+            "focus3_goal_free_plateau_local_improve_rate": float(focus3_goal_free_plateau_info.get("local_improve_rate", float("nan"))) if focus3_goal_free_plateau_info else float("nan"),
+            "focus3_goal_free_plateau_nonlocal_improve_rate": float(focus3_goal_free_plateau_info.get("nonlocal_improve_rate", float("nan"))) if focus3_goal_free_plateau_info else float("nan"),
+            "focus3_goal_free_plateau_local_supported": bool(focus3_goal_free_plateau_info.get("local_supported", False)) if focus3_goal_free_plateau_info else False,
+            "focus3_goal_free_plateau_escape_supported": bool(focus3_goal_free_plateau_info.get("escape_supported", False)) if focus3_goal_free_plateau_info else False,
+            "focus3_goal_free_plateau_escape_pulse": bool(focus3_goal_free_plateau_info.get("escape_pulse", False)) if focus3_goal_free_plateau_info else False,
+            "focus3_goal_free_plateau_hold_max_no_improve": int(focus3_goal_free_plateau_info.get("hold_max_no_improve", 0)) if focus3_goal_free_plateau_info else 0,
+            "focus3_goal_free_plateau_escape_evidence_waived": bool(focus3_goal_free_plateau_info.get("escape_evidence_waived", False)) if focus3_goal_free_plateau_info else False,
+            "focus3_goal_free_plateau_probability_adjusted": bool(focus3_goal_free_plateau_info.get("probability_adjusted", False)) if focus3_goal_free_plateau_info else False,
+            "focus3_goal_free_plateau_aion_high_dim_policy": bool(focus3_goal_free_plateau_info.get("aion_high_dim_policy", False)) if focus3_goal_free_plateau_info else False,
             "focus3_recover_enabled": bool(focus3_recover_info.get("enabled", False)) if focus3_recover_info else False,
             "focus3_recover_active": bool(focus3_recover_info.get("active", False)) if focus3_recover_info else False,
             "focus3_recover_reason": str(focus3_recover_info.get("reason", "")) if focus3_recover_info else "",
@@ -8904,6 +9368,11 @@ def run_bo_engine(
             "focus3_recover_topk_bonus": float(focus3_recover_info.get("topk_bonus", 0.0)) if focus3_recover_info else 0.0,
             "focus3_recover_boundary_bonus": float(focus3_recover_info.get("boundary_bonus", 0.0)) if focus3_recover_info else 0.0,
             "focus3_recover_random_bonus": float(focus3_recover_info.get("random_bonus", 0.0)) if focus3_recover_info else 0.0,
+            "focus3_recover_window_effective": int(focus3_recover_info.get("window", 0)) if focus3_recover_info else 0,
+            "focus3_recover_min_history_effective": int(focus3_recover_info.get("min_history", 0)) if focus3_recover_info else 0,
+            "focus3_recover_strong_threshold_effective": int(focus3_recover_info.get("strong_no_improve_threshold", 0)) if focus3_recover_info else 0,
+            "focus3_recover_force_exploration_acq": bool(focus3_recover_info.get("force_exploration_acq", False)) if focus3_recover_info else False,
+            "focus3_recover_aion_high_dim_policy": bool(focus3_recover_info.get("aion_high_dim_policy", False)) if focus3_recover_info else False,
             "focus3_kappa_before_recover": float(focus3_recover_info.get("kappa_before", float("nan"))) if focus3_recover_info else float("nan"),
             "focus3_kappa_after_recover": float(focus3_recover_info.get("kappa_after", float("nan"))) if focus3_recover_info else float("nan"),
             "focus3_source_cap_enabled": bool(focus3_source_cap_info.get("enabled", False)) if focus3_source_cap_info else False,
@@ -8923,11 +9392,14 @@ def run_bo_engine(
             "focus3_recover_best_local_reason": str(focus3_recover_best_local_info.get("reason", "")) if focus3_recover_best_local_info else "",
             "focus3_recover_best_local_bonus": float(focus3_recover_best_local_info.get("bonus", 0.0)) if focus3_recover_best_local_info else 0.0,
             "focus3_recover_best_local_late_active": bool(focus3_recover_best_local_info.get("late_active", False)) if focus3_recover_best_local_info else False,
+            "focus3_recover_best_local_explore_floor": float(focus3_recover_best_local_info.get("explore_floor", 0.0)) if focus3_recover_best_local_info else 0.0,
+            "focus3_recover_best_local_explore_floor_applied": bool(focus3_recover_best_local_info.get("explore_floor_applied", False)) if focus3_recover_best_local_info else False,
             "focus3_recover_best_local_max": float(focus3_recover_best_local_info.get("max_best_local", float("nan"))) if focus3_recover_best_local_info else float("nan"),
             "focus3_best_local_sigma_enabled": bool(focus3_best_local_sigma_info.get("enabled", False)) if focus3_best_local_sigma_info else False,
             "focus3_best_local_sigma_base": float(focus3_best_local_sigma_info.get("base", float("nan"))) if focus3_best_local_sigma_info else float("nan"),
             "focus3_best_local_sigma_effective": float(focus3_best_local_sigma_info.get("effective", float("nan"))) if focus3_best_local_sigma_info else float("nan"),
             "focus3_best_local_sigma_reason": str(focus3_best_local_sigma_info.get("reason", "")) if focus3_best_local_sigma_info else "",
+            "focus3_best_local_sigma_aion_high_dim_policy": bool(focus3_best_local_sigma_info.get("aion_high_dim_policy", False)) if focus3_best_local_sigma_info else False,
             "focus3_fallback_bounds_source_enabled": bool(focus3_fallback_bounds_source_info.get("enabled", False)) if focus3_fallback_bounds_source_info else False,
             "focus3_fallback_bounds_source_applied": bool(focus3_fallback_bounds_source_info.get("applied", False)) if focus3_fallback_bounds_source_info else False,
             "focus3_fallback_bounds_source_reason": str(focus3_fallback_bounds_source_info.get("reason", "")) if focus3_fallback_bounds_source_info else "",
