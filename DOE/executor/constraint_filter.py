@@ -23,6 +23,45 @@ def _normalize_scope(scope: str | None) -> str:
     return value
 
 
+# 등식에 eps가 없을 때 쓰는 정확 일치 허용치. 물리적 공차가 아니라
+# 부동소수점 오차 흡수용이다. 정수형 출력(n_modes == 3 등)은 float로 정확히
+# 표현되므로 이 값으로 통과하고, 연속값은 통과하지 못한다.
+EXACT_EQUALITY_EPS = 1e-9
+
+# 등식 분류 키. validate_constraint_defs가 채운다.
+EQUALITY_KIND_KEY = "equality_kind"
+EQUALITY_KIND_BAND = "type1_band"      # eps 있음. 공차 있는 목표값. rejection으로 처리
+EQUALITY_KIND_EXACT = "type2_exact"    # eps 없음. 구조적 등식. pre면 투영 대상
+
+
+def is_type2_equality(cdef: dict) -> bool:
+    """구조적 등식(eps 미지정)인가."""
+    if str(cdef.get("type", "")).strip() != "==":
+        return False
+    return cdef.get(EQUALITY_KIND_KEY) == EQUALITY_KIND_EXACT
+
+
+def pre_type2_equality_defs(constraint_defs: list | None) -> list[dict]:
+    """투영으로 처리할 제약. scope=pre 이면서 Type 2 등식인 것."""
+    return [
+        c
+        for c in (constraint_defs or [])
+        if isinstance(c, dict)
+        and _normalize_scope(c.get("scope", "pre")) == "pre"
+        and is_type2_equality(c)
+    ]
+
+
+def rejection_constraint_defs(constraint_defs: list | None) -> list[dict]:
+    """rejection으로 처리할 제약. 투영 대상(pre Type 2 등식)만 제외한다.
+
+    margin과 통과율은 이 목록으로 계산해야 한다. 투영된 제약은 정의상 모든 점이
+    경계 위에 있어 거리 개념이 없고, 통과율도 항상 1이 되어 신호가 죽는다.
+    """
+    excluded = {id(c) for c in pre_type2_equality_defs(constraint_defs)}
+    return [c for c in (constraint_defs or []) if id(c) not in excluded]
+
+
 def validate_constraint_defs(constraint_defs: list | None) -> list[dict]:
     if not constraint_defs:
         return []
@@ -75,7 +114,18 @@ def validate_constraint_defs(constraint_defs: list | None) -> list[dict]:
         item["name"] = str(raw.get("name", cid))
 
         if ctype == "==":
-            if "eps" in raw and raw.get("eps") is not None:
+            for legacy_key in ("eps_ratio", "eps_min"):
+                if raw.get(legacy_key) is not None:
+                    raise ValueError(
+                        f"constraint_defs[{idx}] '{legacy_key}' is no longer supported. "
+                        "Specify an absolute 'eps' instead. "
+                        "A ratio needs a reference scale, and 'limit' is not one "
+                        "(limit=0 carries no scale information at all). "
+                        "The tolerance is domain knowledge -- give it directly, "
+                        f"e.g. {{'type': '==', 'limit': {limit}, 'eps': <tolerance>}}."
+                    )
+
+            if raw.get("eps") is not None:
                 try:
                     eps = float(raw.get("eps"))
                 except Exception as exc:
@@ -83,16 +133,11 @@ def validate_constraint_defs(constraint_defs: list | None) -> list[dict]:
                 if not np.isfinite(eps) or eps < 0:
                     raise ValueError(f"constraint_defs[{idx}] eps must be finite and >= 0.")
                 item["eps"] = float(eps)
-            if "eps_ratio" in raw and raw.get("eps_ratio") is not None:
-                eps_ratio = float(raw.get("eps_ratio"))
-                if not np.isfinite(eps_ratio) or eps_ratio < 0:
-                    raise ValueError(f"constraint_defs[{idx}] eps_ratio must be finite and >= 0.")
-                item["eps_ratio"] = float(eps_ratio)
-            if "eps_min" in raw and raw.get("eps_min") is not None:
-                eps_min = float(raw.get("eps_min"))
-                if not np.isfinite(eps_min) or eps_min < 0:
-                    raise ValueError(f"constraint_defs[{idx}] eps_min must be finite and >= 0.")
-                item["eps_min"] = float(eps_min)
+                item[EQUALITY_KIND_KEY] = EQUALITY_KIND_BAND
+            else:
+                # eps 공란 = 구조적 등식. pre면 투영, post면 정확 일치 라벨링.
+                item.pop("eps", None)
+                item[EQUALITY_KIND_KEY] = EQUALITY_KIND_EXACT
 
         normalized.append(item)
     return normalized
@@ -149,12 +194,23 @@ def _iter_constraint_defs(constraint_defs: list | None):
 
 
 def _eval_tolerance(cdef: dict, limit: float) -> float:
+    """등식의 허용 밴드 폭.
+
+    eps가 있으면(Type 1) 그 값을 그대로 쓴다. 공차는 규격/공차표에서 나오는
+    도메인 지식이므로 유저만 정할 수 있다.
+
+    eps가 없으면(Type 2) 정확 일치로 본다. EXACT_EQUALITY_EPS는 물리적 공차가
+    아니라 부동소수점 오차 흡수용이다.
+
+    과거에는 eps가 없을 때 limit의 2%(eps_ratio)를 자동으로 채웠으나 제거했다.
+    그 계산은 limit 값만 보고 변수 범위를 보지 않아, limit=0이면 근거 없이 1.0을
+    스케일로 써서 문제에 따라 무제약이 되거나 만족 불가능이 되었다.
+    또한 자동 채움이 Type 2를 Type 1인 것처럼 처리해 구조적 등식을 밴드 rejection으로
+    풀게 만들었다.
+    """
     if cdef.get("eps") is not None:
         return max(float(cdef["eps"]), 0.0)
-    eps_ratio = float(cdef.get("eps_ratio", 0.02))
-    eps_min = float(cdef.get("eps_min", 1e-6))
-    scale = max(abs(float(limit)), 1.0)
-    return max(scale * eps_ratio, eps_min)
+    return EXACT_EQUALITY_EPS
 
 
 def _constraint_scale(*, value: float, limit: float) -> float:
@@ -273,6 +329,43 @@ def evaluate_constraints_point(
 
     margin = float(np.min(np.asarray(margin_values, dtype=float)))
     return constraints, feasible, margin
+
+
+def equality_residuals(
+    *,
+    x: np.ndarray,
+    var_names: Iterable[str],
+    equality_defs: list | None,
+) -> np.ndarray:
+    """등식 잔차 h(x) - L 벡터. 투영에서 쓴다.
+
+    식 평가가 실패하면 inf를 넣는다. 호출부는 비유한 잔차를 투영 실패로 처리한다.
+    """
+    defs = list(equality_defs or [])
+    if not defs:
+        return np.empty((0,), dtype=float)
+
+    env = _build_eval_env(np.asarray(x, dtype=float), var_names)
+    out = np.empty((len(defs),), dtype=float)
+    for i, cdef in enumerate(defs):
+        try:
+            value = _eval_expr(str(cdef.get("expr", "")).strip(), env)
+            residual = float(value) - float(cdef.get("limit"))
+            out[i] = residual if np.isfinite(residual) else float("inf")
+        except Exception:
+            out[i] = float("inf")
+    return out
+
+
+def equality_tolerances(equality_defs: list | None) -> np.ndarray:
+    """등식별 허용치 벡터. 투영 수렴 판정에 쓴다."""
+    defs = list(equality_defs or [])
+    if not defs:
+        return np.empty((0,), dtype=float)
+    return np.asarray(
+        [_eval_tolerance(c, float(c.get("limit"))) for c in defs],
+        dtype=float,
+    )
 
 
 def evaluate_constraints_batch(

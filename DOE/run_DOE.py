@@ -243,6 +243,8 @@ def run_doe(*, config: DOEConfig, run_context: RunContext | None = None) -> dict
         "initial_probe_multiplier": config.system.additional_initial_probe_multiplier,
         "plan_filter_safety": config.system.plan_filter_safety,
         "plan_filter_r_floor": config.system.plan_filter_r_floor,
+        "projection_pool_multiplier": config.system.projection_pool_multiplier,
+        "projection_pool_min": config.system.projection_pool_min,
     }
 
     additional_cfg = None

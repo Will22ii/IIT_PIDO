@@ -17,7 +17,13 @@ from DOE.executor.constraint_filter import (
     clamp_ratio,
     evaluate_constraints_batch,
     evaluate_constraints_point,
+    pre_type2_equality_defs,
+    rejection_constraint_defs,
     validate_constraint_defs,
+)
+from DOE.executor.projection import (
+    maximin_subset,
+    project_points_to_manifold,
 )
 from DOE.executor.additional_orchestrator import AdditionalDOEOrchestrator
 from DOE.executor.eval_sanitizer import sanitize_evaluate_output
@@ -130,8 +136,139 @@ def _raise_if_success_rate_below_floor(
     )
 
 
-def _has_equality_constraints(constraint_defs: list[dict] | None) -> bool:
-    return any(str(c.get("type", "")).strip() == "==" for c in constraint_defs or [])
+def _has_post_equality_constraints(constraint_defs: list[dict] | None) -> bool:
+    """post 등식이 있는가. plain DOE는 이것만 막는다.
+
+    pre 등식은 막지 않는다:
+    - eps 지정(Type 1) -> 유저가 선언한 밴드. rejection으로 처리
+    - eps 미지정(Type 2) -> 구조적 등식. 투영으로 처리
+
+    post 등식을 막는 이유는 계산이 불가능해서가 아니라, CAE 실행 후에만 평가되므로
+    샘플링을 그쪽으로 유도할 방법이 없기 때문이다. 투영은 h 한 번 평가에 CAE 한 번이
+    필요해 예산상 성립하지 않고, 대리모델로 유도하려면 검증되지 않은 모델이
+    어떤 점을 CAE에 보낼지 결정하게 된다.
+    """
+    for c in constraint_defs or []:
+        if str(c.get("type", "")).strip() != "==":
+            continue
+        if str(c.get("scope", "pre")).strip().lower() == "post":
+            return True
+    return False
+
+
+def _build_projected_plain_samples(
+    *,
+    n_target: int,
+    bounds: list[tuple[float, float]],
+    var_names: list[str],
+    constraint_defs: list[dict],
+    pre_type2_defs: list[dict],
+    sampler,
+    rng,
+    initial_corner_ratio: float,
+    pool_multiplier: float,
+    pool_min: int,
+) -> tuple[np.ndarray, list[dict], list[float], dict]:
+    """pre Type 2 등식이 있을 때의 plain DOE 표본 생성.
+
+    rejection으로는 측도 0인 면을 맞출 수 없으므로 뽑은 점을 면 위로 투영한다.
+
+    코너는 별도 처리하지 않고 pool에 넣어 함께 투영한다. 박스 코너를 투영하면
+    그 방향에서 면이 갈 수 있는 가장 먼 지점이 되므로, 제약이 지배적일 때
+    "제약이 정의하는 공간의 극단"이 자동으로 뽑힌다.
+
+    투영은 면이 휘는 곳에 점을 뭉치게 하므로, 과생성 후 maximin으로 골라
+    층화를 회복한다.
+    """
+    p = len(bounds)
+    if n_target <= 0:
+        return (
+            np.empty((0, p), dtype=float),
+            [],
+            [],
+            {"pool_generated": 0, "pool_projected": 0, "pool_feasible": 0},
+        )
+
+    pool_size = int(max(int(np.ceil(n_target * float(pool_multiplier))), int(pool_min)))
+
+    # 1) pool 생성: 코너 + LHS
+    n_corner = int(round(pool_size * float(initial_corner_ratio)))
+    n_corner = min(max(n_corner, 0), pool_size)
+    parts: list[np.ndarray] = []
+    if n_corner > 0:
+        corners = sample_boundary_corners_random(
+            bounds,
+            offset=np.zeros((p,), dtype=float),
+            n_samples=n_corner,
+            rng=rng,
+        )
+        if corners.size > 0:
+            parts.append(np.asarray(corners, dtype=float))
+    n_lhs = max(pool_size - (parts[0].shape[0] if parts else 0), 0)
+    if n_lhs > 0:
+        parts.append(
+            np.asarray(
+                sampler(n_samples=n_lhs, bounds=bounds, rng=rng, n_divisions=max(n_lhs, 1)),
+                dtype=float,
+            )
+        )
+    X_pool = np.vstack(parts) if parts else np.empty((0, p), dtype=float)
+
+    # 2) 면 위로 투영. 수렴 실패한 점은 버린다.
+    X_proj, ok = project_points_to_manifold(
+        X=X_pool,
+        var_names=var_names,
+        equality_defs=pre_type2_defs,
+        bounds=bounds,
+    )
+    X_proj = X_proj[ok]
+
+    # 3) 나머지 pre 제약(부등식 + Type 1 밴드)으로 rejection.
+    #    투영이 점을 움직이므로 반드시 투영 뒤에 적용해야 한다.
+    rejection_defs = rejection_constraint_defs(constraint_defs)
+    pre_rejection_defs = [
+        c for c in rejection_defs
+        if str(c.get("scope", "pre")).strip().lower() == "pre"
+    ]
+    if pre_rejection_defs and X_proj.shape[0] > 0:
+        mask, payloads, margins = evaluate_constraints_batch(
+            X=X_proj,
+            var_names=var_names,
+            constraint_defs=pre_rejection_defs,
+            scope="pre",
+        )
+        idx = np.where(mask)[0]
+        X_feas = X_proj[idx]
+        payloads_feas = [payloads[i] for i in idx.tolist()]
+        margins_feas = [float(margins[i]) for i in idx.tolist()]
+    else:
+        X_feas = X_proj
+        payloads_feas = [{} for _ in range(X_feas.shape[0])]
+        margins_feas = [float("inf")] * X_feas.shape[0]
+
+    stats = {
+        "pool_generated": int(X_pool.shape[0]),
+        "pool_projected": int(np.sum(ok)),
+        "pool_feasible": int(X_feas.shape[0]),
+    }
+
+    if X_feas.shape[0] < n_target:
+        raise RuntimeError(
+            "FAILED_PROJECTION_MIN: plain DOE projected feasible points "
+            f"{X_feas.shape[0]} < target {n_target} "
+            f"(pool={stats['pool_generated']}, projected={stats['pool_projected']}). "
+            "The equality manifold may not intersect the given bounds, the equalities "
+            "may be mutually inconsistent, or the remaining constraints may be too tight."
+        )
+
+    # 4) maximin으로 최종 선택. 투영이 뭉치게 만든 것을 다시 퍼뜨린다.
+    pick = maximin_subset(X=X_feas, k=n_target, bounds=bounds)
+    return (
+        X_feas[pick],
+        [payloads_feas[i] for i in pick.tolist()],
+        [margins_feas[i] for i in pick.tolist()],
+        stats,
+    )
 
 
 def _save_doe_results(
@@ -327,6 +464,12 @@ def run_doe_orchestrator(
     initial_corner_ratio = float(run_cfg.get("initial_corner_ratio", 0.05))
     if not (0.0 <= initial_corner_ratio <= 1.0):
         raise ValueError("DOE initial_corner_ratio must be in [0, 1].")
+    projection_pool_multiplier = float(run_cfg.get("projection_pool_multiplier", 5.0))
+    if projection_pool_multiplier < 1.0:
+        raise ValueError("DOE projection_pool_multiplier must be >= 1.")
+    projection_pool_min = int(run_cfg.get("projection_pool_min", 300))
+    if projection_pool_min < 1:
+        raise ValueError("DOE projection_pool_min must be >= 1.")
 
     workflow_info = {
         "DOE": algo_name,
@@ -336,12 +479,16 @@ def run_doe_orchestrator(
     }
 
     if not use_additional:
-        if _has_equality_constraints(constraint_defs):
+        if _has_post_equality_constraints(constraint_defs):
             raise RuntimeError(
-                "UNSUPPORTED_PLAIN_DOE_EQUALITY_CONSTRAINT: "
-                "plain DOE supports pre inequality filtering only. "
-                "Use additional DOE for equality constraints, or replace equality "
-                "with an explicit relaxed inequality band."
+                "UNSUPPORTED_POST_EQUALITY_CONSTRAINT: "
+                "post-scope equality is not supported. A post constraint can only be "
+                "evaluated after the CAE run, so sampling cannot be steered toward it: "
+                "projection would need one CAE call per gradient evaluation, and a "
+                "surrogate would let an unvalidated model decide which points get "
+                "evaluated. "
+                "Express the target as a post inequality band instead, "
+                "e.g. {'type': '<=', 'limit': L + tol} and {'type': '>=', 'limit': L - tol}."
             )
 
         n_samples = int(run_cfg["n_samples"])
@@ -362,7 +509,15 @@ def run_doe_orchestrator(
         baseline = np.array([v["baseline"] for v in variables], dtype=float)
 
         probe_multiplier = float(run_cfg.get("initial_probe_multiplier", 2.0))
-        n_corner_target = int(round(float(n_regular_samples) * initial_corner_ratio))
+        # pre Type 2 등식(eps 미지정)이 있으면 rejection이 아니라 투영으로 뽑는다.
+        # 코너도 투영 경로 안에서 pool에 포함해 함께 처리하므로 여기서는 0으로 둔다.
+        pre_type2_defs = pre_type2_equality_defs(constraint_defs)
+        use_projection = bool(pre_type2_defs)
+        n_corner_target = (
+            0
+            if use_projection
+            else int(round(float(n_regular_samples) * initial_corner_ratio))
+        )
         n_corner_target = min(max(n_corner_target, 0), max(n_regular_samples, 0))
 
         X_corner = np.empty((0, len(bounds)), dtype=float)
@@ -427,7 +582,38 @@ def run_doe_orchestrator(
         n_corner_ok = int(X_corner.shape[0])
         n_sampler_target = max(n_regular_samples - n_corner_ok, 0)
 
-        if has_pre_constraints:
+        if use_projection:
+            X_regular, regular_constraints, regular_margins, projection_stats = (
+                _build_projected_plain_samples(
+                    n_target=n_sampler_target,
+                    bounds=bounds,
+                    var_names=var_names,
+                    constraint_defs=constraint_defs,
+                    pre_type2_defs=pre_type2_defs,
+                    sampler=sampler,
+                    rng=rng,
+                    initial_corner_ratio=initial_corner_ratio,
+                    pool_multiplier=projection_pool_multiplier,
+                    pool_min=projection_pool_min,
+                )
+            )
+            n_probe = int(projection_stats["pool_generated"])
+            # 투영 경로에서는 생성 후 거부가 아니라 이동이므로 rejection 통과율 개념이
+            # 적용되지 않는다. rejection 대상 제약 기준으로만 기록한다.
+            r_hat = (
+                float(projection_stats["pool_feasible"])
+                / max(float(projection_stats["pool_projected"]), 1.0)
+                if projection_stats["pool_projected"] > 0
+                else 1.0
+            )
+            print(
+                f"[DOE][Projection] pre Type 2 equalities={len(pre_type2_defs)} "
+                f"pool={projection_stats['pool_generated']} "
+                f"projected={projection_stats['pool_projected']} "
+                f"feasible={projection_stats['pool_feasible']} "
+                f"selected={X_regular.shape[0]}"
+            )
+        elif has_pre_constraints:
             if n_sampler_target > 0:
                 max_attempts = min(
                     max(2, int(np.ceil(1.0 / max(filter_r_floor, 1e-6)))),

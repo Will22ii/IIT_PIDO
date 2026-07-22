@@ -27,19 +27,34 @@ def _build_run_id(*, problem: str) -> str:
     return f"run_{problem}_{ts}_{suffix}"
 
 
-def create_run_context(*, project_root: str, user_config_snapshot: dict) -> RunContext:
+def create_run_context(
+    *,
+    project_root: str,
+    user_config_snapshot: dict,
+    runs_root: str | None = None,
+) -> RunContext:
     """Create a new run directory and initialize index.json.
 
     Use this when backend starts a new execution. Existing executions should be
     opened with load_run_context(run_root=...).
+
+    runs_root는 run 디렉터리를 담을 부모 경로다. None이면 service run으로 보고
+    result/service 아래에 만든다. batch runner(run_pipelines.py)는 배치 폴더의
+    runs/ 경로를 명시적으로 넘긴다.
     """
     problem = _sanitize_run_name(str(user_config_snapshot.get("problem", "")))
+    runs_root_abs = (
+        os.path.abspath(str(runs_root))
+        if runs_root
+        else os.path.join(project_root, "result", "service")
+    )
+    os.makedirs(runs_root_abs, exist_ok=True)
     run_id = ""
     run_root = ""
     max_attempts = 5
     for _ in range(max_attempts):
         run_id = _build_run_id(problem=problem)
-        run_root = os.path.join(project_root, "result", run_id)
+        run_root = os.path.join(runs_root_abs, run_id)
         try:
             os.makedirs(run_root, exist_ok=False)
             break

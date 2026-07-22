@@ -42,6 +42,9 @@ class ProblemCase:
     objective_sense: str = "min"
     repeats: int = 1
     optimizer_goal: float | None = None
+    # 보고/집계용 통과 기준. optimizer_goal=None이면 조기 종료 없이 끝까지 돌고,
+    # score_goal만 summary pass 판정에 사용한다.
+    score_goal: float | None = None
 
 
 PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
@@ -49,6 +52,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="rosenbrock",
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
         optimizer_goal= None, #1.2,
+        score_goal=1.2,
         n_samples=450,
         optimizer_n_samples=1050,
         repeats=10,
@@ -57,6 +61,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="cantilever_beam",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         optimizer_goal= None, #114.66,
+        score_goal=114.66,
         n_samples=90,
         optimizer_n_samples=60,
         repeats=25,
@@ -65,6 +70,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="goldstein_price",
         known_optimum={"x1": 0.0, "x2": -1.0},
         optimizer_goal= None, #3.6,
+        score_goal=3.6,
         n_samples=150,
         optimizer_n_samples=350,
         repeats=50,
@@ -76,7 +82,8 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": -0.0898, "x2": 0.7126},
         ],
         optimizer_goal= None, #-0.86,
-        n_samples= 40,
+        score_goal=-0.86,
+        n_samples= 35,
         optimizer_n_samples=15,
         repeats=25,
     ),
@@ -84,6 +91,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="rosenbrock_nodummy",
         known_optimum={"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0},
         optimizer_goal= None, #1.2,
+        score_goal=1.2,
         n_samples=450,
         optimizer_n_samples=1500,
         repeats=10,
@@ -92,6 +100,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="cantilever_beam_nodummy",
         known_optimum={"H": 7.0, "h1": 0.1, "b1": 9.48482, "b2": 0.1},
         optimizer_goal= None, #114.66,
+        score_goal=114.66,
         n_samples=90,
         optimizer_n_samples=150,
         repeats=25,
@@ -100,6 +109,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
         problem_name="goldstein_price_nodummy",
         known_optimum={"x1": 0.0, "x2": -1.0},
         optimizer_goal= None, #3.6,
+        score_goal=3.6,
         n_samples=150,
         optimizer_n_samples=500,
         repeats=50,
@@ -111,6 +121,7 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
             {"x1": -0.0898, "x2": 0.7126},
         ],
         optimizer_goal= None, #-0.86,
+        score_goal=-0.86,
         n_samples=40,
         optimizer_n_samples=40,
         repeats=25,
@@ -119,9 +130,9 @@ PROBLEM_CASE_PRESETS: dict[str, ProblemCase] = {
 
 # 이번 실행에 사용할 문제만 활성화한다.
 ACTIVE_PROBLEM_CASES: list[str] = [
-    # "cantilever_beam",
-    # "rosenbrock",
-    # "goldstein_price",
+    "cantilever_beam",
+    "rosenbrock",
+    "goldstein_price",
     "six_hump_camel",
     # "cantilever_beam_nodummy",
     # "rosenbrock_nodummy",
@@ -161,6 +172,113 @@ BATCH_OPTIMIZER_SYSTEM_OVERRIDES: dict[str, Any] = {
     # "omitted_feature_freeze_mode": "user_value",
     # "omitted_feature_freeze_value": 0.0,
 }
+
+
+STATS_SCHEMA_VERSION = "2.0"
+
+
+@dataclass(frozen=True)
+class BatchPaths:
+    """배치 1회의 저장 경로. batch_ts는 배치당 한 번만 계산한다.
+
+    이전 구현은 stats CSV 3종이 각자 datetime.now()를 호출해서, 초 경계를 넘으면
+    같은 배치인데도 파일 timestamp가 갈라졌다. 여기서 한 번만 정한다.
+    """
+
+    batch_ts: str
+    mode: str
+    batch_root: str
+    runs_root: str
+    stats_root: str
+
+
+_BATCH_PATHS: BatchPaths | None = None
+
+
+def _resolve_batch_mode() -> str:
+    """실행 설정에서 배치 mode를 도출한다. problem 이름으로 분기하지 않는다."""
+    if bool(BATCH_AION_MODE):
+        return "aion"
+    enabled = sorted(k for k, v in BATCH_TASKS.items() if bool(v))
+    if len(enabled) == 4:
+        return "full"
+    if enabled == ["optimizer"]:
+        return "opt_only"
+    return "_".join(enabled) if enabled else "none"
+
+
+def _batch_paths() -> BatchPaths:
+    global _BATCH_PATHS
+    if _BATCH_PATHS is None:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        mode = _resolve_batch_mode()
+        batch_root = os.path.join(PROJECT_ROOT, "result", "bench", mode, ts)
+        paths = BatchPaths(
+            batch_ts=ts,
+            mode=mode,
+            batch_root=batch_root,
+            runs_root=os.path.join(batch_root, "runs"),
+            stats_root=os.path.join(batch_root, "stats"),
+        )
+        os.makedirs(paths.runs_root, exist_ok=True)
+        os.makedirs(paths.stats_root, exist_ok=True)
+        _BATCH_PATHS = paths
+    return _BATCH_PATHS
+
+
+def _git_commit() -> str | None:
+    head = os.path.join(PROJECT_ROOT, ".git", "HEAD")
+    try:
+        with open(head, "r", encoding="utf-8") as f:
+            ref = f.read().strip()
+        if ref.startswith("ref: "):
+            ref_path = os.path.join(PROJECT_ROOT, ".git", *ref[5:].split("/"))
+            with open(ref_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        return ref
+    except OSError:
+        return None
+
+
+def _save_batch_meta(*, paths: BatchPaths) -> str:
+    payload = {
+        "batch_ts": paths.batch_ts,
+        "mode": paths.mode,
+        "stats_schema_version": STATS_SCHEMA_VERSION,
+        "git_commit": _git_commit(),
+        "aion_mode": bool(BATCH_AION_MODE),
+        "tasks": dict(BATCH_TASKS),
+        "explorer_strategy_id": _default_explorer_strategy_id(
+            aion_mode=bool(BATCH_AION_MODE)
+        ),
+        "modeler": {
+            "model_name": BATCH_MODELER_MODEL_NAME,
+            "use_hpo": bool(BATCH_USE_HPO),
+            "use_primary_selection": bool(BATCH_USE_PRIMARY_SELECTION),
+        },
+        "doe": {"use_additional": bool(BATCH_USE_ADDITIONAL)},
+        "fast_mode": {
+            "enabled": bool(BATCH_FAST_OPTIMIZER_MODE),
+            "repeats_override": BATCH_FAST_REPEATS,
+        },
+        "problem_cases": [
+            {
+                "problem": case.problem_name,
+                "repeats": _resolve_case_repeats(case),
+                "n_samples": case.n_samples,
+                "optimizer_n_samples": _resolve_case_optimizer_samples(
+                    case, BATCH_DEFAULT_OPTIMIZER_N_SAMPLES
+                ),
+                "optimizer_goal": case.optimizer_goal,
+                "objective_sense": case.objective_sense,
+            }
+            for case in PROBLEM_SUITE
+        ],
+    }
+    path = os.path.join(paths.batch_root, "batch_meta.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return path
 
 
 def _strategy_map() -> dict[str, ExplorerStrategy]:
@@ -370,6 +488,7 @@ def _build_pipeline_config(
             run_optimizer=bool(run_optimizer),
         ),
         aion_mode=bool(aion_mode),
+        runs_root=_batch_paths().runs_root,
     )
     return apply_aion_system_config(pipeline_cfg)
 
@@ -659,6 +778,10 @@ def _extract_explorer_router_metadata(explorer_metadata_path: str | None) -> dic
         "explorer_dual_volume_cap_applied": _pick("dual_volume_cap_applied"),
         "explorer_post_cap_side_mass_shift_applied": _pick("post_cap_side_mass_shift_applied"),
         "explorer_post_cap_side_mass_shift_dims": _pick("post_cap_side_mass_shift_dims"),
+        "explorer_constrained_boundary_preserve_applied": _pick("constrained_boundary_preserve_applied"),
+        "explorer_constrained_boundary_preserve_dims": _pick("constrained_boundary_preserve_dims"),
+        "explorer_low_dim_balance_guard_applied": _pick("low_dim_balance_guard_applied"),
+        "explorer_low_dim_balance_guard_info": _pick("low_dim_balance_guard_info"),
     }
 
 
@@ -694,9 +817,9 @@ def _save_explorer_stats_csv(
     *,
     detail_rows: list[dict[str, Any]],
 ) -> tuple[str, str]:
-    stats_root = os.path.join(PROJECT_ROOT, "result", "explorer_strategy_stats")
-    os.makedirs(stats_root, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    paths = _batch_paths()
+    stats_root = paths.stats_root
+    ts = paths.batch_ts
 
     detail_df = pd.DataFrame(detail_rows)
     if detail_df.empty:
@@ -855,6 +978,10 @@ def _save_explorer_stats_csv(
                 "explorer_dual_volume_cap_applied",
                 "explorer_post_cap_side_mass_shift_applied",
                 "explorer_post_cap_side_mass_shift_dims",
+                "explorer_constrained_boundary_preserve_applied",
+                "explorer_constrained_boundary_preserve_dims",
+                "explorer_low_dim_balance_guard_applied",
+                "explorer_low_dim_balance_guard_info",
             ]
         )
 
@@ -968,9 +1095,9 @@ def _save_fi_stats_csv(
     *,
     detail_rows: list[dict[str, Any]],
 ) -> tuple[str, str]:
-    stats_root = os.path.join(PROJECT_ROOT, "result", "explorer_strategy_stats")
-    os.makedirs(stats_root, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    paths = _batch_paths()
+    stats_root = paths.stats_root
+    ts = paths.batch_ts
 
     detail_df = pd.DataFrame(detail_rows)
     if detail_df.empty:
@@ -1051,6 +1178,14 @@ def _optimizer_goal_hit(*, best_objective: float, goal: float | None, objective_
     return bool(best <= target)
 
 
+def _resolve_score_goal(case: ProblemCase) -> tuple[float | None, str]:
+    if case.score_goal is not None:
+        return float(case.score_goal), "score_goal"
+    if case.optimizer_goal is not None:
+        return float(case.optimizer_goal), "optimizer_goal"
+    return None, "none"
+
+
 def _read_focus3_goal_diagnostics(
     *,
     optimizer_metadata_path: str | None,
@@ -1108,13 +1243,104 @@ def _read_focus3_goal_diagnostics(
     return out
 
 
+def _read_focus3_source_diagnostics(
+    *,
+    optimizer_metadata_path: str | None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "source_prob_topk": float("nan"),
+        "source_prob_best_local": float("nan"),
+        "source_prob_correlated_local": float("nan"),
+        "source_prob_boundary": float("nan"),
+        "source_prob_random": float("nan"),
+        "focus3_selected_topk": 0,
+        "focus3_selected_best_local": 0,
+        "focus3_selected_correlated_local": 0,
+        "focus3_selected_local_probe": 0,
+        "focus3_selected_boundary": 0,
+        "focus3_selected_random": 0,
+        "focus3_best_score_correlated_local": float("nan"),
+        "focus3_best_score_best_local": float("nan"),
+        "focus3_near_goal_exploitation_active": False,
+        "focus3_goal_free_plateau_applied": False,
+        "focus3_goal_free_plateau_state": "",
+        "focus3_acq_effective": "",
+        "focus3_recover_active": False,
+        "focus3_recover_no_improve_count": 0,
+    }
+    if not optimizer_metadata_path:
+        return out
+    opt_dir = os.path.dirname(os.path.abspath(str(optimizer_metadata_path)))
+    history_path = os.path.join(opt_dir, "artifacts", "debug", "optimizer_history_full.csv")
+    if not os.path.exists(history_path):
+        return out
+    try:
+        hist = pd.read_csv(history_path)
+    except Exception:
+        return out
+    if hist.empty or "segment" not in hist.columns:
+        return out
+    rows = hist[hist["segment"].astype(str).str.lower() == "focus3"]
+    if rows.empty:
+        return out
+    row = rows.iloc[-1]
+
+    def _float_col(name: str) -> float:
+        try:
+            return float(row.get(name, float("nan")))
+        except Exception:
+            return float("nan")
+
+    def _int_col(name: str) -> int:
+        try:
+            value = row.get(name, 0)
+            if pd.isna(value):
+                return 0
+            return int(float(value))
+        except Exception:
+            return 0
+
+    def _bool_col(name: str) -> bool:
+        value = row.get(name, False)
+        if isinstance(value, bool):
+            return bool(value)
+        if pd.isna(value):
+            return False
+        return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+    out.update(
+        {
+            "source_prob_topk": _float_col("source_prob_topk"),
+            "source_prob_best_local": _float_col("source_prob_best_local"),
+            "source_prob_correlated_local": _float_col("source_prob_correlated_local"),
+            "source_prob_boundary": _float_col("source_prob_boundary"),
+            "source_prob_random": _float_col("source_prob_random"),
+            "focus3_selected_topk": _int_col("focus3_selected_topk"),
+            "focus3_selected_best_local": _int_col("focus3_selected_best_local"),
+            "focus3_selected_correlated_local": _int_col("focus3_selected_correlated_local"),
+            "focus3_selected_local_probe": _int_col("focus3_selected_local_probe"),
+            "focus3_selected_boundary": _int_col("focus3_selected_boundary"),
+            "focus3_selected_random": _int_col("focus3_selected_random"),
+            "focus3_best_score_correlated_local": _float_col("focus3_best_score_correlated_local"),
+            "focus3_best_score_best_local": _float_col("focus3_best_score_best_local"),
+            "focus3_near_goal_exploitation_active": _bool_col("focus3_near_goal_exploitation_active"),
+            "focus3_goal_free_plateau_applied": _bool_col("focus3_goal_free_plateau_applied"),
+            "focus3_goal_free_plateau_state": str(row.get("focus3_goal_free_plateau_state", "") or ""),
+            "focus3_acq_effective": str(row.get("focus3_acq_effective", "") or ""),
+            "focus3_recover_active": _bool_col("focus3_recover_active"),
+            "focus3_recover_no_improve_count": _int_col("focus3_recover_no_improve_count"),
+        }
+    )
+    return out
+
+
 def _save_optimizer_stats_csv(
     *,
     detail_rows: list[dict[str, Any]],
 ) -> tuple[str, str]:
-    stats_root = os.path.join(PROJECT_ROOT, "result", "explorer_strategy_stats")
-    os.makedirs(stats_root, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    paths = _batch_paths()
+    stats_root = paths.stats_root
+    ts = paths.batch_ts
 
     detail_columns = [
         "run",
@@ -1125,14 +1351,40 @@ def _save_optimizer_stats_csv(
         "executed_strategy",
         "objective_sense",
         "optimizer_goal",
+        "optimizer_score_goal",
+        "optimizer_score_goal_source",
         "optimizer_best_objective",
         "optimizer_best_objective_raw",
+        "optimizer_internal_goal_hit",
         "optimizer_goal_hit",
+        "optimizer_score_goal_hit",
         "focus3_best_objective",
+        "focus3_internal_goal_hit",
         "focus3_goal_hit",
+        "focus3_score_goal_hit",
         "archive_only_goal_hit",
+        "score_archive_only_goal_hit",
         "focus3_eval_count",
         "focus3_improved_count",
+        "source_prob_topk",
+        "source_prob_best_local",
+        "source_prob_correlated_local",
+        "source_prob_boundary",
+        "source_prob_random",
+        "focus3_selected_topk",
+        "focus3_selected_best_local",
+        "focus3_selected_correlated_local",
+        "focus3_selected_local_probe",
+        "focus3_selected_boundary",
+        "focus3_selected_random",
+        "focus3_best_score_correlated_local",
+        "focus3_best_score_best_local",
+        "focus3_near_goal_exploitation_active",
+        "focus3_goal_free_plateau_applied",
+        "focus3_goal_free_plateau_state",
+        "focus3_acq_effective",
+        "focus3_recover_active",
+        "focus3_recover_no_improve_count",
         "optimizer_n_iterations",
         "modeler_all_real_included",
         "modeler_all_real_only",
@@ -1148,6 +1400,7 @@ def _save_optimizer_stats_csv(
         "explorer_bounds_pass",
         "explorer_joint_pass",
         "optimizer_final_pass",
+        "optimizer_score_final_pass",
         "optimizer_csv",
         "optimizer_metadata",
         "explorer_metadata",
@@ -1170,8 +1423,16 @@ def _save_optimizer_stats_csv(
     if not summary_df.empty:
         for col in [
             "optimizer_goal_hit",
+            "optimizer_internal_goal_hit",
+            "optimizer_score_goal_hit",
             "focus3_goal_hit",
+            "focus3_internal_goal_hit",
+            "focus3_score_goal_hit",
+            "focus3_near_goal_exploitation_active",
+            "focus3_goal_free_plateau_applied",
+            "focus3_recover_active",
             "archive_only_goal_hit",
+            "score_archive_only_goal_hit",
             "modeler_all_real_included",
             "modeler_all_real_only",
             "survivor_optimum_included",
@@ -1179,6 +1440,7 @@ def _save_optimizer_stats_csv(
             "explorer_bounds_pass",
             "explorer_joint_pass",
             "optimizer_final_pass",
+            "optimizer_score_final_pass",
         ]:
             summary_df[col + "_num"] = summary_df[col].astype(bool).astype(int)
 
@@ -1188,15 +1450,27 @@ def _save_optimizer_stats_csv(
             .agg(
                 tries=("strategy", "count"),
                 optimizer_final_pass_pct=("optimizer_final_pass_num", "mean"),
+                optimizer_score_final_pass_pct=("optimizer_score_final_pass_num", "mean"),
                 optimizer_goal_hit_pct=("optimizer_goal_hit_num", "mean"),
+                optimizer_internal_goal_hit_pct=("optimizer_internal_goal_hit_num", "mean"),
+                optimizer_score_goal_hit_pct=("optimizer_score_goal_hit_num", "mean"),
                 focus3_goal_hit_pct=("focus3_goal_hit_num", "mean"),
+                focus3_internal_goal_hit_pct=("focus3_internal_goal_hit_num", "mean"),
+                focus3_score_goal_hit_pct=("focus3_score_goal_hit_num", "mean"),
                 archive_only_goal_hit_pct=("archive_only_goal_hit_num", "mean"),
+                score_archive_only_goal_hit_pct=("score_archive_only_goal_hit_num", "mean"),
                 explorer_joint_pass_pct=("explorer_joint_pass_num", "mean"),
                 explorer_bounds_pass_pct=("explorer_bounds_pass_num", "mean"),
                 modeler_all_real_included_pct=("modeler_all_real_included_num", "mean"),
                 modeler_all_real_only_pct=("modeler_all_real_only_num", "mean"),
                 survivor_optimum_included_pct=("survivor_optimum_included_num", "mean"),
                 volume_cap_pass_pct=("volume_cap_pass_num", "mean"),
+                optimizer_score_goal=("optimizer_score_goal", "first"),
+                optimizer_final_objective_mean=("optimizer_best_objective", "mean"),
+                optimizer_final_objective_median=("optimizer_best_objective", "median"),
+                optimizer_final_objective_min=("optimizer_best_objective", "min"),
+                optimizer_final_objective_max=("optimizer_best_objective", "max"),
+                optimizer_final_objective_std=("optimizer_best_objective", "std"),
                 optimizer_best_objective_mean=("optimizer_best_objective", "mean"),
                 optimizer_best_objective_median=("optimizer_best_objective", "median"),
                 focus3_best_objective_mean=("focus3_best_objective", "mean"),
@@ -1204,6 +1478,15 @@ def _save_optimizer_stats_csv(
                 optimizer_n_iterations_mean=("optimizer_n_iterations", "mean"),
                 focus3_eval_count_mean=("focus3_eval_count", "mean"),
                 focus3_improved_count_mean=("focus3_improved_count", "mean"),
+                source_prob_best_local_mean=("source_prob_best_local", "mean"),
+                source_prob_correlated_local_mean=("source_prob_correlated_local", "mean"),
+                source_prob_random_mean=("source_prob_random", "mean"),
+                focus3_selected_best_local_mean=("focus3_selected_best_local", "mean"),
+                focus3_selected_correlated_local_mean=("focus3_selected_correlated_local", "mean"),
+                focus3_near_goal_exploitation_active_pct=("focus3_near_goal_exploitation_active_num", "mean"),
+                focus3_goal_free_plateau_applied_pct=("focus3_goal_free_plateau_applied_num", "mean"),
+                focus3_recover_active_pct=("focus3_recover_active_num", "mean"),
+                focus3_recover_no_improve_count_mean=("focus3_recover_no_improve_count", "mean"),
             )
         )
         overall = (
@@ -1212,15 +1495,27 @@ def _save_optimizer_stats_csv(
             .agg(
                 tries=("strategy", "count"),
                 optimizer_final_pass_pct=("optimizer_final_pass_num", "mean"),
+                optimizer_score_final_pass_pct=("optimizer_score_final_pass_num", "mean"),
                 optimizer_goal_hit_pct=("optimizer_goal_hit_num", "mean"),
+                optimizer_internal_goal_hit_pct=("optimizer_internal_goal_hit_num", "mean"),
+                optimizer_score_goal_hit_pct=("optimizer_score_goal_hit_num", "mean"),
                 focus3_goal_hit_pct=("focus3_goal_hit_num", "mean"),
+                focus3_internal_goal_hit_pct=("focus3_internal_goal_hit_num", "mean"),
+                focus3_score_goal_hit_pct=("focus3_score_goal_hit_num", "mean"),
                 archive_only_goal_hit_pct=("archive_only_goal_hit_num", "mean"),
+                score_archive_only_goal_hit_pct=("score_archive_only_goal_hit_num", "mean"),
                 explorer_joint_pass_pct=("explorer_joint_pass_num", "mean"),
                 explorer_bounds_pass_pct=("explorer_bounds_pass_num", "mean"),
                 modeler_all_real_included_pct=("modeler_all_real_included_num", "mean"),
                 modeler_all_real_only_pct=("modeler_all_real_only_num", "mean"),
                 survivor_optimum_included_pct=("survivor_optimum_included_num", "mean"),
                 volume_cap_pass_pct=("volume_cap_pass_num", "mean"),
+                optimizer_score_goal=("optimizer_score_goal", "first"),
+                optimizer_final_objective_mean=("optimizer_best_objective", "mean"),
+                optimizer_final_objective_median=("optimizer_best_objective", "median"),
+                optimizer_final_objective_min=("optimizer_best_objective", "min"),
+                optimizer_final_objective_max=("optimizer_best_objective", "max"),
+                optimizer_final_objective_std=("optimizer_best_objective", "std"),
                 optimizer_best_objective_mean=("optimizer_best_objective", "mean"),
                 optimizer_best_objective_median=("optimizer_best_objective", "median"),
                 focus3_best_objective_mean=("focus3_best_objective", "mean"),
@@ -1228,21 +1523,40 @@ def _save_optimizer_stats_csv(
                 optimizer_n_iterations_mean=("optimizer_n_iterations", "mean"),
                 focus3_eval_count_mean=("focus3_eval_count", "mean"),
                 focus3_improved_count_mean=("focus3_improved_count", "mean"),
+                source_prob_best_local_mean=("source_prob_best_local", "mean"),
+                source_prob_correlated_local_mean=("source_prob_correlated_local", "mean"),
+                source_prob_random_mean=("source_prob_random", "mean"),
+                focus3_selected_best_local_mean=("focus3_selected_best_local", "mean"),
+                focus3_selected_correlated_local_mean=("focus3_selected_correlated_local", "mean"),
+                focus3_near_goal_exploitation_active_pct=("focus3_near_goal_exploitation_active_num", "mean"),
+                focus3_goal_free_plateau_applied_pct=("focus3_goal_free_plateau_applied_num", "mean"),
+                focus3_recover_active_pct=("focus3_recover_active_num", "mean"),
+                focus3_recover_no_improve_count_mean=("focus3_recover_no_improve_count", "mean"),
             )
         )
         overall.insert(1, "problem", "__overall__")
+        overall["optimizer_score_goal"] = float("nan")
         grouped = pd.concat([grouped, overall], ignore_index=True)
         pct_cols = [
             "optimizer_final_pass_pct",
+            "optimizer_score_final_pass_pct",
             "optimizer_goal_hit_pct",
+            "optimizer_internal_goal_hit_pct",
+            "optimizer_score_goal_hit_pct",
             "focus3_goal_hit_pct",
+            "focus3_internal_goal_hit_pct",
+            "focus3_score_goal_hit_pct",
             "archive_only_goal_hit_pct",
+            "score_archive_only_goal_hit_pct",
             "explorer_joint_pass_pct",
             "explorer_bounds_pass_pct",
             "modeler_all_real_included_pct",
             "modeler_all_real_only_pct",
             "survivor_optimum_included_pct",
             "volume_cap_pass_pct",
+            "focus3_near_goal_exploitation_active_pct",
+            "focus3_goal_free_plateau_applied_pct",
+            "focus3_recover_active_pct",
         ]
         for col in pct_cols:
             grouped[col] = grouped[col] * 100.0
@@ -1253,15 +1567,27 @@ def _save_optimizer_stats_csv(
                 "problem",
                 "tries",
                 "optimizer_final_pass_pct",
+                "optimizer_score_final_pass_pct",
                 "optimizer_goal_hit_pct",
+                "optimizer_internal_goal_hit_pct",
+                "optimizer_score_goal_hit_pct",
                 "focus3_goal_hit_pct",
+                "focus3_internal_goal_hit_pct",
+                "focus3_score_goal_hit_pct",
                 "archive_only_goal_hit_pct",
+                "score_archive_only_goal_hit_pct",
                 "explorer_joint_pass_pct",
                 "explorer_bounds_pass_pct",
                 "modeler_all_real_included_pct",
                 "modeler_all_real_only_pct",
                 "survivor_optimum_included_pct",
                 "volume_cap_pass_pct",
+                "optimizer_score_goal",
+                "optimizer_final_objective_mean",
+                "optimizer_final_objective_median",
+                "optimizer_final_objective_min",
+                "optimizer_final_objective_max",
+                "optimizer_final_objective_std",
                 "optimizer_best_objective_mean",
                 "optimizer_best_objective_median",
                 "focus3_best_objective_mean",
@@ -1269,6 +1595,15 @@ def _save_optimizer_stats_csv(
                 "optimizer_n_iterations_mean",
                 "focus3_eval_count_mean",
                 "focus3_improved_count_mean",
+                "source_prob_best_local_mean",
+                "source_prob_correlated_local_mean",
+                "source_prob_random_mean",
+                "focus3_selected_best_local_mean",
+                "focus3_selected_correlated_local_mean",
+                "focus3_near_goal_exploitation_active_pct",
+                "focus3_goal_free_plateau_applied_pct",
+                "focus3_recover_active_pct",
+                "focus3_recover_no_improve_count_mean",
             ]
         )
 
@@ -1551,6 +1886,7 @@ def main() -> None:
                                         OptimizerUserConfig,
                                     )
 
+                                    score_goal, score_goal_source = _resolve_score_goal(case)
                                     opt_cfg = OptimizerConfig(
                                         user=OptimizerUserConfig(
                                             n_samples=case_optimizer_n_samples,
@@ -1578,12 +1914,39 @@ def main() -> None:
                                         goal=case.optimizer_goal,
                                         objective_sense=case.objective_sense,
                                     )
+                                    opt_score_goal_hit = _optimizer_goal_hit(
+                                        best_objective=opt_best,
+                                        goal=score_goal,
+                                        objective_sense=case.objective_sense,
+                                    )
                                     focus3_diag = _read_focus3_goal_diagnostics(
                                         optimizer_metadata_path=opt_out.get("metadata"),
                                         goal=case.optimizer_goal,
                                         objective_sense=case.objective_sense,
                                     )
-                                    optimizer_final_pass = bool(explorer_joint_pass and opt_goal_hit)
+                                    focus3_source_diag = _read_focus3_source_diagnostics(
+                                        optimizer_metadata_path=opt_out.get("metadata"),
+                                    )
+                                    focus3_score_goal_hit = _optimizer_goal_hit(
+                                        best_objective=float(focus3_diag["focus3_best_objective"]),
+                                        goal=score_goal,
+                                        objective_sense=case.objective_sense,
+                                    )
+                                    report_goal_hit = (
+                                        opt_goal_hit
+                                        if case.optimizer_goal is not None
+                                        else opt_score_goal_hit
+                                    )
+                                    report_focus3_goal_hit = (
+                                        bool(focus3_diag["focus3_goal_hit"])
+                                        if case.optimizer_goal is not None
+                                        else bool(focus3_score_goal_hit)
+                                    )
+                                    optimizer_final_pass = bool(
+                                        explorer_joint_pass
+                                        and report_goal_hit
+                                    )
+                                    optimizer_score_final_pass = bool(explorer_joint_pass and opt_score_goal_hit)
                                     optimizer_detail_rows.append(
                                         {
                                             "run": run_counter,
@@ -1594,14 +1957,40 @@ def main() -> None:
                                             "executed_strategy": strategy.strategy_id,
                                             "objective_sense": str(case.objective_sense),
                                             "optimizer_goal": case.optimizer_goal,
+                                            "optimizer_score_goal": score_goal,
+                                            "optimizer_score_goal_source": score_goal_source,
                                             "optimizer_best_objective": opt_best,
                                             "optimizer_best_objective_raw": float(opt_out.get("best_objective_raw", float("nan"))),
-                                            "optimizer_goal_hit": bool(opt_goal_hit),
+                                            "optimizer_internal_goal_hit": bool(opt_goal_hit),
+                                            "optimizer_goal_hit": bool(report_goal_hit),
+                                            "optimizer_score_goal_hit": bool(opt_score_goal_hit),
                                             "focus3_best_objective": focus3_diag["focus3_best_objective"],
-                                            "focus3_goal_hit": bool(focus3_diag["focus3_goal_hit"]),
-                                            "archive_only_goal_hit": bool(opt_goal_hit and not bool(focus3_diag["focus3_goal_hit"])),
+                                            "focus3_internal_goal_hit": bool(focus3_diag["focus3_goal_hit"]),
+                                            "focus3_goal_hit": bool(report_focus3_goal_hit),
+                                            "focus3_score_goal_hit": bool(focus3_score_goal_hit),
+                                            "archive_only_goal_hit": bool(report_goal_hit and not bool(report_focus3_goal_hit)),
+                                            "score_archive_only_goal_hit": bool(opt_score_goal_hit and not bool(focus3_score_goal_hit)),
                                             "focus3_eval_count": int(focus3_diag["focus3_eval_count"]),
                                             "focus3_improved_count": int(focus3_diag["focus3_improved_count"]),
+                                            "source_prob_topk": focus3_source_diag["source_prob_topk"],
+                                            "source_prob_best_local": focus3_source_diag["source_prob_best_local"],
+                                            "source_prob_correlated_local": focus3_source_diag["source_prob_correlated_local"],
+                                            "source_prob_boundary": focus3_source_diag["source_prob_boundary"],
+                                            "source_prob_random": focus3_source_diag["source_prob_random"],
+                                            "focus3_selected_topk": focus3_source_diag["focus3_selected_topk"],
+                                            "focus3_selected_best_local": focus3_source_diag["focus3_selected_best_local"],
+                                            "focus3_selected_correlated_local": focus3_source_diag["focus3_selected_correlated_local"],
+                                            "focus3_selected_local_probe": focus3_source_diag["focus3_selected_local_probe"],
+                                            "focus3_selected_boundary": focus3_source_diag["focus3_selected_boundary"],
+                                            "focus3_selected_random": focus3_source_diag["focus3_selected_random"],
+                                            "focus3_best_score_correlated_local": focus3_source_diag["focus3_best_score_correlated_local"],
+                                            "focus3_best_score_best_local": focus3_source_diag["focus3_best_score_best_local"],
+                                            "focus3_near_goal_exploitation_active": focus3_source_diag["focus3_near_goal_exploitation_active"],
+                                            "focus3_goal_free_plateau_applied": focus3_source_diag["focus3_goal_free_plateau_applied"],
+                                            "focus3_goal_free_plateau_state": focus3_source_diag["focus3_goal_free_plateau_state"],
+                                            "focus3_acq_effective": focus3_source_diag["focus3_acq_effective"],
+                                            "focus3_recover_active": focus3_source_diag["focus3_recover_active"],
+                                            "focus3_recover_no_improve_count": focus3_source_diag["focus3_recover_no_improve_count"],
                                             "optimizer_n_iterations": int(opt_out.get("n_iterations", 0)),
                                             "modeler_all_real_included": bool(modeler_all_real_included),
                                             "modeler_all_real_only": bool(modeler_all_real_only),
@@ -1617,6 +2006,7 @@ def main() -> None:
                                             "explorer_bounds_pass": bool(explorer_bounds_pass),
                                             "explorer_joint_pass": bool(explorer_joint_pass),
                                             "optimizer_final_pass": bool(optimizer_final_pass),
+                                            "optimizer_score_final_pass": bool(optimizer_score_final_pass),
                                             "optimizer_csv": opt_out.get("csv"),
                                             "optimizer_metadata": opt_out.get("metadata"),
                                             "explorer_metadata": exp_out.get("metadata"),
@@ -1627,8 +2017,9 @@ def main() -> None:
                                     print(
                                         f"[Optimizer][{requested_id}] "
                                         f"best={opt_best:.6f} goal_hit={opt_goal_hit} "
+                                        f"score_goal_hit={opt_score_goal_hit} "
                                         f"focus3_goal_hit={focus3_diag['focus3_goal_hit']} "
-                                        f"final_pass={optimizer_final_pass}"
+                                        f"score_final_pass={optimizer_score_final_pass}"
                                     )
                                 except Exception as opt_exc:
                                     payload = {
@@ -1801,6 +2192,10 @@ def main() -> None:
                                     "explorer_dual_volume_cap_applied": explorer_meta_features.get("explorer_dual_volume_cap_applied"),
                                     "explorer_post_cap_side_mass_shift_applied": explorer_meta_features.get("explorer_post_cap_side_mass_shift_applied"),
                                     "explorer_post_cap_side_mass_shift_dims": explorer_meta_features.get("explorer_post_cap_side_mass_shift_dims"),
+                                    "explorer_constrained_boundary_preserve_applied": explorer_meta_features.get("explorer_constrained_boundary_preserve_applied"),
+                                    "explorer_constrained_boundary_preserve_dims": explorer_meta_features.get("explorer_constrained_boundary_preserve_dims"),
+                                    "explorer_low_dim_balance_guard_applied": explorer_meta_features.get("explorer_low_dim_balance_guard_applied"),
+                                    "explorer_low_dim_balance_guard_info": explorer_meta_features.get("explorer_low_dim_balance_guard_info"),
                                 }
                             )
                         except Exception as exp_exc:
@@ -1855,6 +2250,9 @@ def main() -> None:
     print(f"- explorer_problem_summary_csv={summary_csv}")
     print(f"- optimizer_try_stats_csv={optimizer_detail_csv}")
     print(f"- optimizer_problem_summary_csv={optimizer_summary_csv}")
+    _batch_meta_path = _save_batch_meta(paths=_batch_paths())
+    print(f"- batch_root={_batch_paths().batch_root}")
+    print(f"- batch_meta={_batch_meta_path}")
     if failures:
         print("- failure_details:")
         for item in failures:

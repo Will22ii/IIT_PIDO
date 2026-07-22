@@ -778,6 +778,349 @@ def _apply_post_cap_side_mass_shift(
     return out, shifted
 
 
+def _point_retention_ratio_in_bounds(
+    *,
+    points: np.ndarray | None,
+    bounds: list[tuple[float, float]] | None,
+    reference_bounds: list[tuple[float, float]] | None = None,
+    tol_ratio: float = 1e-9,
+) -> tuple[float | None, int, int]:
+    if points is None or bounds is None:
+        return None, 0, 0
+    X = np.asarray(points, dtype=float)
+    if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] != len(bounds):
+        return None, 0, 0
+    B = [(float(min(lb, ub)), float(max(lb, ub))) for lb, ub in bounds]
+    if reference_bounds is None:
+        ref_mask = np.ones(X.shape[0], dtype=bool)
+        R = B
+    else:
+        if len(reference_bounds) != len(bounds):
+            return None, 0, 0
+        R = [(float(min(lb, ub)), float(max(lb, ub))) for lb, ub in reference_bounds]
+        ref_mask = np.ones(X.shape[0], dtype=bool)
+        for j, (lb, ub) in enumerate(R):
+            span = max(float(ub) - float(lb), 1e-12)
+            tol = max(span * float(tol_ratio), 1e-12)
+            ref_mask &= (X[:, j] >= lb - tol) & (X[:, j] <= ub + tol)
+    ref_count = int(np.sum(ref_mask))
+    if ref_count <= 0:
+        return None, 0, 0
+
+    keep_mask = ref_mask.copy()
+    for j, (lb, ub) in enumerate(B):
+        if reference_bounds is not None:
+            r_lb, r_ub = R[j]
+            span = max(float(r_ub) - float(r_lb), 1e-12)
+        else:
+            span = max(float(ub) - float(lb), 1e-12)
+        tol = max(span * float(tol_ratio), 1e-12)
+        keep_mask &= (X[:, j] >= lb - tol) & (X[:, j] <= ub + tol)
+    keep_count = int(np.sum(keep_mask))
+    return float(keep_count) / float(max(ref_count, 1)), keep_count, ref_count
+
+
+def _apply_constrained_boundary_preserve(
+    *,
+    selected_bounds: list[tuple[float, float]] | None,
+    global_bounds: list[tuple[float, float]],
+    selected_points: np.ndarray | None,
+    protect_lb: list[bool] | None,
+    protect_ub: list[bool] | None,
+    system: ExplorerSystemConfig,
+) -> tuple[list[tuple[float, float]] | None, list[dict[str, object]]]:
+    if selected_bounds is None or len(selected_bounds) != len(global_bounds):
+        return selected_bounds, []
+    d = len(global_bounds)
+    max_dim = int(max(int(getattr(system, "constrained_boundary_preserve_max_dim", 4)), 0))
+    if d <= 0 or d > max_dim:
+        return selected_bounds, []
+
+    eps_ratio = float(np.clip(
+        float(getattr(system, "constrained_boundary_preserve_touch_eps_ratio", 0.10)),
+        0.0,
+        0.5,
+    ))
+    shift_fraction = float(np.clip(
+        float(getattr(system, "constrained_boundary_preserve_shift_fraction", 1.0)),
+        0.0,
+        1.0,
+    ))
+    require_signal = bool(
+        getattr(system, "constrained_boundary_preserve_require_policy_or_touch", True)
+    )
+    touch_lb, touch_ub = _infer_boundary_touch_sides(
+        selected_points=selected_points,
+        global_bounds=global_bounds,
+        eps_ratio=eps_ratio,
+    )
+    raw_lb = list(protect_lb or [])
+    raw_ub = list(protect_ub or [])
+    out: list[tuple[float, float]] = []
+    shifted: list[dict[str, object]] = []
+
+    for j, ((s_lb, s_ub), (g_lb, g_ub)) in enumerate(zip(selected_bounds, global_bounds)):
+        gl = float(min(g_lb, g_ub))
+        gu = float(max(g_lb, g_ub))
+        span = max(gu - gl, 1e-12)
+        lo = float(np.clip(min(s_lb, s_ub), gl, gu))
+        hi = float(np.clip(max(s_lb, s_ub), gl, gu))
+        width = max(hi - lo, 0.0)
+        if width <= 0.0 or width >= span - 1e-12 or shift_fraction <= 0.0:
+            out.append((lo, hi))
+            continue
+
+        pin_lb = bool(raw_lb[j]) if j < len(raw_lb) else False
+        pin_ub = bool(raw_ub[j]) if j < len(raw_ub) else False
+        touch_l = bool(touch_lb[j]) if j < len(touch_lb) else False
+        touch_u = bool(touch_ub[j]) if j < len(touch_ub) else False
+        use_lb = bool(pin_lb or touch_l)
+        use_ub = bool(pin_ub or touch_u)
+        if require_signal and not (use_lb or use_ub):
+            out.append((lo, hi))
+            continue
+        if use_lb and use_ub:
+            out.append((lo, hi))
+            continue
+
+        edge_tol = eps_ratio * span
+        new_lo, new_hi = lo, hi
+        side: str | None = None
+        if use_lb and (lo - gl) > edge_tol * 0.25:
+            target_lo = gl
+            target_hi = float(min(gl + width, gu))
+            new_lo = float(lo + shift_fraction * (target_lo - lo))
+            new_hi = float(hi + shift_fraction * (target_hi - hi))
+            side = "lb"
+        elif use_ub and (gu - hi) > edge_tol * 0.25:
+            target_hi = gu
+            target_lo = float(max(gu - width, gl))
+            new_lo = float(lo + shift_fraction * (target_lo - lo))
+            new_hi = float(hi + shift_fraction * (target_hi - hi))
+            side = "ub"
+
+        new_lo = float(np.clip(min(new_lo, new_hi), gl, gu))
+        new_hi = float(np.clip(max(new_lo, new_hi), gl, gu))
+        if side is not None and (abs(new_lo - lo) > 1e-12 or abs(new_hi - hi) > 1e-12):
+            shifted.append(
+                {
+                    "dim": int(j),
+                    "side": side,
+                    "old_lb": float(lo),
+                    "old_ub": float(hi),
+                    "new_lb": float(new_lo),
+                    "new_ub": float(new_hi),
+                    "policy_lb": bool(pin_lb),
+                    "policy_ub": bool(pin_ub),
+                    "touch_lb": bool(touch_l),
+                    "touch_ub": bool(touch_u),
+                }
+            )
+        out.append((new_lo, new_hi))
+
+    return out, shifted
+
+
+def _center_l1_to_design_center(
+    *,
+    selected_bounds: list[tuple[float, float]] | None,
+    global_bounds: list[tuple[float, float]],
+) -> float | None:
+    if selected_bounds is None or len(selected_bounds) != len(global_bounds):
+        return None
+    try:
+        sel_center = _bounds_center(selected_bounds)
+        design_center = _bounds_center(list(global_bounds))
+        if sel_center is None or design_center is None or len(global_bounds) == 0:
+            return None
+        spans = np.array(
+            [max(float(ub) - float(lb), 1e-12) for lb, ub in global_bounds],
+            dtype=float,
+        )
+        return float(np.mean(np.abs(sel_center - design_center) / spans))
+    except Exception:
+        return None
+
+
+def _apply_low_dim_balance_guard(
+    *,
+    selected_bounds: list[tuple[float, float]] | None,
+    global_bounds: list[tuple[float, float]],
+    selected_points: np.ndarray | None,
+    selected_features: list[str],
+    selected_bounds_volume_ratio_before_cap: float | None,
+    cap_target: float | None,
+    dual_volume_cap_applied: bool,
+    has_pre_constraints: bool,
+    has_post_constraints: bool,
+    system: ExplorerSystemConfig,
+) -> tuple[list[tuple[float, float]] | None, dict[str, object]]:
+    info: dict[str, object] = {
+        "applied": False,
+        "reason": None,
+        "center_l1_before": None,
+        "center_l1_after": None,
+        "current_volume_ratio": None,
+        "volume_ratio_after": None,
+    }
+    if selected_bounds is None or len(selected_bounds) != len(global_bounds):
+        info["reason"] = "invalid_bounds"
+        return selected_bounds, info
+    if not bool(getattr(system, "low_dim_balance_guard_enabled", True)):
+        info["reason"] = "disabled"
+        return selected_bounds, info
+    p_dim = int(len(selected_features))
+    max_dim = int(getattr(system, "low_dim_balance_guard_max_dim", 3))
+    if p_dim <= 0 or p_dim > max_dim:
+        info["reason"] = "dim_gate"
+        return selected_bounds, info
+    if bool(has_pre_constraints) or bool(has_post_constraints):
+        info["reason"] = "constraint_gate"
+        return selected_bounds, info
+    current_volume_ratio = _volume_ratio_for_bounds(selected_bounds, global_bounds)
+    info["current_volume_ratio"] = current_volume_ratio
+    cap_triggered = bool(dual_volume_cap_applied)
+    near_cap_triggered = False
+    if not cap_triggered:
+        near_cap_enabled = bool(
+            getattr(system, "low_dim_balance_guard_near_cap_enabled", True)
+        )
+        if (
+            near_cap_enabled
+            and cap_target is not None
+            and current_volume_ratio is not None
+            and np.isfinite(float(cap_target))
+            and np.isfinite(float(current_volume_ratio))
+            and float(cap_target) > 0.0
+        ):
+            near_min = float(max(
+                float(getattr(system, "low_dim_balance_guard_near_cap_min_ratio", 0.98)),
+                0.0,
+            ))
+            near_max = float(max(
+                float(getattr(system, "low_dim_balance_guard_near_cap_max_ratio", 1.01)),
+                near_min,
+            ))
+            relative_volume = float(current_volume_ratio) / max(float(cap_target), 1e-12)
+            near_cap_triggered = bool(near_min <= relative_volume <= near_max)
+            info["near_cap_relative_volume"] = float(relative_volume)
+            info["near_cap_min_ratio"] = float(near_min)
+            info["near_cap_max_ratio"] = float(near_max)
+    if not (cap_triggered or near_cap_triggered):
+        info["reason"] = "cap_not_applied"
+        return selected_bounds, info
+    if cap_triggered:
+        if (
+            selected_bounds_volume_ratio_before_cap is None
+            or not np.isfinite(float(selected_bounds_volume_ratio_before_cap))
+        ):
+            info["reason"] = "missing_pre_cap_ratio"
+            return selected_bounds, info
+        min_pre_cap_ratio = float(
+            getattr(system, "low_dim_balance_guard_min_pre_cap_ratio", 0.27)
+        )
+        if float(selected_bounds_volume_ratio_before_cap) < min_pre_cap_ratio:
+            info["reason"] = "pre_cap_ratio_gate"
+            return selected_bounds, info
+    info["trigger"] = "cap_applied" if cap_triggered else "near_cap"
+    center_l1_before = _center_l1_to_design_center(
+        selected_bounds=selected_bounds,
+        global_bounds=global_bounds,
+    )
+    info["center_l1_before"] = center_l1_before
+    if center_l1_before is None or not np.isfinite(float(center_l1_before)):
+        info["reason"] = "missing_center_l1"
+        return selected_bounds, info
+    l1_threshold = float(
+        getattr(system, "low_dim_balance_guard_center_l1_threshold", 0.20)
+    )
+    if float(center_l1_before) < l1_threshold:
+        info["reason"] = "center_l1_gate"
+        return selected_bounds, info
+
+    sel_center = _bounds_center(selected_bounds)
+    design_center = _bounds_center(list(global_bounds))
+    if sel_center is None or design_center is None:
+        info["reason"] = "missing_center"
+        return selected_bounds, info
+    blend = float(np.clip(
+        float(getattr(system, "low_dim_balance_guard_recenter_blend", 1.0)),
+        0.0,
+        1.0,
+    ))
+    if blend <= 0.0:
+        info["reason"] = "zero_blend"
+        return selected_bounds, info
+    target_center = (1.0 - blend) * np.asarray(sel_center, dtype=float) + blend * np.asarray(
+        design_center,
+        dtype=float,
+    )
+    candidate = _recenter_bounds_keep_width(
+        base_bounds=selected_bounds,
+        global_bounds=global_bounds,
+        target_center=target_center,
+    )
+    if candidate is None:
+        info["reason"] = "recenter_failed"
+        return selected_bounds, info
+    if bool(getattr(system, "low_dim_balance_guard_anchor_veto_enabled", True)):
+        min_anchor_count = int(max(
+            int(getattr(system, "low_dim_balance_guard_anchor_min_count", 4)),
+            0,
+        ))
+        min_retained = float(np.clip(
+            float(getattr(system, "low_dim_balance_guard_anchor_min_retained_ratio", 0.80)),
+            0.0,
+            1.0,
+        ))
+        retained, keep_count, ref_count = _point_retention_ratio_in_bounds(
+            points=selected_points,
+            bounds=candidate,
+            reference_bounds=selected_bounds,
+        )
+        info["anchor_retained_ratio"] = retained
+        info["anchor_retained_count"] = int(keep_count)
+        info["anchor_reference_count"] = int(ref_count)
+        info["anchor_min_retained_ratio"] = float(min_retained)
+        info["anchor_min_count"] = int(min_anchor_count)
+        if (
+            retained is not None
+            and int(ref_count) >= int(min_anchor_count)
+            and float(retained) < float(min_retained)
+        ):
+            info["reason"] = "anchor_veto"
+            return selected_bounds, info
+    center_l1_after = _center_l1_to_design_center(
+        selected_bounds=candidate,
+        global_bounds=global_bounds,
+    )
+    info["center_l1_after"] = center_l1_after
+    if center_l1_after is None or not np.isfinite(float(center_l1_after)):
+        info["reason"] = "candidate_center_l1_invalid"
+        return selected_bounds, info
+    min_improvement = float(
+        getattr(system, "low_dim_balance_guard_min_improvement", 0.03)
+    )
+    if (float(center_l1_before) - float(center_l1_after)) < min_improvement:
+        info["reason"] = "improvement_gate"
+        return selected_bounds, info
+
+    volume_after = _volume_ratio_for_bounds(candidate, global_bounds)
+    info["volume_ratio_after"] = volume_after
+    if (
+        cap_target is not None
+        and volume_after is not None
+        and np.isfinite(float(volume_after))
+        and float(volume_after) > float(cap_target) * 1.001
+    ):
+        info["reason"] = "volume_gate"
+        return selected_bounds, info
+
+    info["applied"] = True
+    info["reason"] = "applied"
+    return candidate, info
+
+
 def _fit_gp_like_additional(
     *,
     X: np.ndarray,
@@ -2690,6 +3033,10 @@ class ExplorerOrchestrator:
         dse_cap_force_pin_applied = False
         post_cap_side_mass_shift_applied = False
         post_cap_side_mass_shift_dims: list[dict[str, object]] = []
+        constrained_boundary_preserve_applied = False
+        constrained_boundary_preserve_dims: list[dict[str, object]] = []
+        low_dim_balance_guard_applied = False
+        low_dim_balance_guard_info: dict[str, object] = {}
         constraint_aware_enabled = bool(getattr(self.config.system, "constraint_aware_enabled", True))
         constraint_aware_policy_applied = False
         constraint_aware_shifted_dims: list[tuple[int, str]] = []
@@ -3505,6 +3852,72 @@ class ExplorerOrchestrator:
                 print(
                     "[Explorer] post-cap side-mass shift: "
                     + ", ".join(_dim_msg)
+                )
+
+        if (
+            bool(getattr(self.config.system, "constrained_boundary_preserve_enabled", True))
+            and selected_bounds is not None
+            and has_pre_constraints
+            and isinstance(selected_points, np.ndarray)
+            and selected_points.ndim == 2
+            and selected_points.shape[0] > 0
+            and selected_points.shape[1] == len(bounds)
+            and len(selected_bounds) == len(bounds)
+        ):
+            _raw_lb: list[bool] | None = None
+            _raw_ub: list[bool] | None = None
+            if isinstance(constraint_aware_policy, dict):
+                _raw_lb = [bool(v) for v in constraint_aware_policy.get("protect_lb", [])]
+                _raw_ub = [bool(v) for v in constraint_aware_policy.get("protect_ub", [])]
+            _cbp_bounds, _cbp_shifted = _apply_constrained_boundary_preserve(
+                selected_bounds=selected_bounds,
+                global_bounds=bounds,
+                selected_points=selected_points,
+                protect_lb=_raw_lb,
+                protect_ub=_raw_ub,
+                system=self.config.system,
+            )
+            if _cbp_bounds is not None and _cbp_shifted:
+                selected_bounds = _cbp_bounds
+                constrained_boundary_preserve_applied = True
+                constrained_boundary_preserve_dims = list(_cbp_shifted)
+                _dim_msg = []
+                for item in constrained_boundary_preserve_dims:
+                    _j = int(item.get("dim", -1))
+                    _side = str(item.get("side", ""))
+                    _name = selected_features[_j] if 0 <= _j < len(selected_features) else str(_j)
+                    _dim_msg.append(f"{_name}:{_side}")
+                print(
+                    "[Explorer] constrained boundary preserve: "
+                    + ", ".join(_dim_msg)
+                )
+
+        if (
+            selected_bounds is not None
+            and len(selected_bounds) == len(bounds)
+        ):
+            _ldbg_bounds, _ldbg_info = _apply_low_dim_balance_guard(
+                selected_bounds=selected_bounds,
+                global_bounds=bounds,
+                selected_points=selected_points,
+                selected_features=list(selected_features),
+                selected_bounds_volume_ratio_before_cap=selected_bounds_volume_ratio_before_cap,
+                cap_target=dual_volume_cap_target,
+                dual_volume_cap_applied=bool(dual_volume_cap_applied),
+                has_pre_constraints=bool(has_pre_constraints),
+                has_post_constraints=bool(has_post_constraints),
+                system=self.config.system,
+            )
+            low_dim_balance_guard_info = dict(_ldbg_info or {})
+            if _ldbg_bounds is not None and bool(low_dim_balance_guard_info.get("applied", False)):
+                selected_bounds = _ldbg_bounds
+                low_dim_balance_guard_applied = True
+                _before = low_dim_balance_guard_info.get("center_l1_before")
+                _after = low_dim_balance_guard_info.get("center_l1_after")
+                print(
+                    "[Explorer] low-dim balance guard applied: "
+                    f"center_l1 {float(_before):.4f} -> {float(_after):.4f} "
+                    "(width/volume preserved)"
                 )
 
         if selected_bounds is not None:

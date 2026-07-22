@@ -78,7 +78,7 @@ run_aion_from_json(config_path)
 
 현재 backend/dev config contract 후보는 아래 top-level section을 사용한다.
 최종 서비스 UI schema로 확정된 것은 아니며, 실제 parser 기준 계약은
-`docs/pipeline_config_contract.md`에 별도로 정리한다.
+`docs/policy/pipeline_config_contract.md`에 별도로 정리한다.
 
 ```text
 problem   # 문제명, seed, objective_sense, variables
@@ -385,9 +385,9 @@ OPT/artifacts/meta/focus_bounds.json
 Task별 상세 정책은 아래 문서에 둔다.
 
 ```text
-docs/tasks/cae_tool_interface.md
-docs/tasks/doe.md
-docs/tasks/modeler.md
-docs/tasks/explorer.md
-docs/tasks/optimizer.md
+docs/policy/tasks/cae_tool_interface.md
+docs/policy/tasks/doe.md
+docs/policy/tasks/modeler.md
+docs/policy/tasks/explorer.md
+docs/policy/tasks/optimizer.md
 ```

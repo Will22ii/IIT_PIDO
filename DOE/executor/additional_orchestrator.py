@@ -135,6 +135,8 @@ class AdditionalDOEOrchestrator:
         local_exec_min_anchors: int = 2,
         plan_filter_safety: float = 1.2,
         plan_filter_r_floor: float = 0.02,
+        plan_filter_r_floor_equality: float = 1e-5,
+        plan_generation_max: int = 2_000_000,
         pre_equality_boost_base: float = 2.0,
         pre_equality_boost_max: float = 8.0,
         pre_equality_warning_threshold: int = 3,
@@ -345,6 +347,8 @@ class AdditionalDOEOrchestrator:
         self.local_exec_min_anchors = int(max(0, int(local_exec_min_anchors)))
         self.plan_filter_safety = float(plan_filter_safety)
         self.plan_filter_r_floor = float(plan_filter_r_floor)
+        self.plan_filter_r_floor_equality = float(plan_filter_r_floor_equality)
+        self.plan_generation_max = int(max(int(plan_generation_max), 1))
         self.pre_equality_boost_base = max(float(pre_equality_boost_base), 1.0)
         self.pre_equality_boost_max = max(float(pre_equality_boost_max), 1.0)
         self.pre_equality_warning_threshold = max(int(pre_equality_warning_threshold), 1)
@@ -394,6 +398,7 @@ class AdditionalDOEOrchestrator:
         self.constraint_rate_hat = 1.0
         self._constraint_gen_total = 0
         self._constraint_feas_total = 0
+        self._plan_generation_cap_warned = False
 
         self.local_anchor_max_base = int(local_anchor_max_base)
         self.local_anchor_max_decay = float(local_anchor_max_decay)
@@ -1091,13 +1096,41 @@ class AdditionalDOEOrchestrator:
             + minima.get("boundary_cross", 0)
         )
 
+    @property
+    def _effective_r_floor(self) -> float:
+        """통과율 하한. pre equality가 있을 때만 낮은 값을 쓴다.
+
+        기본 floor(0.02)는 폭주 방지용이지만, 등식의 실제 통과율은 그보다 훨씬 낮아
+        추정치가 잘리면 후보 배수가 50배에서 멈춘다. 등식이 있을 때만 하한을 풀고,
+        폭주는 plan_generation_max로 따로 막는다.
+
+        등식이 없으면 기존 floor를 그대로 반환하므로 동작이 바뀌지 않는다.
+        """
+        if self.pre_equality_count <= 0:
+            return float(self.plan_filter_r_floor)
+        return float(min(self.plan_filter_r_floor_equality, self.plan_filter_r_floor))
+
+    def _initial_probe_equality_inflation(self) -> float:
+        """초기 DOE probe 생성량에 곱할 관측 기반 배수.
+
+        기존 초기 probe는 constraint_rate_hat을 전혀 참조하지 않고 고정 배수만 썼기
+        때문에, 통과율이 낮아도 스스로 후보를 늘리지 못했다. pre equality가 있을 때만
+        관측 통과율의 역수를 곱해 자기교정하게 한다.
+
+        pre equality가 없으면 1.0을 반환하므로 기존 동작이 그대로 유지된다.
+        """
+        if self.pre_equality_count <= 0:
+            return 1.0
+        r_used = max(float(self.constraint_rate_hat), float(self._effective_r_floor))
+        return float(max(1.0, np.ceil(1.0 / r_used)))
+
     def _update_constraint_ratio(self, *, n_generated: int, n_feasible: int) -> None:
         if n_generated <= 0:
             return
         self._constraint_gen_total += int(n_generated)
         self._constraint_feas_total += int(n_feasible)
         raw_ratio = self._constraint_feas_total / max(self._constraint_gen_total, 1)
-        self.constraint_rate_hat = clamp_ratio(raw_ratio, floor=self.plan_filter_r_floor)
+        self.constraint_rate_hat = clamp_ratio(raw_ratio, floor=self._effective_r_floor)
 
     def _filter_by_constraints(
         self,
@@ -1152,10 +1185,34 @@ class AdditionalDOEOrchestrator:
         target_count = max(int(target_count), 1)
         if not self.has_pre_constraints:
             return target_count
-        r_used = max(float(self.constraint_rate_hat), float(self.plan_filter_r_floor))
+        r_used = max(float(self.constraint_rate_hat), float(self._effective_r_floor))
         inv = max(int(np.ceil(1.0 / r_used)), 1)
         n_gen = int(np.ceil(target_count * self.plan_filter_safety * inv * self.pre_equality_boost))
-        return max(n_gen, target_count)
+        n_gen = max(n_gen, target_count)
+        return self._cap_generation_count(n_gen, target_count=target_count)
+
+    def _cap_generation_count(self, n_gen: int, *, target_count: int) -> int:
+        """후보 생성 절대 상한. 중단하지 않고 잘라내되 이유를 남긴다.
+
+        상한에 걸린 뒤 FAILED_FILTER_MIN이 뜨면 이 경고가 원인을 설명한다.
+        target_count 밑으로는 자르지 않는다.
+        """
+        n_gen = int(n_gen)
+        if n_gen <= self.plan_generation_max:
+            return n_gen
+        capped = max(int(self.plan_generation_max), int(target_count))
+        if not self._plan_generation_cap_warned:
+            self._plan_generation_cap_warned = True
+            print(
+                "[AdditionalDOE][PlanGenerationCap][WARN] "
+                f"required={n_gen} > plan_generation_max={self.plan_generation_max} "
+                f"-> capped={capped}. "
+                f"constraint_rate_hat={float(self.constraint_rate_hat):.3e}, "
+                f"pre_equality_count={int(self.pre_equality_count)}. "
+                "후보 부족으로 FAILED_FILTER_MIN이 발생할 수 있다. "
+                "eps 완화, bounds 축소, 또는 등식 재매개화를 검토할 것."
+            )
+        return capped
 
     def _update_post_rate(self, *, feasible: bool) -> None:
         if not self.has_post_constraints:
@@ -1353,16 +1410,28 @@ class AdditionalDOEOrchestrator:
 
         if self.has_pre_constraints:
             if n_regular_target > 0:
-                probe_size = max(
-                    1,
-                    int(np.ceil(n_regular_target * self.initial_probe_multiplier * self.pre_equality_boost)),
-                )
                 max_attempts = min(max(2, int(np.ceil(1.0 / max(self.plan_filter_r_floor, 1e-6)))), 50)
                 pool_X: list[np.ndarray] = []
                 pool_constraints: list[dict] = []
                 pool_margins: list[float] = []
 
                 for _attempt in range(max_attempts):
+                    # probe_size를 매 시도마다 다시 계산한다. 첫 시도는 constraint_rate_hat이
+                    # 1.0이라 기존 동작과 동일하고, 이후에는 관측된 통과율이 반영되어
+                    # 스스로 배수를 키운다. pre equality가 없으면 인플레이션이 1.0으로
+                    # 고정되므로 기존 동작이 그대로 유지된다.
+                    probe_size = max(
+                        1,
+                        int(np.ceil(
+                            n_regular_target
+                            * self.initial_probe_multiplier
+                            * self.pre_equality_boost
+                            * self._initial_probe_equality_inflation()
+                        )),
+                    )
+                    probe_size = self._cap_generation_count(
+                        probe_size, target_count=n_regular_target
+                    )
                     X_probe = self._sample_initial(n_samples=probe_size)
 
                     X_probe_f, constraints_f, margins_f, _ = self._filter_by_constraints(

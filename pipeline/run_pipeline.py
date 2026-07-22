@@ -100,6 +100,7 @@ def _create_new_run_context(*, config: PipelineConfig, project_root: str) -> tup
     run_context = create_run_context(
         project_root=project_root,
         user_config_snapshot=user_snapshot,
+        runs_root=config.runs_root,
     )
     save_cae_task(
         run_context=run_context,

@@ -106,7 +106,7 @@ Known strong historical data:
 Existing policy reference:
 
 - `.claude/skills/dse/SKILL.md`
-- `docs/tasks/explorer.md`
+- `docs/policy/tasks/explorer.md`
 
 Path handling rule:
 

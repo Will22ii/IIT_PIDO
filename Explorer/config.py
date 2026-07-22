@@ -122,6 +122,34 @@ class ExplorerSystemConfig:
     post_cap_side_mass_quantile: float = 0.98
     post_cap_side_mass_trigger_ratio: float = 0.0
     post_cap_side_mass_pad_ratio: float = 0.001
+    # 제약 저차원 문제에서 cap/shift 이후 보호해야 할 설계 경계가 다시 잘리면,
+    # selected/top anchor의 boundary-touch 신호를 근거로 width를 유지한 채 edge로 복원한다.
+    constrained_boundary_preserve_enabled: bool = True
+    constrained_boundary_preserve_max_dim: int = 4
+    constrained_boundary_preserve_touch_eps_ratio: float = 0.10
+    constrained_boundary_preserve_shift_fraction: float = 1.0
+    constrained_boundary_preserve_require_policy_or_touch: bool = True
+    # 저차원·무제약에서 cap 이후 bounds가 한쪽으로 과하게 치우치면,
+    # 부피와 width는 유지하고 설계공간 중심 쪽으로 recenter한다.
+    # SH처럼 multimodal 저차원 문제에서 과도한 one-sided shrink를 줄이기 위한
+    # state-only guard이며 benchmark 이름/정답 좌표를 쓰지 않는다.
+    low_dim_balance_guard_enabled: bool = True
+    low_dim_balance_guard_max_dim: int = 3
+    low_dim_balance_guard_center_l1_threshold: float = 0.20
+    low_dim_balance_guard_min_pre_cap_ratio: float = 0.27
+    low_dim_balance_guard_min_improvement: float = 0.03
+    low_dim_balance_guard_recenter_blend: float = 1.0
+    # cap shrink가 명시 적용되지 않았더라도 최종 bounds가 이미 cap 근처이고
+    # 중심 편향이 크면 같은 guard를 적용한다. apply_bounds_margin의 min-volume
+    # floor만으로 24.99% 근처가 된 over-shrink 케이스를 회복하기 위한 조건이다.
+    low_dim_balance_guard_near_cap_enabled: bool = True
+    low_dim_balance_guard_near_cap_min_ratio: float = 0.98
+    low_dim_balance_guard_near_cap_max_ratio: float = 1.01
+    # recenter 후보가 기존 selected/top anchor를 과하게 버리면 적용하지 않는다.
+    # Goldstein류 off-center optimum에서 center recenter가 좋은 anchor를 자르는 것을 막는다.
+    low_dim_balance_guard_anchor_veto_enabled: bool = True
+    low_dim_balance_guard_anchor_min_retained_ratio: float = 0.80
+    low_dim_balance_guard_anchor_min_count: int = 4
 
     # 4) 후보 선택
     quantile_threshold: float = 0.85

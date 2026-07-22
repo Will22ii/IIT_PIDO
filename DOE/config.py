@@ -46,6 +46,26 @@ class DOESystemConfig:
     plan_decay: float = 0.9
     plan_filter_safety: float = 1.2
     plan_filter_r_floor: float = 0.02
+    # pre equality가 있을 때만 사용하는 통과율 하한.
+    # 등식의 실제 통과율은 eps 밴드 때문에 0.02보다 훨씬 낮다. 기본 floor를 쓰면
+    # 통과율이 2%로 기록되어 후보 배수가 50배에서 멈추고, 필요한 배수(등식 2개면
+    # 약 2500배)에 도달하지 못해 구조적으로 실패한다.
+    plan_filter_r_floor_equality: float = 1e-5
+    # 후보 생성 절대 상한. 위 하한을 낮춘 대신 폭주는 이 값으로 막는다.
+    # 상한에 걸려도 중단하지 않고 잘라내며, 이유를 경고로 남긴다.
+    #
+    # 지원 범위: 독립 pre 등식 m개에 대해 필요 배수가 대략 (1/0.02)^m 이므로
+    #   m <= 2  -> 필요 약 2,500배. 이 상한 안에서 해결됨. 지원 확정.
+    #   m >= 3  -> 필요 약 125,000배. 이 상한에 걸려 후보가 부족해지고,
+    #              경고 후 FAILED_FILTER_MIN이 발생할 수 있다.
+    # m >= 3을 제대로 지원하려면 rejection이 아니라 매니폴드 투영이 필요하다.
+    # 설계는 docs/planned/doe_pre_equality_projection.md 참고.
+    plan_generation_max: int = 2_000_000
+    # pre Type 2 등식(eps 미지정, 구조적 등식)을 투영으로 처리할 때의 pool 크기.
+    # 투영은 면이 휘는 곳에 점을 뭉치게 하므로, 과생성 후 maximin으로 골라
+    # LHS 층화를 회복한다. n_samples가 작을 때를 대비해 하한을 둔다.
+    projection_pool_multiplier: float = 5.0
+    projection_pool_min: int = 300
     pre_equality_boost_base: float = 2.0
     pre_equality_boost_max: float = 8.0
     pre_equality_warning_threshold: int = 3
@@ -216,6 +236,8 @@ def build_additional_cfg_from_system(
         "plan_decay": system.plan_decay,
         "plan_filter_safety": system.plan_filter_safety,
         "plan_filter_r_floor": system.plan_filter_r_floor,
+        "plan_filter_r_floor_equality": system.plan_filter_r_floor_equality,
+        "plan_generation_max": system.plan_generation_max,
         "pre_equality_boost_base": system.pre_equality_boost_base,
         "pre_equality_boost_max": system.pre_equality_boost_max,
         "pre_equality_warning_threshold": system.pre_equality_warning_threshold,

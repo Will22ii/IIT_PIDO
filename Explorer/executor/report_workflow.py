@@ -142,6 +142,54 @@ def build_explorer_report_payload(
             "post_cap_side_mass_pad_ratio": float(
                 getattr(system_config, "post_cap_side_mass_pad_ratio", 0.001)
             ),
+            "constrained_boundary_preserve_enabled": bool(
+                getattr(system_config, "constrained_boundary_preserve_enabled", True)
+            ),
+            "constrained_boundary_preserve_max_dim": int(
+                getattr(system_config, "constrained_boundary_preserve_max_dim", 4)
+            ),
+            "constrained_boundary_preserve_touch_eps_ratio": float(
+                getattr(system_config, "constrained_boundary_preserve_touch_eps_ratio", 0.10)
+            ),
+            "constrained_boundary_preserve_shift_fraction": float(
+                getattr(system_config, "constrained_boundary_preserve_shift_fraction", 1.0)
+            ),
+            "low_dim_balance_guard_enabled": bool(
+                getattr(system_config, "low_dim_balance_guard_enabled", True)
+            ),
+            "low_dim_balance_guard_max_dim": int(
+                getattr(system_config, "low_dim_balance_guard_max_dim", 3)
+            ),
+            "low_dim_balance_guard_center_l1_threshold": float(
+                getattr(system_config, "low_dim_balance_guard_center_l1_threshold", 0.20)
+            ),
+            "low_dim_balance_guard_min_pre_cap_ratio": float(
+                getattr(system_config, "low_dim_balance_guard_min_pre_cap_ratio", 0.27)
+            ),
+            "low_dim_balance_guard_min_improvement": float(
+                getattr(system_config, "low_dim_balance_guard_min_improvement", 0.03)
+            ),
+            "low_dim_balance_guard_recenter_blend": float(
+                getattr(system_config, "low_dim_balance_guard_recenter_blend", 1.0)
+            ),
+            "low_dim_balance_guard_near_cap_enabled": bool(
+                getattr(system_config, "low_dim_balance_guard_near_cap_enabled", True)
+            ),
+            "low_dim_balance_guard_near_cap_min_ratio": float(
+                getattr(system_config, "low_dim_balance_guard_near_cap_min_ratio", 0.98)
+            ),
+            "low_dim_balance_guard_near_cap_max_ratio": float(
+                getattr(system_config, "low_dim_balance_guard_near_cap_max_ratio", 1.01)
+            ),
+            "low_dim_balance_guard_anchor_veto_enabled": bool(
+                getattr(system_config, "low_dim_balance_guard_anchor_veto_enabled", True)
+            ),
+            "low_dim_balance_guard_anchor_min_retained_ratio": float(
+                getattr(system_config, "low_dim_balance_guard_anchor_min_retained_ratio", 0.80)
+            ),
+            "low_dim_balance_guard_anchor_min_count": int(
+                getattr(system_config, "low_dim_balance_guard_anchor_min_count", 4)
+            ),
             "gp_x_scaling_enabled": bool(
                 getattr(system_config, "gp_x_scaling_enabled", True)
             ),
@@ -192,6 +240,16 @@ def build_explorer_report_payload(
             context["post_cap_side_mass_shift_applied"]
         ),
         "post_cap_side_mass_shift_dims": context["post_cap_side_mass_shift_dims"],
+        "constrained_boundary_preserve_applied": bool(
+            context.get("constrained_boundary_preserve_applied", False)
+        ),
+        "constrained_boundary_preserve_dims": context.get(
+            "constrained_boundary_preserve_dims", []
+        ),
+        "low_dim_balance_guard_applied": bool(
+            context.get("low_dim_balance_guard_applied", False)
+        ),
+        "low_dim_balance_guard_info": context.get("low_dim_balance_guard_info", {}),
         "constraint_aware_enabled": bool(context["constraint_aware_enabled"]),
         "constraint_aware_policy_applied": bool(
             context["constraint_aware_policy_applied"]
@@ -304,6 +362,16 @@ def build_explorer_report_payload(
             context["post_cap_side_mass_shift_applied"]
         ),
         "post_cap_side_mass_shift_dims": context["post_cap_side_mass_shift_dims"],
+        "constrained_boundary_preserve_applied": bool(
+            context.get("constrained_boundary_preserve_applied", False)
+        ),
+        "constrained_boundary_preserve_dims": context.get(
+            "constrained_boundary_preserve_dims", []
+        ),
+        "low_dim_balance_guard_applied": bool(
+            context.get("low_dim_balance_guard_applied", False)
+        ),
+        "low_dim_balance_guard_info": context.get("low_dim_balance_guard_info", {}),
         "constraint_aware_enabled": bool(context["constraint_aware_enabled"]),
         "constraint_aware_policy_applied": bool(
             context["constraint_aware_policy_applied"]

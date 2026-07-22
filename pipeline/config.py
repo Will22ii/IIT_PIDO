@@ -52,6 +52,9 @@ class PipelineConfig:
     # 기존 run을 이어서 사용할 때 backend가 넘기는 run root.
     # None이면 새 run context를 생성한다.
     run_root: str | None = None
+    # 새 run 디렉터리를 담을 부모 경로. batch runner가 배치 폴더의 runs/를 넘긴다.
+    # None이면 service run으로 보고 result/service 아래에 만든다.
+    runs_root: str | None = None
     # AION mode는 pipeline/aion_system_config.py를 통해 pipeline 전용 연계 기능을 켠다.
     # direct/standalone run에서는 기본값을 off로 둔다.
     aion_mode: bool = False
