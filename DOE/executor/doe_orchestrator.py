@@ -449,7 +449,6 @@ def run_doe_orchestrator(
         raise ValueError(
             "DOE n_samples must be greater than 5 for downstream Modeler KFold(5)."
         )
-    force_baseline = bool(run_cfg.get("force_baseline_initial", False))
     var_names = [v["name"] for v in variables]
     constraint_defs = validate_constraint_defs(problem_spec.get("constraint_defs", []) or [])
     has_pre_constraints = any(
@@ -492,8 +491,7 @@ def run_doe_orchestrator(
             )
 
         n_samples = int(run_cfg["n_samples"])
-        n_baseline_reserved = 1 if (force_baseline and n_samples > 0) else 0
-        n_regular_samples = n_samples - n_baseline_reserved
+        n_regular_samples = n_samples
 
         print("\nDOE 설정 요약")
         print(f"- 문제명           : {problem_spec['name']}")
@@ -506,7 +504,6 @@ def run_doe_orchestrator(
         saver = ResultSaver(use_timestamp=bool(run_cfg.get("use_timestamp", False)))
 
         bounds = [(v["lb"], v["ub"]) for v in variables]
-        baseline = np.array([v["baseline"] for v in variables], dtype=float)
 
         probe_multiplier = float(run_cfg.get("initial_probe_multiplier", 2.0))
         # pre Type 2 등식(eps 미지정)이 있으면 rejection이 아니라 투영으로 뽑는다.
@@ -702,22 +699,6 @@ def run_doe_orchestrator(
         picked_constraints: list[dict] = []
         picked_margin_list: list[float] = []
 
-        if n_baseline_reserved > 0:
-            baseline_x = np.asarray(baseline, dtype=float).reshape(1, -1)
-            if has_pre_constraints:
-                baseline_constraints, _, baseline_margin = evaluate_constraints_point(
-                    x=np.asarray(baseline, dtype=float),
-                    var_names=var_names,
-                    constraint_defs=constraint_defs,
-                    scope="pre",
-                )
-            else:
-                baseline_constraints = {}
-                baseline_margin = float("inf")
-            X_parts.append(baseline_x)
-            picked_constraints.append(baseline_constraints)
-            picked_margin_list.append(float(baseline_margin))
-
         if X_corner.shape[0] > 0:
             X_parts.append(np.asarray(X_corner, dtype=float))
             picked_constraints.extend(corner_constraints)
@@ -911,7 +892,6 @@ def run_doe_orchestrator(
     hpo_runner = HPORunner(n_trials=10)
 
     bounds = [(v["lb"], v["ub"]) for v in variables]
-    baseline = np.array([v["baseline"] for v in variables], dtype=float)
 
     orchestrator_kwargs = {
         "bounds": bounds,
@@ -927,7 +907,6 @@ def run_doe_orchestrator(
         "rng": rng,
         "total_budget": total_budget,
         "hpo_runner": hpo_runner,
-        "force_baseline": force_baseline,
         "local_gp_seed": seed,
     }
     valid_kwargs = set(inspect.signature(AdditionalDOEOrchestrator.__init__).parameters.keys())
@@ -949,7 +928,6 @@ def run_doe_orchestrator(
     orchestrator = AdditionalDOEOrchestrator(**orchestrator_kwargs)
 
     results = orchestrator.run(
-        baseline=baseline,
         problem_name=problem_spec["name"],
         base_seed=seed,
         objective_sense=objective_sense,

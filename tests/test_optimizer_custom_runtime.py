@@ -78,7 +78,7 @@ def _build_temp_run_context(tmpdir: str, constraint_defs: list[dict] | None = No
     os.makedirs(cae_dir, exist_ok=True)
     cae_metadata_path = os.path.join(cae_dir, "metadata.json")
     variables = [
-        {"name": f"x{i}", "lb": -2.048, "ub": 2.048, "baseline": 0.0}
+        {"name": f"x{i}", "lb": -2.048, "ub": 2.048}
         for i in range(1, 6)
     ]
     with open(cae_metadata_path, "w", encoding="utf-8") as f:

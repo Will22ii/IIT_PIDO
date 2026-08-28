@@ -16,7 +16,6 @@ def get_problem_spec():
             "name": f"x{i+1}",
             "default_lb": -2.0,
             "default_ub": 2.0,
-            "default_baseline": 0.0,
         })
 
     for j in range(n_dummy):
@@ -24,7 +23,6 @@ def get_problem_spec():
             "name": f"d{j+1}",
             "default_lb": 0.0,
             "default_ub": 1.0,
-            "default_baseline": 0.5,
         })
 
     return {

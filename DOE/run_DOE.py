@@ -234,7 +234,6 @@ def run_doe(*, config: DOEConfig, run_context: RunContext | None = None) -> dict
         "use_timestamp": use_timestamp,
         "debug_level": _normalize_debug_level(config.system.debug_level),
         "success_rate_floor": config.system.success_rate_floor,
-        "force_baseline_initial": config.system.force_baseline_initial,
         "initial_corner_ratio": initial_corner_ratio_eff,
         "initial_corner_ratio_base": float(config.system.initial_corner_ratio),
         "initial_corner_ratio_policy": initial_corner_policy,

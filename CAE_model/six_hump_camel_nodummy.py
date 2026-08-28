@@ -3,8 +3,8 @@ import numpy as np
 
 def get_problem_spec():
     real_vars = [
-        {"name": "x1", "default_lb": -3.0, "default_ub": 3.0, "default_baseline": 0.0},
-        {"name": "x2", "default_lb": -2.0, "default_ub": 2.0, "default_baseline": 0.0},
+        {"name": "x1", "default_lb": -3.0, "default_ub": 3.0},
+        {"name": "x2", "default_lb": -2.0, "default_ub": 2.0},
     ]
 
     return {

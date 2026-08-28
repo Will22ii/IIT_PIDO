@@ -7,13 +7,11 @@ def get_problem_spec():
             "name": "x1",
             "default_lb": -2.0,
             "default_ub": 2.0,
-            "default_baseline": 0.0,
         },
         {
             "name": "x2",
             "default_lb": -2.0,
             "default_ub": 2.0,
-            "default_baseline": 0.0,
         },
     ]
 

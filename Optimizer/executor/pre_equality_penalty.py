@@ -61,6 +61,12 @@ class PreEqualityPenaltyPolicy:
         object.__setattr__(self, "var_names", list(self.var_names or []))
         object.__setattr__(self, "penalty_lambda", float(max(float(self.penalty_lambda), 0.0)))
         object.__setattr__(self, "violation_cap", float(max(float(self.violation_cap), 1.0)))
+        # id -> cdef 조회표. violation()이 점마다 제약마다 선형 탐색하던 것을 대체한다.
+        object.__setattr__(
+            self,
+            "_defs_by_id",
+            {str(c.get("id")): c for c in self.constraint_defs},
+        )
 
     @property
     def active(self) -> bool:
@@ -112,7 +118,7 @@ class PreEqualityPenaltyPolicy:
                 value = float(cinfo.get("value", float("inf")))
                 limit = float(cinfo.get("limit", float("inf")))
                 eps = float(cinfo.get("eps", 0.0))
-                cdef = next((c for c in self.constraint_defs if str(c.get("id")) == cid), {})
+                cdef = getattr(self, "_defs_by_id", {}).get(cid, {})
                 scale = float(cdef.get("penalty_scale", max(abs(value), abs(limit), 1.0)))
                 weight = float(cdef.get("penalty_weight", 1.0))
                 scale = max(abs(scale), 1e-12)

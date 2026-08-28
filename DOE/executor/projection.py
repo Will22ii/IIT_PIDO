@@ -178,7 +178,7 @@ def maximin_subset(
     투영은 면이 휘는 곳에 점을 뭉치게 만든다. 뭉친 곳에서는 하나만 골라지므로
     최종 표본이 다시 고르게 퍼진다. 투영이 LHS 층화를 훼손하는 것에 대한 대응이다.
 
-    forced_indices는 무조건 포함한다(baseline 등).
+    forced_indices는 무조건 포함한다.
     """
     X = np.asarray(X, dtype=float)
     n = int(X.shape[0])

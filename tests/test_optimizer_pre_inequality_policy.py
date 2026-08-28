@@ -15,7 +15,7 @@ from Optimizer.executor.pre_constraint_policy import PreInequalityPolicy
 
 def _variables() -> list[dict]:
     return [
-        {"name": f"x{i}", "lb": -2.0, "ub": 2.0, "baseline": 0.0}
+        {"name": f"x{i}", "lb": -2.0, "ub": 2.0}
         for i in range(1, 6)
     ]
 

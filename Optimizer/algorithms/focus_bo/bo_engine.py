@@ -5201,24 +5201,51 @@ def _acquisition_scores_for_pool(
             scores = np.full((pool.shape[0],), float("inf"), dtype=float)
 
     if soft_penalty_fn is not None:
-        penalties: list[float] = []
-        for row in pool:
+        # batch 경로가 있으면 쓴다. 없으면 기존 행별 경로를 그대로 쓴다.
+        soft_batch = getattr(soft_penalty_fn, "batch", None)
+        raw_penalties = None
+        if soft_batch is not None:
             try:
-                penalty = float(soft_penalty_fn(np.asarray(row, dtype=float).reshape(-1)))
+                candidate = np.asarray(soft_batch(pool), dtype=float).reshape(-1)
+                if candidate.shape[0] == pool.shape[0]:
+                    raw_penalties = candidate
             except Exception:
-                penalty = 0.0
-            penalties.append(float(penalty) if np.isfinite(penalty) and penalty > 0.0 else 0.0)
-        scores = scores + np.asarray(penalties, dtype=float)
+                raw_penalties = None
+        if raw_penalties is None:
+            values: list[float] = []
+            for row in pool:
+                try:
+                    values.append(float(soft_penalty_fn(np.asarray(row, dtype=float).reshape(-1))))
+                except Exception:
+                    values.append(0.0)
+            raw_penalties = np.asarray(values, dtype=float)
+        # 비유한/음수 penalty를 0으로 떨어뜨리는 기존 규칙을 유지한다.
+        penalties_arr = np.where(
+            np.isfinite(raw_penalties) & (raw_penalties > 0.0), raw_penalties, 0.0
+        )
+        scores = scores + penalties_arr
 
     if post_feasible_prob_fn is not None and post_penalty_lambda > 0.0:
-        penalties: list[float] = []
-        for row in pool:
+        post_batch = getattr(post_feasible_prob_fn, "batch", None)
+        p_arr = None
+        if post_batch is not None:
             try:
-                p_post = float(np.clip(post_feasible_prob_fn(np.asarray(row, dtype=float).reshape(-1)), 0.0, 1.0))
+                candidate = np.asarray(post_batch(pool), dtype=float).reshape(-1)
+                if candidate.shape[0] == pool.shape[0]:
+                    p_arr = candidate
             except Exception:
-                p_post = 1.0
-            penalties.append(float(post_penalty_lambda) * (1.0 - p_post))
-        scores = scores + np.asarray(penalties, dtype=float)
+                p_arr = None
+        if p_arr is None:
+            values = []
+            for row in pool:
+                try:
+                    values.append(float(post_feasible_prob_fn(np.asarray(row, dtype=float).reshape(-1))))
+                except Exception:
+                    values.append(1.0)
+            p_arr = np.asarray(values, dtype=float)
+        p_arr = np.where(np.isfinite(p_arr), p_arr, 1.0)
+        p_arr = np.clip(p_arr, 0.0, 1.0)
+        scores = scores + float(post_penalty_lambda) * (1.0 - p_arr)
     return scores
 
 
@@ -7143,6 +7170,12 @@ def _build_post_feasible_prob_fn(
         def _const_prob(_x: np.ndarray) -> float:
             return float(p0)
 
+        def _const_prob_batch(X_arr: np.ndarray) -> np.ndarray:
+            arr = np.asarray(X_arr, dtype=float)
+            n = int(arr.shape[0]) if arr.ndim == 2 else 1
+            return np.full((n,), float(p0), dtype=float)
+
+        _const_prob.batch = _const_prob_batch
         return _const_prob, "constant", "ok"
 
     model = feasibility_payload.get("model")
@@ -7172,6 +7205,41 @@ def _build_post_feasible_prob_fn(
         except Exception:
             return 1.0
 
+    def _model_prob_batch(X_arr: np.ndarray) -> np.ndarray:
+        """행별 호출과 동일한 확률을 한 번의 predict로 얻는다.
+
+        배치 예측이 실패하면 행별 경로로 되돌아가 기존 예외 처리(행 단위 1.0 대체)를
+        그대로 유지한다.
+        """
+        arr = np.asarray(X_arr, dtype=float)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        n = int(arr.shape[0])
+        if n == 0:
+            return np.empty((0,), dtype=float)
+        if arr.shape[1] < len(selected_features):
+            return np.ones((n,), dtype=float)
+        try:
+            x_in = arr[:, col_idx]
+            if hasattr(model, "predict_proba"):
+                prob = np.asarray(model.predict_proba(x_in), dtype=float)
+                if prob.ndim == 2 and prob.shape[1] >= 2:
+                    p = prob[:, 1]
+                else:
+                    p = prob.reshape(-1)
+            elif hasattr(model, "predict"):
+                p = np.asarray(model.predict(x_in), dtype=float).reshape(-1)
+            else:
+                return np.ones((n,), dtype=float)
+            p = np.asarray(p, dtype=float).reshape(-1)
+            if p.shape[0] != n:
+                raise ValueError("post feasibility batch size mismatch")
+            p = np.where(np.isfinite(p), p, 1.0)
+            return np.clip(p, 0.0, 1.0)
+        except Exception:
+            return np.asarray([_model_prob(row) for row in arr], dtype=float)
+
+    _model_prob.batch = _model_prob_batch
     return _model_prob, kind, "ok"
 
 
@@ -7335,6 +7403,26 @@ def run_bo_engine(
             np.asarray(x_arr, dtype=float).reshape(-1),
             objective_scale=_current_pre_eq_objective_scale(),
         )
+
+    def _pre_eq_soft_penalty_batch(X_arr: np.ndarray) -> np.ndarray:
+        """여러 점의 penalty를 한 번에 구한다.
+
+        objective_scale은 archive 전체의 분포에서 나오는 값이라 한 iteration 안에서는
+        상수다. 행마다 다시 구하지 않고 한 번만 계산해 재사용한다.
+        """
+        arr = np.asarray(X_arr, dtype=float)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        if arr.shape[0] == 0:
+            return np.empty((0,), dtype=float)
+        if not pre_eq_policy.active:
+            return np.zeros((arr.shape[0],), dtype=float)
+        return pre_eq_policy.penalty_values(
+            arr,
+            objective_scale=_current_pre_eq_objective_scale(),
+        )
+
+    _pre_eq_soft_penalty.batch = _pre_eq_soft_penalty_batch
 
     pre_eq_soft_penalty_fn: Callable[[np.ndarray], float] | None = _pre_eq_soft_penalty if pre_eq_policy.active else None
 

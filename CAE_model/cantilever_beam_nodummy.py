@@ -3,10 +3,10 @@ import numpy as np
 
 def get_problem_spec():
     real_vars = [
-        {"name": "H", "default_lb": 3.0, "default_ub": 7.0, "default_baseline": 5},
-        {"name": "h1", "default_lb": 0.1, "default_ub": 1.0, "default_baseline": 0.5},
-        {"name": "b1", "default_lb": 2.0, "default_ub": 12.0, "default_baseline": 7.0},
-        {"name": "b2", "default_lb": 0.1, "default_ub": 2.0, "default_baseline": 1.05},
+        {"name": "H", "default_lb": 3.0, "default_ub": 7.0},
+        {"name": "h1", "default_lb": 0.1, "default_ub": 1.0},
+        {"name": "b1", "default_lb": 2.0, "default_ub": 12.0},
+        {"name": "b2", "default_lb": 0.1, "default_ub": 2.0},
     ]
 
     return {

@@ -27,12 +27,10 @@ def configure_variables_from_spec(
         name = var["name"]
         default_lb = var["default_lb"]
         default_ub = var["default_ub"]
-        default_baseline = var["default_baseline"]
 
         override = override_map.get(name, {})
         lb = override.get("lb", default_lb)
         ub = override.get("ub", default_ub)
-        baseline = override.get("baseline", default_baseline)
 
         if lb >= ub:
             print(f"[CAE] invalid bounds for {name}: lb={lb}, ub={ub}")
@@ -42,10 +40,8 @@ def configure_variables_from_spec(
             "name": name,
             "lb": lb,
             "ub": ub,
-            "baseline": baseline,
             "default_lb": default_lb,
             "default_ub": default_ub,
-            "default_baseline": default_baseline,
         })
 
     return variables

@@ -15,7 +15,6 @@ class DOEUserConfig:
 class DOESystemConfig:
     # 1) DOE 기본
     n_samples: int = 120
-    force_baseline_initial: bool = False
     initial_corner_ratio: float = 0.1
     initial_corner_adaptive_enabled: bool = True
     initial_corner_adaptive_np_ratio_max: float = 10.0

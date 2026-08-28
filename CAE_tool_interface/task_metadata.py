@@ -25,7 +25,6 @@ def _normalize_variables(variables: list[dict] | None) -> list[dict]:
                 "name": name,
                 "lb": float(item["lb"]),
                 "ub": float(item["ub"]),
-                "baseline": float(item.get("baseline", 0.0)),
             }
         )
     return out
@@ -33,7 +32,7 @@ def _normalize_variables(variables: list[dict] | None) -> list[dict]:
 
 def _build_variables_df(variables: list[dict]) -> pd.DataFrame:
     if not variables:
-        return pd.DataFrame(columns=["name", "lb", "ub", "baseline"])
+        return pd.DataFrame(columns=["name", "lb", "ub"])
     rows = []
     for v in variables:
         rows.append(
@@ -41,7 +40,6 @@ def _build_variables_df(variables: list[dict]) -> pd.DataFrame:
                 "name": v["name"],
                 "lb": float(v["lb"]),
                 "ub": float(v["ub"]),
-                "baseline": float(v.get("baseline", 0.0)),
             }
         )
     return pd.DataFrame(rows)

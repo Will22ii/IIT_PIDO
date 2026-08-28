@@ -9,7 +9,6 @@ def get_problem_spec():
                 "name": f"x{i+1}",
                 "default_lb": -2.048,
                 "default_ub": 2.048,
-                "default_baseline": 0.0,
             }
         )
 

@@ -41,8 +41,8 @@ class PlainDOEConstraintPolicyTests(unittest.TestCase):
                 },
                 evaluate_func=evaluate_func,
                 variables=[
-                    {"name": "x1", "lb": 0.0, "ub": 1.0, "baseline": 0.5},
-                    {"name": "x2", "lb": 0.0, "ub": 1.0, "baseline": 0.5},
+                    {"name": "x1", "lb": 0.0, "ub": 1.0},
+                    {"name": "x2", "lb": 0.0, "ub": 1.0},
                 ],
                 algo_name="test_sampler",
                 sampler=sampler,
@@ -99,7 +99,7 @@ class PlainDOEConstraintPolicyTests(unittest.TestCase):
                         "outputs": {"out1": 0.0},
                     },
                     variables=[
-                        {"name": "x1", "lb": 0.0, "ub": 1.0, "baseline": 0.5},
+                        {"name": "x1", "lb": 0.0, "ub": 1.0},
                     ],
                     algo_name="test_sampler",
                     sampler=sampler,
@@ -151,8 +151,8 @@ class PlainDOEConstraintPolicyTests(unittest.TestCase):
                     "outputs": {},
                 },
                 variables=[
-                    {"name": "x1", "lb": 0.0, "ub": 1.0, "baseline": 0.5},
-                    {"name": "x2", "lb": 0.0, "ub": 1.0, "baseline": 0.5},
+                    {"name": "x1", "lb": 0.0, "ub": 1.0},
+                    {"name": "x2", "lb": 0.0, "ub": 1.0},
                 ],
                 algo_name="test_sampler",
                 sampler=sampler,
@@ -219,7 +219,7 @@ class PlainDOEConstraintPolicyTests(unittest.TestCase):
                     "outputs": {},
                 },
                 variables=[
-                    {"name": "x1", "lb": 0.0, "ub": 1.0, "baseline": 0.5},
+                    {"name": "x1", "lb": 0.0, "ub": 1.0},
                 ],
                 algo_name="test_sampler",
                 sampler=sampler,

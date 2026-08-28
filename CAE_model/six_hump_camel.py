@@ -12,8 +12,8 @@ def get_problem_spec():
     n_dim = n_dummy + n_real
 
     real_vars = [
-        {"name": "x1", "default_lb": -3.0, "default_ub": 3.0, "default_baseline": 0.0},
-        {"name": "x2", "default_lb": -2.0, "default_ub": 2.0, "default_baseline": 0.0},
+        {"name": "x1", "default_lb": -3.0, "default_ub": 3.0},
+        {"name": "x2", "default_lb": -2.0, "default_ub": 2.0},
     ]
 
     dummy_vars = [
@@ -21,7 +21,6 @@ def get_problem_spec():
             "name": f"d{i+1}",
             "default_lb": 0.0,
             "default_ub": 1.0,
-            "default_baseline": 0.5,
         }
         for i in range(n_dummy)
     ]

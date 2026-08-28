@@ -334,7 +334,12 @@ def _safe_float(value: object, default: float = 0.0) -> float:
     return float(out)
 
 
-def _baseline_values_from_variables(variables: list[dict]) -> dict[str, float]:
+def _midpoint_values_from_variables(variables: list[dict]) -> dict[str, float]:
+    """탐색에 쓰이지 않는 변수 자리를 채울 초기값. 변수 범위의 중앙값.
+
+    이 값은 selected feature 자리는 후보 좌표로, omitted feature 자리는 freeze 정책 값으로
+    각각 덮인다. 어느 쪽으로도 덮이지 않는 자리는 남지 않아야 한다.
+    """
     out: dict[str, float] = {}
     for var in variables:
         if not isinstance(var, dict):
@@ -342,9 +347,7 @@ def _baseline_values_from_variables(variables: list[dict]) -> dict[str, float]:
         name = str(var.get("name", "")).strip()
         if not name:
             continue
-        if "baseline" in var:
-            base = _safe_float(var.get("baseline"), 0.0)
-        elif "lb" in var and "ub" in var:
+        if "lb" in var and "ub" in var:
             base = 0.5 * (_safe_float(var.get("lb"), 0.0) + _safe_float(var.get("ub"), 0.0))
         else:
             base = 0.0
@@ -366,12 +369,12 @@ def _normalize_omitted_feature_freeze_mode(raw: object) -> str:
         "value": "user_value",
         "manual": "user_value",
         "fixed": "user_value",
-        "none": "baseline",
-        "cae_baseline": "baseline",
     }
     value = aliases.get(value, value)
-    if value not in {"auto", "user_value", "baseline"}:
-        value = "auto"
+    if value not in {"auto", "user_value"}:
+        raise ValueError(
+            f"Unknown omitted_feature_freeze_mode: {raw!r}. Use 'auto' or 'user_value'."
+        )
     return value
 
 
@@ -415,11 +418,11 @@ def _select_auto_freeze_row(
         if isinstance(var, dict) and str(var.get("name", "")).strip()
     ]
     if not var_names or objective_col not in doe_df.columns:
-        return None, {"source": "baseline", "reason": "missing_objective_or_variables"}
+        return None, {"source": "none", "reason": "missing_objective_or_variables"}
     missing = [name for name in var_names if name not in doe_df.columns]
     if missing:
         return None, {
-            "source": "baseline",
+            "source": "none",
             "reason": "input_csv_missing_full_row_columns",
             "missing_columns": missing,
         }
@@ -430,7 +433,7 @@ def _select_auto_freeze_row(
         work[name] = pd.to_numeric(work[name], errors="coerce")
     work = work.dropna(subset=var_names + ["_freeze_objective"]).copy()
     if work.empty:
-        return None, {"source": "baseline", "reason": "no_finite_full_rows"}
+        return None, {"source": "none", "reason": "no_finite_full_rows"}
 
     feasible_flags: list[bool] = []
     margins: list[float] = []
@@ -489,10 +492,10 @@ def _resolve_omitted_feature_freeze_values(
     constraint_defs: list[dict],
     objective_col: str,
 ) -> tuple[dict[str, float], dict[str, float], dict[str, object]]:
-    baseline_values = _baseline_values_from_variables(variables)
+    midpoint_values = _midpoint_values_from_variables(variables)
     selected_set = {str(name) for name in selected_features}
-    omitted = [name for name in baseline_values if name not in selected_set]
-    base_values = dict(baseline_values)
+    omitted = [name for name in midpoint_values if name not in selected_set]
+    base_values = dict(midpoint_values)
 
     mode = _normalize_omitted_feature_freeze_mode(
         getattr(config.system, "omitted_feature_freeze_mode", "auto")
@@ -500,18 +503,13 @@ def _resolve_omitted_feature_freeze_values(
     policy: dict[str, object] = {
         "mode": mode,
         "omitted_features": list(omitted),
-        "source": "baseline",
+        "source": "none",
     }
     if not omitted:
         policy["source"] = "none"
         return base_values, {}, policy
 
     omitted_values: dict[str, float] = {}
-    if mode == "baseline":
-        omitted_values = {name: float(base_values[name]) for name in omitted}
-        policy["source"] = "baseline"
-        return base_values, omitted_values, policy
-
     if mode == "user_value":
         scalar = _safe_float(getattr(config.system, "omitted_feature_freeze_value", 0.0), 0.0)
         raw_values = getattr(config.system, "omitted_feature_freeze_values", {})
@@ -529,8 +527,11 @@ def _resolve_omitted_feature_freeze_values(
         )
         return base_values, omitted_values, policy
 
+    # auto: 입력 데이터에서 가장 좋은 행을 골라 omitted 변수를 그 좌표로 freeze한다.
+    # 채울 값을 못 구하면 조용히 다른 값으로 대체하지 않고 명시적으로 실패시킨다.
+    # 임의의 좌표에 변수를 묶은 채 최적화를 돌리면 결과의 근거를 추적할 수 없다.
     selected_row = None
-    row_policy: dict[str, object] = {"source": "baseline", "reason": "no_input_csv"}
+    row_policy: dict[str, object] = {"source": "none", "reason": "no_input_csv"}
     if isinstance(doe_df, pd.DataFrame) and not doe_df.empty:
         selected_row, row_policy = _select_auto_freeze_row(
             doe_df=doe_df,
@@ -538,18 +539,30 @@ def _resolve_omitted_feature_freeze_values(
             constraint_defs=constraint_defs,
             objective_col=objective_col,
         )
-    if selected_row is not None:
-        for name in omitted:
-            if name in selected_row and np.isfinite(_safe_float(selected_row[name], float("nan"))):
-                value = _safe_float(selected_row[name], base_values[name])
-                base_values[name] = float(value)
-                omitted_values[name] = float(value)
-            else:
-                omitted_values[name] = float(base_values[name])
-        policy.update(row_policy)
-    else:
-        omitted_values = {name: float(base_values[name]) for name in omitted}
-        policy.update(row_policy)
+    if selected_row is None:
+        raise RuntimeError(
+            "omitted_feature_freeze_mode='auto' could not resolve freeze values "
+            f"(reason={row_policy.get('reason')}). "
+            "Provide DOE input rows covering every CAE variable, "
+            "or switch to omitted_feature_freeze_mode='user_value'."
+        )
+
+    unresolved: list[str] = []
+    for name in omitted:
+        if name in selected_row and np.isfinite(_safe_float(selected_row[name], float("nan"))):
+            value = _safe_float(selected_row[name], float("nan"))
+            base_values[name] = float(value)
+            omitted_values[name] = float(value)
+        else:
+            unresolved.append(name)
+    if unresolved:
+        raise RuntimeError(
+            "omitted_feature_freeze_mode='auto' found no finite value for: "
+            + ", ".join(unresolved)
+            + ". Provide DOE input rows covering these variables, "
+            "or switch to omitted_feature_freeze_mode='user_value'."
+        )
+    policy.update(row_policy)
     return base_values, omitted_values, policy
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import ast
 import math
+from types import CodeType
 from typing import Any, Iterable
 
 import numpy as np
@@ -99,7 +99,8 @@ def validate_constraint_defs(constraint_defs: list | None) -> list[dict]:
         if not expr:
             raise ValueError(f"constraint_defs[{idx}] missing 'expr'.")
         try:
-            ast.parse(expr, mode="eval")
+            # 문법 검증과 code object 캐싱을 겸한다. 이후 평가는 캐시를 재사용한다.
+            compile_expr(expr)
         except Exception as exc:
             raise ValueError(f"constraint_defs[{idx}] invalid expr syntax: {expr}") from exc
 
@@ -143,6 +144,25 @@ def validate_constraint_defs(constraint_defs: list | None) -> list[dict]:
     return normalized
 
 
+# 벤치마크 단계: 제한된 수학 함수만 허용
+_MATH_ENV: dict[str, Any] = {
+    "abs": abs,
+    "min": min,
+    "max": max,
+    "pow": pow,
+    "sqrt": math.sqrt,
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "exp": math.exp,
+    "log": math.log,
+    "pi": math.pi,
+    "e": math.e,
+}
+
+_EMPTY_BUILTINS: dict[str, Any] = {"__builtins__": {}}
+
+
 def _build_eval_env(
     x: np.ndarray,
     var_names: Iterable[str],
@@ -150,30 +170,31 @@ def _build_eval_env(
     env_extra: dict[str, Any] | None = None,
 ) -> dict:
     env = {name: float(v) for name, v in zip(var_names, x)}
-    env.update(
-        {
-            # 벤치마크 단계: 제한된 수학 함수만 허용
-            "abs": abs,
-            "min": min,
-            "max": max,
-            "pow": pow,
-            "sqrt": math.sqrt,
-            "sin": math.sin,
-            "cos": math.cos,
-            "tan": math.tan,
-            "exp": math.exp,
-            "log": math.log,
-            "pi": math.pi,
-            "e": math.e,
-        }
-    )
+    # 수학 함수가 동명의 변수를 덮는 기존 우선순위를 유지한다.
+    env.update(_MATH_ENV)
     if env_extra:
         env.update(env_extra)
     return env
 
 
+# expr 문자열 -> code object 캐시.
+# eval에 문자열을 넘기면 호출마다 파싱+컴파일이 반복된다. 제약 필터는 후보 점 수 x
+# 제약 수만큼 호출되는 최심부 루프라 이 비용이 실제 계산보다 크다. code object는
+# 같은 바이트코드를 같은 env에서 실행하므로 결과는 비트 단위로 동일하다.
+_EXPR_CODE_CACHE: dict[str, CodeType] = {}
+
+
+def compile_expr(expr: str) -> CodeType:
+    """expr을 code object로 컴파일한다. 같은 문자열은 1회만 컴파일된다."""
+    code = _EXPR_CODE_CACHE.get(expr)
+    if code is None:
+        code = compile(expr, "<constraint_expr>", "eval")
+        _EXPR_CODE_CACHE[expr] = code
+    return code
+
+
 def _eval_expr(expr: str, env: dict) -> float:
-    value = eval(expr, {"__builtins__": {}}, env)  # noqa: S307
+    value = eval(compile_expr(expr), _EMPTY_BUILTINS, env)  # noqa: S307
     return float(value)
 
 

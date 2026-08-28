@@ -98,11 +98,10 @@ class OptimizerSystemConfig:
     focus_budget_focus1_fraction_normal: float = 0.30
     # optimizer 후보를 평가할 때 selected_features에 없는 CAE 변수를 채우는 정책.
     # - auto: optimizer 입력/archive CSV의 best feasible full row에서 omitted 변수를 freeze한다.
-    #   feasible row가 없으면 pre-constraint margin이 가장 좋은 row를 쓰고,
-    #   그것도 없으면 CAE baseline으로 fallback한다.
+    #   feasible row가 없으면 pre-constraint margin이 가장 좋은 row를 쓴다.
+    #   채울 값을 구하지 못하면 조용히 대체하지 않고 명시적으로 실패시킨다.
     # - user_value: 모든 omitted 변수를 omitted_feature_freeze_value로 freeze한다.
     #   필요하면 omitted_feature_freeze_values로 feature별 override를 적용한다.
-    # - baseline: CAE metadata baseline을 그대로 유지한다.
     omitted_feature_freeze_mode: str = "auto"
     omitted_feature_freeze_value: float = 0.0
     omitted_feature_freeze_values: dict[str, float] = field(default_factory=dict)

@@ -180,7 +180,6 @@ class AdditionalDOEOrchestrator:
         post_clf_min_pos: int = 5,
         post_clf_min_neg: int = 5,
         hpo_runner: Optional[Any] = None,
-        force_baseline: bool = False,
         local_gp_seed: int = 42,
         local_gp_use_white_kernel: bool = False,
         additional_gp_x_scaling_enabled: bool = True,
@@ -443,7 +442,6 @@ class AdditionalDOEOrchestrator:
         self._post_eval_total = 0
         self._post_model = None
         self.post_policy_log: list[dict] = []
-        self.force_baseline = bool(force_baseline)
         self.local_gp_seed = int(local_gp_seed)
         self.local_gp_use_white_kernel = bool(local_gp_use_white_kernel)
         self.additional_gp_x_scaling_enabled = bool(additional_gp_x_scaling_enabled)
@@ -1383,7 +1381,6 @@ class AdditionalDOEOrchestrator:
     def run(
         self,
         *,
-        baseline: np.ndarray,
         problem_name: str,  # reserved for logs / future HPO keys
         base_seed: int,     # reserved for deterministic pipelines
         objective_sense: str,
@@ -1396,8 +1393,7 @@ class AdditionalDOEOrchestrator:
         # Phase 0: Initial DOE (user-selected sampler)
         # --------------------------------------------
         n_init = max(int(self.total_budget * self.init_ratio), 1)
-        n_baseline_reserved = 1 if (self.force_baseline and n_init > 0) else 0
-        n_init_regular = n_init - n_baseline_reserved
+        n_init_regular = n_init
         n_corner_target = int(round(float(n_init_regular) * self.initial_corner_ratio))
         n_corner_target = min(max(n_corner_target, 0), max(n_init_regular, 0))
 
@@ -1587,22 +1583,6 @@ class AdditionalDOEOrchestrator:
         X_init_parts: list[np.ndarray] = []
         init_constraints: list[dict] = []
         init_margin_list: list[float] = []
-
-        if n_baseline_reserved > 0:
-            baseline_x = np.asarray(baseline, dtype=float).reshape(1, -1)
-            if self.has_pre_constraints:
-                baseline_constraints, _, baseline_margin = evaluate_constraints_point(
-                    x=np.asarray(baseline, dtype=float),
-                    var_names=self.var_names,
-                    constraint_defs=self.constraint_defs,
-                    scope="pre",
-                )
-            else:
-                baseline_constraints = {}
-                baseline_margin = float("inf")
-            X_init_parts.append(baseline_x)
-            init_constraints.append(baseline_constraints)
-            init_margin_list.append(float(baseline_margin))
 
         if X_corner.shape[0] > 0:
             X_init_parts.append(np.asarray(X_corner, dtype=float))
@@ -2812,17 +2792,21 @@ class AdditionalDOEOrchestrator:
                         continue
                     already = 0
                     if anchor_keep[i]:
+                        # 좌표와 제약 판정은 같은 순번으로 짝지어 반환된다. 판정을 조건부로
+                        # 넣으면 두 목록의 길이가 어긋나 이후 점들의 판정이 한 칸씩 밀리고,
+                        # pre 위반 점이 통과 점의 판정을 달고 저장된다. 판정은 항상 넣는다.
                         picks.append(anchors[i].reshape(1, -1))
-                        c_anchor, f_anchor, m_anchor = evaluate_constraints_point(
+                        c_anchor, _f_anchor, m_anchor = evaluate_constraints_point(
                             x=anchors[i],
                             var_names=self.var_names,
                             constraint_defs=self.constraint_defs,
                             scope="pre",
                         )
-                        if not self.has_pre_constraints or f_anchor:
-                            picks_constraints.append(c_anchor if self.has_pre_constraints else {})
-                            picks_margins.append(float(m_anchor if self.has_pre_constraints else float("inf")))
-                            already = 1
+                        picks_constraints.append(c_anchor if self.has_pre_constraints else {})
+                        picks_margins.append(float(m_anchor if self.has_pre_constraints else float("inf")))
+                        # anchor가 자기 quota 한 자리를 차지한다. 세지 않으면 그 group에서
+                        # required + 1개가 만들어져 뒤쪽 점이 잘려나간다.
+                        already = 1
                     need = required - already
                     if need <= 0:
                         continue

@@ -132,7 +132,7 @@ class SelectedFeatureMapper:
         base_values: dict[str, float] | None = None,
     ) -> "SelectedFeatureMapper":
         var_names: list[str] = []
-        baselines: list[float] = []
+        base_points: list[float] = []
         base_override = dict(base_values or {})
         for var in variables:
             if not isinstance(var, dict):
@@ -140,9 +140,7 @@ class SelectedFeatureMapper:
             name = str(var.get("name", "")).strip()
             if not name:
                 continue
-            if "baseline" in var:
-                base = float(var["baseline"])
-            elif "lb" in var and "ub" in var:
+            if "lb" in var and "ub" in var:
                 base = 0.5 * (float(var["lb"]) + float(var["ub"]))
             else:
                 base = 0.0
@@ -154,7 +152,7 @@ class SelectedFeatureMapper:
             if not np.isfinite(base):
                 base = 0.0
             var_names.append(name)
-            baselines.append(float(base))
+            base_points.append(float(base))
 
         if not var_names:
             raise RuntimeError("CAE variable list is empty for Optimizer evaluation.")
@@ -168,7 +166,7 @@ class SelectedFeatureMapper:
             )
         return cls(
             var_names=var_names,
-            x_base=np.asarray(baselines, dtype=float),
+            x_base=np.asarray(base_points, dtype=float),
             selected_features=selected,
             selected_idx=np.asarray([name_to_idx[name] for name in selected], dtype=int),
         )
