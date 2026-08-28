@@ -223,6 +223,7 @@ def run_modeler(
             bootstrap_objective_sense=objective_sense,
             bootstrap_elite_ratio_base=float(config.system.fi_elite_ratio_base),
             bootstrap_elite_min_samples=int(config.system.fi_elite_min_samples),
+            bootstrap_n_jobs=int(config.system.fi_bootstrap_n_jobs),
         )
         selected_df = fi_result.selected_df
         processed_df = fi_result.processed_df

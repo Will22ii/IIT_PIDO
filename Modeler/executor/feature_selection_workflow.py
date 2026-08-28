@@ -77,6 +77,7 @@ def run_fi_selection_workflow(
     bootstrap_objective_sense: str = "minimize",
     bootstrap_elite_ratio_base: float = 0.30,
     bootstrap_elite_min_samples: int = 30,
+    bootstrap_n_jobs: int = 1,
 ) -> FIWorkflowResult:
     analyzer = ImportanceAnalyzer(
         perm_sample_size=perm_sample_size,
@@ -85,7 +86,8 @@ def run_fi_selection_workflow(
     elite_mode = _normalize_elite_mode(fs_config.elite_mode)
     use_elite_scale = elite_mode != "off"
 
-    importance_global = analyzer.run_perm_effect(
+    # perm과 drop은 동일한 permutation 예측을 쓰므로 scale마다 한 번의 pass로 함께 뽑는다.
+    importance_global = analyzer.run_importance_channels(
         models=models,
         fold_predictions=fold_predictions,
         X_ref=X_ref,
@@ -93,9 +95,12 @@ def run_fi_selection_workflow(
         random_seed=base_seed,
         subset_mask=None,
         scale_label="global",
+        y_true=y_true,
+        compute_perm=True,
+        compute_drop=bool(use_score_drop),
     )
     if use_elite_scale:
-        importance_elite = analyzer.run_perm_effect(
+        importance_elite = analyzer.run_importance_channels(
             models=models,
             fold_predictions=fold_predictions,
             X_ref=X_ref,
@@ -103,6 +108,9 @@ def run_fi_selection_workflow(
             random_seed=base_seed,
             subset_mask=elite_mask,
             scale_label="elite",
+            y_true=y_true,
+            compute_perm=True,
+            compute_drop=bool(use_score_drop),
         )
         perm_imp_df = pd.concat(
             [
@@ -112,43 +120,23 @@ def run_fi_selection_workflow(
             ignore_index=True,
         )
     else:
-        importance_elite = {"perm_effect_raw": pd.DataFrame()}
+        importance_elite = {"perm_effect_raw": pd.DataFrame(), "score_drop_raw": pd.DataFrame()}
         perm_imp_df = importance_global.get("perm_effect_raw", pd.DataFrame()).copy()
         if keep_debug:
             print("[Modeler][FI-ELITE] elite_mode=off -> skip elite permutation importance")
 
     drop_imp_df = pd.DataFrame()
     if bool(use_score_drop):
-        drop_global = analyzer.run_score_drop(
-            models=models,
-            fold_predictions=fold_predictions,
-            X_ref=X_ref,
-            y_true=y_true,
-            problem_name=problem_name,
-            random_seed=base_seed,
-            subset_mask=None,
-            scale_label="global",
-        )
         if use_elite_scale:
-            drop_elite = analyzer.run_score_drop(
-                models=models,
-                fold_predictions=fold_predictions,
-                X_ref=X_ref,
-                y_true=y_true,
-                problem_name=problem_name,
-                random_seed=base_seed,
-                subset_mask=elite_mask,
-                scale_label="elite",
-            )
             drop_imp_df = pd.concat(
                 [
-                    drop_global.get("score_drop_raw", pd.DataFrame()),
-                    drop_elite.get("score_drop_raw", pd.DataFrame()),
+                    importance_global.get("score_drop_raw", pd.DataFrame()),
+                    importance_elite.get("score_drop_raw", pd.DataFrame()),
                 ],
                 ignore_index=True,
             )
         else:
-            drop_imp_df = drop_global.get("score_drop_raw", pd.DataFrame()).copy()
+            drop_imp_df = importance_global.get("score_drop_raw", pd.DataFrame()).copy()
             if keep_debug:
                 print("[Modeler][FI-ELITE] elite_mode=off -> skip elite score-drop importance")
 
@@ -264,6 +252,7 @@ def run_fi_selection_workflow(
             rescue_global_floor=float(fs_config.fi_bootstrap_rescue_global_floor),
             rescue_very_low_data_only=bool(fs_config.fi_bootstrap_rescue_very_low_data_only),
             very_low_data_n_threshold=int(fs_config.stability_very_low_data_n_threshold),
+            n_jobs=int(bootstrap_n_jobs),
         )
         selected_df["bootstrap_enabled_effective"] = True
         selected_df["bootstrap_min_freq_effective"] = float(bootstrap_min_freq_eff)

@@ -17,7 +17,7 @@ class ImportanceAnalyzer:
     # Public API
     # =================================================
 
-    def run_perm_effect(
+    def run_importance_channels(
         self,
         *,
         models: List,
@@ -27,62 +27,27 @@ class ImportanceAnalyzer:
         random_seed: int | None = None,
         subset_mask: np.ndarray | None = None,
         scale_label: str = "global",
+        y_true: np.ndarray | None = None,
+        compute_perm: bool = True,
+        compute_drop: bool = False,
     ) -> Dict[str, pd.DataFrame]:
-        rows = []
-        for run_id, rng, model, _valid_idx, _valid_use, _X_num, _X_valid, base_arr, columns, _fold_item, _mask in self._iter_fold_setup(
-            models=models,
-            fold_predictions=fold_predictions,
-            X_ref=X_ref,
-            random_seed=random_seed,
-            subset_mask=subset_mask,
-            apply_perm_sample_size=True,
-        ):
-            pred_base = np.asarray(model.predict(base_arr), dtype=float).reshape(-1)
-            for idx, col in enumerate(columns):
-                if self.perm_repeats <= 1:
-                    X_perm = base_arr.copy()
-                    X_perm[:, idx] = rng.permutation(X_perm[:, idx])
-                    pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
-                    delta = float(np.mean((pred_base - pred_perm) ** 2))
-                else:
-                    deltas_k = []
-                    for _ in range(self.perm_repeats):
-                        X_perm = base_arr.copy()
-                        X_perm[:, idx] = rng.permutation(X_perm[:, idx])
-                        pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
-                        deltas_k.append(float(np.mean((pred_base - pred_perm) ** 2)))
-                    delta = float(np.mean(deltas_k))
-                rows.append(
-                    {
-                        "problem": problem_name,
-                        "scale": str(scale_label),
-                        "method": "PERM",
-                        "fold": run_id,
-                        "feature": col,
-                        "delta": delta,
-                    }
-                )
+        """perm effect와 R2 drop을 한 번의 permutation pass로 산출한다.
 
-        return {
-            "perm_effect_raw": pd.DataFrame(
-                rows,
-                columns=["problem", "scale", "method", "fold", "feature", "delta"],
-            ),
-        }
+        두 채널은 같은 seed에서 같은 순서로 rng를 소비하므로 생성되는 permutation과
+        그 예측값이 비트 단위로 동일하다. 따라서 예측을 공유해도 결과가 바뀌지 않는다.
 
-    def run_score_drop(
-        self,
-        *,
-        models: List,
-        fold_predictions: List[dict],
-        X_ref: pd.DataFrame,
-        y_true: np.ndarray,
-        problem_name: str,
-        random_seed: int | None = None,
-        subset_mask: np.ndarray | None = None,
-        scale_label: str = "global",
-    ) -> Dict[str, pd.DataFrame]:
-        rows = []
+        두 채널의 비대칭은 그대로 보존한다.
+        - fold 탈락 조건(y_valid < 2개, r2_base 계산 실패)은 drop 채널에만 적용된다.
+          perm 행은 해당 fold에서도 그대로 생성되어야 한다.
+        - repeat 중 일부의 r2 계산이 실패하면 drop은 성공한 repeat만으로 평균을 내지만
+          perm의 delta는 항상 전체 repeat 평균이다.
+        - base 예측이 서로 다른 양이다. perm은 서브샘플에 대한 재예측을 쓰고,
+          drop은 fold 캐시 예측을 mask로 정렬해 쓰되 크기가 맞지 않을 때만 재예측한다.
+        """
+        perm_rows = []
+        drop_rows = []
+        want_drop = bool(compute_drop and y_true is not None)
+
         for run_id, rng, model, valid_idx, valid_use, X_num, X_valid, base_arr, columns, fold_item, mask in self._iter_fold_setup(
             models=models,
             fold_predictions=fold_predictions,
@@ -91,70 +56,92 @@ class ImportanceAnalyzer:
             subset_mask=subset_mask,
             apply_perm_sample_size=True,
         ):
-            y_valid = np.asarray(y_true, dtype=float)[valid_use]
-            if y_valid.size < 2:
-                continue
+            pred_base = (
+                np.asarray(model.predict(base_arr), dtype=float).reshape(-1)
+                if compute_perm
+                else None
+            )
 
-            base_pred = np.asarray(fold_item.get("y_pred", []), dtype=float).reshape(-1)
-            if base_pred.size != valid_idx.size:
-                base_pred = np.asarray(
-                    model.predict(X_num.iloc[valid_idx].to_numpy()), dtype=float
-                ).reshape(-1)
-            if mask is not None:
-                base_pred = base_pred[mask[valid_idx]]
-            if base_pred.size != y_valid.size:
-                base_pred = np.asarray(model.predict(X_valid.to_numpy()), dtype=float).reshape(-1)
-            try:
-                r2_base = float(r2_score(y_valid, base_pred))
-            except Exception:
-                continue
+            # drop 채널 fold 준비. 여기서 탈락해도 perm 행 생성은 계속한다.
+            drop_ok = False
+            y_valid = None
+            r2_base = None
+            if want_drop:
+                y_valid = np.asarray(y_true, dtype=float)[valid_use]
+                if y_valid.size >= 2:
+                    base_pred = np.asarray(fold_item.get("y_pred", []), dtype=float).reshape(-1)
+                    if base_pred.size != valid_idx.size:
+                        base_pred = np.asarray(
+                            model.predict(X_num.iloc[valid_idx].to_numpy()), dtype=float
+                        ).reshape(-1)
+                    if mask is not None:
+                        base_pred = base_pred[mask[valid_idx]]
+                    if base_pred.size != y_valid.size:
+                        base_pred = np.asarray(
+                            model.predict(X_valid.to_numpy()), dtype=float
+                        ).reshape(-1)
+                    try:
+                        r2_base = float(r2_score(y_valid, base_pred))
+                        drop_ok = True
+                    except Exception:
+                        drop_ok = False
 
             for idx, col in enumerate(columns):
-                if self.perm_repeats <= 1:
+                deltas_k = []
+                drops_k = []
+                r2_perms_k = []
+                for _ in range(self.perm_repeats):
                     X_perm = base_arr.copy()
                     X_perm[:, idx] = rng.permutation(X_perm[:, idx])
                     pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
-                    try:
-                        r2_perm = float(r2_score(y_valid, pred_perm))
-                    except Exception:
-                        continue
-                    drop = float(r2_base - r2_perm)
-                else:
-                    drops_k = []
-                    r2_perms_k = []
-                    for _ in range(self.perm_repeats):
-                        X_perm = base_arr.copy()
-                        X_perm[:, idx] = rng.permutation(X_perm[:, idx])
-                        pred_perm = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
+                    if compute_perm:
+                        deltas_k.append(float(np.mean((pred_base - pred_perm) ** 2)))
+                    if drop_ok:
                         try:
                             r2_k = float(r2_score(y_valid, pred_perm))
                         except Exception:
                             continue
                         drops_k.append(float(r2_base - r2_k))
                         r2_perms_k.append(r2_k)
-                    if not drops_k:
-                        continue
+
+                if compute_perm:
+                    perm_rows.append(
+                        {
+                            "problem": problem_name,
+                            "scale": str(scale_label),
+                            "method": "PERM",
+                            "fold": run_id,
+                            "feature": col,
+                            "delta": float(np.mean(deltas_k)),
+                        }
+                    )
+
+                if drop_ok and drops_k:
                     drop = float(np.mean(drops_k))
                     r2_perm = float(np.mean(r2_perms_k))
-                drop_pos = float(max(drop, 0.0))
-                rows.append(
-                    {
-                        "problem": problem_name,
-                        "scale": str(scale_label),
-                        "method": "R2_DROP",
-                        "fold": run_id,
-                        "feature": col,
-                        "r2_base": r2_base,
-                        "r2_perm": r2_perm,
-                        "drop": drop,
-                        "drop_pos": drop_pos,
-                        "drop_sq": float(drop_pos ** 2),
-                    }
-                )
+                    drop_pos = float(max(drop, 0.0))
+                    drop_rows.append(
+                        {
+                            "problem": problem_name,
+                            "scale": str(scale_label),
+                            "method": "R2_DROP",
+                            "fold": run_id,
+                            "feature": col,
+                            "r2_base": r2_base,
+                            "r2_perm": r2_perm,
+                            "drop": drop,
+                            "drop_pos": drop_pos,
+                            "drop_sq": float(drop_pos ** 2),
+                        }
+                    )
 
         return {
+            "perm_effect_raw": pd.DataFrame(
+                perm_rows,
+                columns=["problem", "scale", "method", "fold", "feature", "delta"],
+            ),
             "score_drop_raw": pd.DataFrame(
-                rows,
+                drop_rows,
                 columns=[
                     "problem",
                     "scale",
@@ -169,6 +156,56 @@ class ImportanceAnalyzer:
                 ],
             ),
         }
+
+    def run_perm_effect(
+        self,
+        *,
+        models: List,
+        fold_predictions: List[dict],
+        X_ref: pd.DataFrame,
+        problem_name: str,
+        random_seed: int | None = None,
+        subset_mask: np.ndarray | None = None,
+        scale_label: str = "global",
+    ) -> Dict[str, pd.DataFrame]:
+        out = self.run_importance_channels(
+            models=models,
+            fold_predictions=fold_predictions,
+            X_ref=X_ref,
+            problem_name=problem_name,
+            random_seed=random_seed,
+            subset_mask=subset_mask,
+            scale_label=scale_label,
+            compute_perm=True,
+            compute_drop=False,
+        )
+        return {"perm_effect_raw": out["perm_effect_raw"]}
+
+    def run_score_drop(
+        self,
+        *,
+        models: List,
+        fold_predictions: List[dict],
+        X_ref: pd.DataFrame,
+        y_true: np.ndarray,
+        problem_name: str,
+        random_seed: int | None = None,
+        subset_mask: np.ndarray | None = None,
+        scale_label: str = "global",
+    ) -> Dict[str, pd.DataFrame]:
+        out = self.run_importance_channels(
+            models=models,
+            fold_predictions=fold_predictions,
+            X_ref=X_ref,
+            problem_name=problem_name,
+            random_seed=random_seed,
+            subset_mask=subset_mask,
+            scale_label=scale_label,
+            y_true=y_true,
+            compute_perm=False,
+            compute_drop=True,
+        )
+        return {"score_drop_raw": out["score_drop_raw"]}
 
     # =================================================
     # Internal helpers

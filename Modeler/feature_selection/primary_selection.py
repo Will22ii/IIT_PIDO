@@ -97,6 +97,8 @@ class FeatureSelectionConfig:
     # bootstrap rescue (very_low_data)
     fi_bootstrap_rescue_global_floor: float = 0.83
     fi_bootstrap_rescue_very_low_data_only: bool = True
+    # bootstrap 성공 라운드가 이 비율 미만이면 freq를 측정 실패로 보고 필터를 무효화
+    fi_bootstrap_min_success_ratio: float = 0.5
     # quantile policy
     quantile_top_ratio_default: float = 0.30
     quantile_top_ratio_p_le_6: float = 0.50

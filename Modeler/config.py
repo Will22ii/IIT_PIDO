@@ -174,6 +174,17 @@ class ModelerSystemConfig:
     # very_low_data 구제: bootstrap_freq < min_freq여도 global_score가 이 값 이상이면 유지
     fi_bootstrap_rescue_global_floor: float = 0.83
     fi_bootstrap_rescue_very_low_data_only: bool = True  # very_low_data에서만 구제 적용
+    # 라운드 병렬 실행 워커 수. 1이면 순차, -1이면 코어 수의 70%.
+    # 주의: 병렬(>1)일 때만 bootstrap이 model_params에 n_jobs=1을 주입한다.
+    # 과거에 이 주입이 n_jobs를 받지 않는 GP 생성자와 충돌해 전 라운드가 조용히
+    # 죽고 bootstrap_freq=0 → real feature 전멸 → topk_half 폴백이 dummy를
+    # 선택하는 사고가 났다(20260723 배치, CB FS 100→0). 현재는 두 안전장치가 있다:
+    #   1) 모델 생성자 시그니처가 n_jobs를 받을 때만 주입
+    #   2) 성공 라운드가 fi_bootstrap_min_success_ratio 미만이면 freq 필터 무효화
+    fi_bootstrap_n_jobs: int = -1
+    # bootstrap 성공 라운드 비율이 이 값 미만이면 freq를 "측정 실패"로 보고
+    # 필터를 건너뛴다(freq=NaN). 실패를 선택빈도 0으로 오독하는 것을 막는다.
+    fi_bootstrap_min_success_ratio: float = 0.5
 
     # -----------------------------
     # 7) FI null(soft) gate
@@ -326,6 +337,7 @@ def build_feature_selection_config(system: "ModelerSystemConfig") -> "FeatureSel
         bootstrap_min_freq_very_low_data=system.fi_bootstrap_min_freq_very_low_data,
         fi_bootstrap_rescue_global_floor=system.fi_bootstrap_rescue_global_floor,
         fi_bootstrap_rescue_very_low_data_only=system.fi_bootstrap_rescue_very_low_data_only,
+        fi_bootstrap_min_success_ratio=system.fi_bootstrap_min_success_ratio,
         quantile_top_ratio_default=system.fi_quantile_top_ratio_default,
         quantile_top_ratio_p_le_6=system.fi_quantile_top_ratio_p_le_6,
         quantile_top_ratio_p_le_12=system.fi_quantile_top_ratio_p_le_12,
