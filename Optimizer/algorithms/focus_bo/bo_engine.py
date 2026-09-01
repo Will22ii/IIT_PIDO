@@ -1471,6 +1471,117 @@ def _apply_focus3_goal_free_plateau_policy(
     return p_topk, p_boundary, p_random, p_best_local, info
 
 
+def _focus3_polish_candidate(
+    *,
+    base_x: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    step_ratio: float,
+    dir_index: int,
+    p_dim: int,
+) -> np.ndarray:
+    """compass search의 다음 후보 1개. 좌표축 ±방향을 순서대로 돈다."""
+    span = np.maximum(np.asarray(ub, dtype=float) - np.asarray(lb, dtype=float), 1e-12)
+    n_dir = int(max(2 * int(p_dim), 2))
+    idx = int(dir_index) % n_dir
+    dim = int(idx // 2)
+    sign = 1.0 if (idx % 2) == 0 else -1.0
+    cand = np.asarray(base_x, dtype=float).reshape(-1).copy()
+    cand[dim] = float(np.clip(
+        cand[dim] + sign * float(step_ratio) * float(span[dim]),
+        float(lb[dim]),
+        float(ub[dim]),
+    ))
+    return cand
+
+
+def _resolve_focus3_polish_budget(
+    *,
+    system: OptimizerSystemConfig,
+    focus3_budget: int,
+    p_dim: int,
+) -> int:
+    """마무리 수렴에 쓸 evaluation 수. 0이면 발동하지 않는다."""
+    if not bool(getattr(system, "focus3_final_polish_enabled", True)):
+        return 0
+    budget = int(max(int(focus3_budget), 0))
+    if budget <= 0:
+        return 0
+    ratio = float(np.clip(float(getattr(system, "focus3_final_polish_budget_ratio", 0.10)), 0.0, 0.5))
+    cap = int(max(int(getattr(system, "focus3_final_polish_max_evals", 200)), 0))
+    n = int(min(int(round(ratio * budget)), cap))
+    # compass는 1 sweep에 2*p회를 쓴다. 최소 2 sweep을 못 돌리면 의미가 없다.
+    floor = int(max(int(getattr(system, "focus3_final_polish_min_evals", 20)), 4 * int(max(p_dim, 1))))
+    if n < floor:
+        return 0
+    return int(min(n, budget))
+
+
+def _resolve_focus3_restart_policy(
+    *,
+    system: OptimizerSystemConfig,
+    p_dim: int,
+    focus3_available_budget: int,
+    recover_info: dict[str, object] | None,
+    archive_size: int,
+) -> dict[str, object]:
+    """깊은 정체 시 best_local 앵커를 먼 영역으로 돌릴지 판단한다.
+
+    상태를 보존하지 않는다. no_improve_count가 0으로 리셋되면 자동으로
+    해제되므로, 개선이 한 번 나오는 순간 평소 동작으로 돌아온다.
+    known optimum이나 benchmark 이름은 참조하지 않는다(아카이브만 사용).
+    """
+    info: dict[str, object] = {
+        "enabled": False,
+        "active": False,
+        "reason": "",
+        "radius": 0.0,
+        "no_improve": 0,
+        "threshold": 0,
+    }
+    if not _focus3_is_aion_profile(system):
+        info["reason"] = "not_aion"
+        return info
+    if not bool(getattr(system, "focus3_aion_high_dim_restart_enabled", False)):
+        info["reason"] = "disabled"
+        return info
+    info["enabled"] = True
+    if not _focus3_use_aion_high_dim_policy(
+        system=system,
+        p_dim=int(p_dim),
+        focus3_available_budget=int(focus3_available_budget),
+    ):
+        info["reason"] = "not_high_dim"
+        return info
+    min_archive = int(max(int(getattr(system, "focus3_aion_high_dim_restart_min_archive", 32)), 1))
+    if int(archive_size) < min_archive:
+        info["reason"] = "archive_too_small"
+        return info
+    no_improve = 0
+    if isinstance(recover_info, dict):
+        try:
+            no_improve = int(max(int(float(recover_info.get("no_improve_count", 0) or 0)), 0))
+        except Exception:
+            no_improve = 0
+    threshold = int(max(int(getattr(system, "focus3_aion_high_dim_restart_min_no_improve", 400)), 1))
+    info["no_improve"] = int(no_improve)
+    info["threshold"] = int(threshold)
+    if no_improve < threshold:
+        info["reason"] = "not_stalled"
+        return info
+    radius = float(np.clip(
+        float(getattr(system, "focus3_aion_high_dim_restart_min_distance", 0.25)),
+        1e-6,
+        1.0,
+    ))
+    info.update({
+        "active": True,
+        "reason": "deep_stall_restart",
+        "radius": float(radius),
+    })
+    return info
+
+
 def _resolve_focus3_best_local_sigma(
     *,
     system: OptimizerSystemConfig,
@@ -1492,6 +1603,9 @@ def _resolve_focus3_best_local_sigma(
         enabled = bool(getattr(system, "focus3_aion_best_local_sigma_schedule_enabled", enabled))
     sigma = float(base)
     reason = "base"
+    mid_eval = -1
+    late_eval = -1
+    sigma_budget_scaled = False
     if enabled:
         mid_eval = int(max(int(getattr(system, "focus3_best_local_sigma_mid_eval", 80)), 0))
         late_eval = int(max(int(getattr(system, "focus3_best_local_sigma_late_eval", 250)), mid_eval))
@@ -1508,6 +1622,31 @@ def _resolve_focus3_best_local_sigma(
                     "focus3_aion_high_dim_best_local_sigma_late",
                     late_sigma,
                 )), 1e-9))
+                # mid/late 전환 시점이 절대 eval 수로 고정되어 있어, 예산이 커질수록
+                # 최소 보폭 구간이 예산 대부분을 차지한다(budget=1050, late_eval=140
+                # -> 예산의 87%가 최소 보폭). 전환 시점을 예산 비율로도 계산해
+                # 둘 중 늦은 쪽을 쓴다. max()이므로 짧은 예산에서는 기존 절대값이
+                # 그대로 이겨서 동작이 변하지 않는다. high_dim_policy 안에서만
+                # 적용되므로 p_dim<5 또는 budget<200인 문제는 영향을 받지 않는다.
+                if bool(getattr(system, "focus3_aion_high_dim_sigma_budget_scaled_enabled", True)):
+                    _budget = int(max(int(focus3_available_budget), 0))
+                    if _budget > 0:
+                        _mid_ratio = float(np.clip(float(getattr(
+                            system,
+                            "focus3_aion_high_dim_best_local_sigma_mid_budget_ratio",
+                            0.30,
+                        )), 0.0, 1.0))
+                        _late_ratio = float(np.clip(float(getattr(
+                            system,
+                            "focus3_aion_high_dim_best_local_sigma_late_budget_ratio",
+                            0.60,
+                        )), 0.0, 1.0))
+                        _mid_scaled = int(round(_mid_ratio * _budget))
+                        _late_scaled = int(round(_late_ratio * _budget))
+                        if _mid_scaled > mid_eval or _late_scaled > late_eval:
+                            sigma_budget_scaled = True
+                        mid_eval = int(max(mid_eval, _mid_scaled))
+                        late_eval = int(max(late_eval, _late_scaled, mid_eval))
         if int(focus3_eval_count) >= late_eval:
             sigma = late_sigma
             reason = "late_focus3"
@@ -1524,6 +1663,10 @@ def _resolve_focus3_best_local_sigma(
         "enabled": bool(enabled),
         "base": float(base),
         "effective": float(sigma),
+        "mid_eval": int(mid_eval),
+        "late_eval": int(late_eval),
+        "budget_scaled": bool(sigma_budget_scaled),
+        "available_budget": int(focus3_available_budget),
         "reason": str(reason),
         "focus3_eval_count": int(focus3_eval_count),
         "aion_profile": bool(is_aion_profile),
@@ -5974,6 +6117,7 @@ def _build_focus3_plan_refine_starts(
     recover_info: dict[str, object] | None = None,
     goal_internal: float | None = None,
     near_goal_exploitation_active: bool = False,
+    restart_exclude_radius: float = 0.0,
 ) -> tuple[np.ndarray, dict[str, int], dict[str, int], dict[str, object]]:
     n_pool = int(max(plan_pool_per_source, 1))
     n_refine = int(max(refine_starts, 1))
@@ -6095,6 +6239,7 @@ def _build_focus3_plan_refine_starts(
             best_local_elite_std_scale=float(getattr(system, "focus3_best_local_elite_std_scale", 0.75)),
             best_local_max_sigma=float(getattr(system, "focus3_best_local_max_sigma", 0.08)),
             best_local_anchor_best_prob=float(getattr(system, "focus3_best_local_anchor_best_prob", 0.45)),
+            restart_exclude_radius=float(restart_exclude_radius),
         )
         pool_counts[source] = int(pool.shape[0])
         scores = _acquisition_scores_for_pool(
@@ -6363,6 +6508,7 @@ def _build_focus3_plan_discrete_candidate(
     recover_info: dict[str, object] | None = None,
     goal_internal: float | None = None,
     near_goal_exploitation_active: bool = False,
+    restart_exclude_radius: float = 0.0,
 ) -> tuple[np.ndarray | None, dict[str, int], dict[str, int], dict[str, object]]:
     n_pool = int(max(plan_pool_per_source, 1))
     pool_counts: dict[str, int] = {}
@@ -6465,6 +6611,7 @@ def _build_focus3_plan_discrete_candidate(
             best_local_elite_std_scale=float(getattr(system, "focus3_best_local_elite_std_scale", 0.75)),
             best_local_max_sigma=float(getattr(system, "focus3_best_local_max_sigma", 0.08)),
             best_local_anchor_best_prob=float(getattr(system, "focus3_best_local_anchor_best_prob", 0.45)),
+            restart_exclude_radius=float(restart_exclude_radius),
         )
         pool_counts[source] = int(pool.shape[0])
         scores = _acquisition_scores_for_pool(
@@ -6828,6 +6975,7 @@ def _build_source_pool_starts(
     best_local_elite_std_scale: float = 0.75,
     best_local_max_sigma: float = 0.08,
     best_local_anchor_best_prob: float = 0.45,
+    restart_exclude_radius: float = 0.0,
 ) -> np.ndarray:
     n_dim = int(lb.shape[0])
     n = int(max(pool_size, 1))
@@ -6869,6 +7017,18 @@ def _build_source_pool_starts(
             n_top = int(max(1, round(float(X_train.shape[0]) * float(np.clip(topk_fraction, 0.01, 1.0)))))
             sigma = float(max(topk_sigma, 1e-4))
         top_idx = order[:n_top]
+        if source == "best_local" and float(restart_exclude_radius) > 0.0 and int(order.size) > 1:
+            # 탈출 장치: 전역 최고점에서 반경 밖에 있는 점만 앵커 후보로 남긴다.
+            # order는 이미 목적함수 순으로 정렬돼 있으므로 앞에서 자르면
+            # 자동으로 "먼 것들 중 최선"이 된다. 후보가 없으면 원래 동작 유지.
+            _gbest = np.asarray(X_train[order[0]], dtype=float).reshape(1, -1)
+            _far_d = np.linalg.norm(
+                (np.asarray(X_train[order], dtype=float) - _gbest) / span.reshape(1, -1),
+                axis=1,
+            ) / math.sqrt(float(max(n_dim, 1)))
+            _far_idx = order[_far_d >= float(restart_exclude_radius)]
+            if int(_far_idx.size) > 0:
+                top_idx = _far_idx[:n_top]
         per_dim_sigma = np.full(n_dim, sigma, dtype=float)
         if source == "best_local" and bool(best_local_anisotropic_enabled) and top_idx.size >= 2:
             elite = np.asarray(X_train[top_idx], dtype=float)
@@ -7645,6 +7805,14 @@ def run_bo_engine(
     focus1_early_stopped = False
     focus1_early_stop_reason = ""
     focus3_eval_count = 0
+    # 마무리 수렴(compass search) 상태
+    polish_base_x: np.ndarray | None = None
+    polish_base_y = float("nan")
+    polish_step = 0.0
+    polish_dir_k = 0
+    polish_sweep_improved = False
+    polish_eval_count = 0
+    polish_announced = False
     progress_log_every = int(max(int(getattr(system, "optimizer_progress_log_every", 25)), 0))
     timing_enabled = bool(getattr(system, "optimizer_timing_log_enabled", True))
     timing_keys = [
@@ -8665,6 +8833,29 @@ def run_bo_engine(
                                 str(focus3_acq_policy_info.get("reason", ""))
                                 + f"+goal_free_{plateau_state}"
                             )
+                    focus3_restart_info = _resolve_focus3_restart_policy(
+                        system=system,
+                        p_dim=int(p_dim),
+                        focus3_available_budget=int(focus3_available_budget),
+                        recover_info=focus3_recover_info,
+                        archive_size=int(X_train.shape[0]),
+                    )
+                    focus3_restart_radius = (
+                        float(focus3_restart_info.get("radius", 0.0))
+                        if bool(focus3_restart_info.get("active", False))
+                        else 0.0
+                    )
+                    if (
+                        bool(focus3_restart_info.get("active", False))
+                        and int(focus3_restart_info.get("no_improve", 0))
+                        == int(focus3_restart_info.get("threshold", 0))
+                    ):
+                        print(
+                            f"[Optimizer][Focus3][Restart] activated: "
+                            f"no_improve={int(focus3_restart_info.get('no_improve', 0))} "
+                            f"radius={float(focus3_restart_info.get('radius', 0.0)):.3f} "
+                            f"archive={int(X_train.shape[0])}"
+                        )
                     t0 = _timer_start()
                     if refine_this_iter:
                         refine_starts, pool_counts, selected_counts, focus3_plan_diag = _build_focus3_plan_refine_starts(
@@ -8703,6 +8894,7 @@ def run_bo_engine(
                             recover_info=focus3_recover_info,
                             goal_internal=goal_internal,
                             near_goal_exploitation_active=bool(focus3_near_goal_exploitation_info.get("active", False)),
+                            restart_exclude_radius=float(focus3_restart_radius),
                         )
                         focus3_plan_mode = "refine"
                     else:
@@ -8738,6 +8930,7 @@ def run_bo_engine(
                             recover_info=focus3_recover_info,
                             goal_internal=goal_internal,
                             near_goal_exploitation_active=bool(focus3_near_goal_exploitation_info.get("active", False)),
+                            restart_exclude_radius=float(focus3_restart_radius),
                         )
                         refine_starts = x_discrete.reshape(1, -1) if x_discrete is not None else np.empty((0, p_dim), dtype=float)
                         focus3_plan_mode = "discrete"
@@ -8931,6 +9124,70 @@ def run_bo_engine(
         x_next = np.clip(np.asarray(x_next, dtype=float).reshape(-1), lb, ub)
         if np.any(~np.isfinite(x_next)):
             x_next = rng.uniform(lb, ub, size=(lb.shape[0],))
+
+        # ---- 마무리 수렴(compass search) ----
+        # Focus3 막바지 예산을 좌표 패턴 탐색으로 돌린다. GP를 거치지 않고 실제
+        # 목적함수 값만 보고 현재 최고점에서 좌표축 ±방향으로 한 걸음씩 내려간다.
+        # dedup 뒤에 오므로 "최고점에 너무 가깝다"는 이유로 걸러지지 않는다.
+        # 제약이 있으면 아래 _sample_feasible_candidate가 그대로 보정한다.
+        if segment == "focus3":
+            _polish_budget = _resolve_focus3_polish_budget(
+                system=system,
+                focus3_budget=int(focus3_budget),
+                p_dim=int(p_dim),
+            )
+            if _polish_budget > 0 and int(focus3_eval_count) > int(focus3_budget) - _polish_budget:
+                _n_dir = int(max(2 * int(p_dim), 2))
+                _better = (
+                    (lambda a, b: float(a) > float(b))
+                    if str(objective_sense) == "max"
+                    else (lambda a, b: float(a) < float(b))
+                )
+                if polish_base_x is None:
+                    polish_base_x = np.asarray(best_x_raw, dtype=float).reshape(-1).copy()
+                    polish_base_y = float(best_y_raw)
+                    polish_step = float(max(
+                        float(getattr(system, "focus3_final_polish_init_step_ratio", 0.02)),
+                        1e-9,
+                    ))
+                    polish_dir_k = 0
+                    polish_sweep_improved = False
+                    if not polish_announced:
+                        polish_announced = True
+                        print(
+                            f"[Optimizer][Focus3][Polish] start: budget={_polish_budget} "
+                            f"step={polish_step:.4f} base={float(polish_base_y):.6f}"
+                        )
+                elif _better(best_y_raw, polish_base_y):
+                    # 직전 제안이 개선을 냈다 -> 기준점을 옮기고 보폭 유지
+                    polish_base_x = np.asarray(best_x_raw, dtype=float).reshape(-1).copy()
+                    polish_base_y = float(best_y_raw)
+                    polish_sweep_improved = True
+                _min_step = float(max(
+                    float(getattr(system, "focus3_final_polish_min_step_ratio", 1e-5)),
+                    1e-12,
+                ))
+                if float(polish_step) > _min_step:
+                    x_next = _focus3_polish_candidate(
+                        base_x=polish_base_x,
+                        lb=lb,
+                        ub=ub,
+                        step_ratio=float(polish_step),
+                        dir_index=int(polish_dir_k),
+                        p_dim=int(p_dim),
+                    )
+                    source_mode = "polish_compass"
+                    polish_eval_count += 1
+                    polish_dir_k += 1
+                    if int(polish_dir_k) % _n_dir == 0:
+                        # 한 sweep을 다 돌았는데 개선이 없으면 보폭을 줄인다
+                        if not bool(polish_sweep_improved):
+                            polish_step = float(polish_step) * float(np.clip(
+                                float(getattr(system, "focus3_final_polish_step_shrink", 0.5)),
+                                0.05,
+                                0.95,
+                            ))
+                        polish_sweep_improved = False
         if not pre_fallback_used:
             x_next = _sample_feasible_candidate(
                 x=x_next,

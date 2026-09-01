@@ -160,6 +160,16 @@ BATCH_DEBUG_LEVEL = "on"
 BATCH_CONTINUE_ON_ERROR = False
 BATCH_AION_MODE = True
 
+# Optimizer에게 목표값을 알려줄지 여부.
+#   "off" : ProblemCase.optimizer_goal을 그대로 쓴다(현재 전부 None).
+#           optimizer는 목표를 모른 채 예산을 끝까지 쓰고, 채점은 score_goal로만 한다.
+#           ** 국책 KPI 공식 점수는 반드시 이 모드로 측정한다. **
+#   "on"  : optimizer_goal이 None이면 score_goal 값을 주입한다.
+#           near-goal exploitation과 goal 기반 조기 종료가 살아난다.
+#           채점 기준을 탐색 입력으로 준 것이므로 이 모드 점수는 KPI로 쓸 수 없다.
+#           제품 기능 시연, 알고리즘 상한 확인, 개선 효과 대조 용도로만 쓴다.
+BATCH_OPTIMIZER_GOAL_MODE = "off"
+
 # 점수 실험에서는 문제별 n_samples/repeats를 고정한다.
 # 이 값은 편의용 runtime knob가 아니라 목표 예산이다.
 BATCH_FAST_OPTIMIZER_MODE = False
@@ -171,6 +181,7 @@ BATCH_OPTIMIZER_SYSTEM_OVERRIDES: dict[str, Any] = {
     # AION omitted-feature freeze 실험 예시:
     # "omitted_feature_freeze_mode": "user_value",
     # "omitted_feature_freeze_value": 0.0,
+    #
 }
 
 
@@ -461,7 +472,7 @@ def _build_pipeline_config(
             user=OptimizerUserConfig(
                 n_samples=int(max(int(optimizer_n_samples), 0)),
                 known_optimum=case.known_optimum,
-                goal=case.optimizer_goal,
+                goal=_resolve_effective_optimizer_goal(case),
             ),
             system=_build_optimizer_system_config(
                 debug_level=str(debug_level),
@@ -1178,6 +1189,20 @@ def _optimizer_goal_hit(*, best_objective: float, goal: float | None, objective_
     return bool(best <= target)
 
 
+def _resolve_effective_optimizer_goal(case: ProblemCase) -> float | None:
+    """Optimizer에게 실제로 전달할 goal. BATCH_OPTIMIZER_GOAL_MODE 참조."""
+    mode = str(BATCH_OPTIMIZER_GOAL_MODE).strip().lower()
+    if mode not in {"off", "on"}:
+        raise ValueError(
+            f"BATCH_OPTIMIZER_GOAL_MODE must be one of: off, on (got {BATCH_OPTIMIZER_GOAL_MODE!r})"
+        )
+    if mode == "off":
+        return case.optimizer_goal
+    if case.optimizer_goal is not None:
+        return case.optimizer_goal
+    return case.score_goal
+
+
 def _resolve_score_goal(case: ProblemCase) -> tuple[float | None, str]:
     if case.score_goal is not None:
         return float(case.score_goal), "score_goal"
@@ -1351,6 +1376,8 @@ def _save_optimizer_stats_csv(
         "executed_strategy",
         "objective_sense",
         "optimizer_goal",
+        "optimizer_goal_effective",
+        "optimizer_goal_mode",
         "optimizer_score_goal",
         "optimizer_score_goal_source",
         "optimizer_best_objective",
@@ -1729,6 +1756,11 @@ def main() -> None:
     if run_optimizer:
         print(f"- default_optimizer_n_samples={optimizer_n_samples_default}")
         print(
+            f"- optimizer_goal_mode={str(BATCH_OPTIMIZER_GOAL_MODE).strip().lower()}"
+            + ("  (KPI 채점 가능)" if str(BATCH_OPTIMIZER_GOAL_MODE).strip().lower() == "off"
+               else "  (** 비교용 전용 — KPI 점수로 쓰지 말 것 **)")
+        )
+        print(
             "- optimizer_goals="
             + ",".join(
                 [
@@ -1891,7 +1923,7 @@ def main() -> None:
                                         user=OptimizerUserConfig(
                                             n_samples=case_optimizer_n_samples,
                                             known_optimum=case.known_optimum,
-                                            goal=case.optimizer_goal,
+                                            goal=_resolve_effective_optimizer_goal(case),
                                         ),
                                         system=_build_optimizer_system_config(
                                             debug_level=debug_level,
@@ -1957,6 +1989,8 @@ def main() -> None:
                                             "executed_strategy": strategy.strategy_id,
                                             "objective_sense": str(case.objective_sense),
                                             "optimizer_goal": case.optimizer_goal,
+                                            "optimizer_goal_effective": _resolve_effective_optimizer_goal(case),
+                                            "optimizer_goal_mode": str(BATCH_OPTIMIZER_GOAL_MODE).strip().lower(),
                                             "optimizer_score_goal": score_goal,
                                             "optimizer_score_goal_source": score_goal_source,
                                             "optimizer_best_objective": opt_best,

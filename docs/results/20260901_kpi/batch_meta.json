@@ -1,0 +1,60 @@
+{
+  "batch_ts": "20260901_091126",
+  "mode": "aion",
+  "stats_schema_version": "2.0",
+  "git_commit": "2edbc7e6b643ad0e76d79c27205fc149c6a81f60",
+  "aion_mode": true,
+  "tasks": {
+    "doe": true,
+    "modeler": true,
+    "explorer": true,
+    "optimizer": true
+  },
+  "explorer_strategy_id": "S4_dual",
+  "modeler": {
+    "model_name": "gp",
+    "use_hpo": false,
+    "use_primary_selection": true
+  },
+  "doe": {
+    "use_additional": true
+  },
+  "fast_mode": {
+    "enabled": false,
+    "repeats_override": null
+  },
+  "problem_cases": [
+    {
+      "problem": "cantilever_beam",
+      "repeats": 25,
+      "n_samples": 90,
+      "optimizer_n_samples": 60,
+      "optimizer_goal": null,
+      "objective_sense": "min"
+    },
+    {
+      "problem": "rosenbrock",
+      "repeats": 10,
+      "n_samples": 450,
+      "optimizer_n_samples": 1050,
+      "optimizer_goal": null,
+      "objective_sense": "min"
+    },
+    {
+      "problem": "goldstein_price",
+      "repeats": 50,
+      "n_samples": 150,
+      "optimizer_n_samples": 350,
+      "optimizer_goal": null,
+      "objective_sense": "min"
+    },
+    {
+      "problem": "six_hump_camel",
+      "repeats": 25,
+      "n_samples": 35,
+      "optimizer_n_samples": 15,
+      "optimizer_goal": null,
+      "objective_sense": "min"
+    }
+  ]
+}

@@ -13,3 +13,4 @@ result/
 .agents/
 .claude/
 skills-lock.json
+autodesk_aion/

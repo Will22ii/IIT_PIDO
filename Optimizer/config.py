@@ -490,6 +490,36 @@ class OptimizerSystemConfig:
     focus3_aion_high_dim_recover_strong_no_improve: int = 80
     focus3_aion_high_dim_recover_mild_topk_scale: float = 0.35
     focus3_aion_high_dim_best_local_sigma_late: float = 0.006
+    # best_local sigma의 mid/late 전환 시점을 예산 비율로도 계산해 절대값과
+    # 비교 후 늦은 쪽을 쓴다. 절대값(mid_eval=40, late_eval=140)만 쓰면 예산이
+    # 큰 문제일수록 최소 보폭 구간이 비대해져 탐색 보폭이 사실상 사라진다.
+    # high_dim_policy(p_dim>=5 & budget>=200) 안에서만 적용된다.
+    # [탈출 장치] 깊은 정체 시 best_local 앵커를 전역 최고점이 아니라
+    # "전역 최고점에서 반경 밖에 있는 아카이브 점 중 최선"으로 돌린다.
+    # 전역 최고점이 죽은 국소최소일 때, 아카이브에 이미 들어와 있으나 현재
+    # 값이 나쁘다는 이유로 앵커가 되지 못하는 다른 영역을 되살리는 장치다.
+    # 상태를 들고 있지 않으며 no_improve_count가 리셋되면 자동 해제된다.
+    # high_dim_policy(p_dim>=5 & budget>=200) 안에서만 동작한다.
+    # [마무리 수렴] Focus3 종료 직전 일부 예산을 좌표 패턴 탐색(compass search)에
+    # 쓴다. plan_refine은 GP acquisition을 최적화하므로 좁고 굽은 골짜기 바닥에서는
+    # 방향을 못 잡는다. 이 단계는 대리모델을 거치지 않고 실제 목적함수 값만 보고
+    # 좌표축 ±방향으로 한 걸음씩 내려간다. 미분을 쓰지 않아 노이즈에 강하다.
+    # 한 iteration당 후보 1개만 제안하므로 기존 평가/아카이브 경로를 그대로 탄다.
+    # 예산이 작으면(sweep 2회분 미만) 발동하지 않는다.
+    focus3_final_polish_enabled: bool = True
+    focus3_final_polish_budget_ratio: float = 0.10
+    focus3_final_polish_max_evals: int = 200
+    focus3_final_polish_min_evals: int = 20
+    focus3_final_polish_init_step_ratio: float = 0.02
+    focus3_final_polish_step_shrink: float = 0.5
+    focus3_final_polish_min_step_ratio: float = 1e-5
+    focus3_aion_high_dim_restart_enabled: bool = True
+    focus3_aion_high_dim_restart_min_no_improve: int = 400
+    focus3_aion_high_dim_restart_min_distance: float = 0.25
+    focus3_aion_high_dim_restart_min_archive: int = 32
+    focus3_aion_high_dim_sigma_budget_scaled_enabled: bool = True
+    focus3_aion_high_dim_best_local_sigma_mid_budget_ratio: float = 0.30
+    focus3_aion_high_dim_best_local_sigma_late_budget_ratio: float = 0.60
     # 무제약 recovery는 boundary보다 random/topk 쪽으로 기울인다.
     focus3_no_constraint_recover_boundary_scale: float = 0.0
     focus3_no_constraint_recover_random_scale: float = 0.15
