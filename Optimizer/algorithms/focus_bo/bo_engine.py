@@ -1564,6 +1564,10 @@ def _resolve_focus3_restart_policy(
         except Exception:
             no_improve = 0
     threshold = int(max(int(getattr(system, "focus3_aion_high_dim_restart_min_no_improve", 400)), 1))
+    _ratio = float(getattr(system, "focus3_aion_high_dim_restart_min_no_improve_budget_ratio", 0.40))
+    if _ratio > 0.0 and int(focus3_available_budget) > 0:
+        # 예산 비례 임계와 절대 상한 중 이른 쪽. 예산이 작아도 장치가 살아있게 한다.
+        threshold = int(max(min(threshold, int(math.ceil(_ratio * float(focus3_available_budget)))), 1))
     info["no_improve"] = int(no_improve)
     info["threshold"] = int(threshold)
     if no_improve < threshold:

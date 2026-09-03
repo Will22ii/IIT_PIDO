@@ -252,6 +252,99 @@ def compute_gp_boundary_uncertainty(
     return weights
 
 
+def _expand_bounds_by_side_support(
+    *,
+    selected_bounds: list[Tuple[float, float]],
+    bounds: list[Tuple[float, float]],
+    min_volume_ratio: float,
+    support_lo: np.ndarray,
+    support_hi: np.ndarray,
+    step_ratio: float = 0.004,
+    max_iter: int = 4000,
+) -> list[Tuple[float, float]]:
+    """각 변의 지지 가중치에 비례해 최소부피까지 확장한다.
+
+    가중치가 큰 변(그 너머에 GP 상위 후보가 많은 변)이 더 많이 넓혀진다.
+    전역 경계는 넘지 않고, 목표 부피를 넘긴 마지막 스텝은 이분법으로 되돌려
+    부피가 min_volume_ratio를 초과하지 않게 한다.
+    """
+    d = len(bounds)
+    if d == 0 or len(selected_bounds) != d:
+        return selected_bounds
+    glb: list[tuple[float, float]] = []
+    S0: list[list[float]] = []
+    for (s_lb, s_ub), (g_lb, g_ub) in zip(selected_bounds, bounds):
+        gl, gu = float(min(g_lb, g_ub)), float(max(g_lb, g_ub))
+        lo = float(np.clip(min(s_lb, s_ub), gl, gu))
+        hi = float(np.clip(max(s_lb, s_ub), gl, gu))
+        glb.append((gl, gu))
+        S0.append([lo, hi])
+    w_lo = np.maximum(np.asarray(support_lo, dtype=float).reshape(-1), 1e-9)
+    w_hi = np.maximum(np.asarray(support_hi, dtype=float).reshape(-1), 1e-9)
+    if w_lo.size != d or w_hi.size != d:
+        return selected_bounds
+    min_v = float(np.clip(min_volume_ratio, 0.0, 1.0))
+
+    def _vol(S: list[list[float]]) -> float:
+        r = 1.0
+        for (lo, hi), (gl, gu) in zip(S, glb):
+            span = max(gu - gl, 1e-12)
+            r *= max(hi - lo, 0.0) / span
+        return float(r)
+
+    S = [list(x) for x in S0]
+    if _vol(S) >= min_v:
+        return [tuple(x) for x in S]
+    for _ in range(int(max_iter)):
+        if _vol(S) >= min_v:
+            break
+        moves: list[tuple[float, int, int]] = []
+        for j in range(d):
+            gl, gu = glb[j]
+            if S[j][0] > gl + 1e-12:
+                moves.append((float(w_lo[j]), j, 0))
+            if S[j][1] < gu - 1e-12:
+                moves.append((float(w_hi[j]), j, 1))
+        if not moves:
+            break
+        tot = sum(m[0] for m in moves)
+        for w, j, side in moves:
+            gl, gu = glb[j]
+            step = float(step_ratio) * (gu - gl) * (w / tot) * len(moves)
+            if side == 0:
+                S[j][0] = max(gl, S[j][0] - step)
+            else:
+                S[j][1] = min(gu, S[j][1] + step)
+    if _vol(S) > min_v + 1e-9:
+        # 초과분을 시작 상태와의 보간으로 되돌린다. 단, 전역 경계에 도달한 변은
+        # 그대로 둔다 — 경계에 붙은 최적점을 0.0001 차이로 잘라내는 사고 방지.
+        at_gl = [abs(S[j][0] - glb[j][0]) <= 1e-12 for j in range(d)]
+        at_gu = [abs(S[j][1] - glb[j][1]) <= 1e-12 for j in range(d)]
+
+        def _interp(t: float) -> list[list[float]]:
+            return [
+                [
+                    S[j][0] if at_gl[j] else S0[j][0] + t * (S[j][0] - S0[j][0]),
+                    S[j][1] if at_gu[j] else S0[j][1] + t * (S[j][1] - S0[j][1]),
+                ]
+                for j in range(d)
+            ]
+
+        if _vol(_interp(0.0)) > min_v:
+            # 경계 변만으로 이미 초과 — 되돌릴 수 없으므로 현 상태 유지
+            # (호출측 cap 단계가 boundary-pin 인식 축소로 처리한다)
+            return [tuple(x) for x in S]
+        lo_t, hi_t = 0.0, 1.0
+        for _ in range(50):
+            mid = 0.5 * (lo_t + hi_t)
+            if _vol(_interp(mid)) > min_v:
+                hi_t = mid
+            else:
+                lo_t = mid
+        S = _interp(lo_t)
+    return [tuple(x) for x in S]
+
+
 def apply_bounds_margin(
     *,
     selected_bounds: list[Tuple[float, float]],
@@ -260,6 +353,8 @@ def apply_bounds_margin(
     min_volume_ratio: float = 0.20,
     dim_weights: np.ndarray | None = None,
     center_hint: np.ndarray | None = None,
+    side_support_lo: np.ndarray | None = None,
+    side_support_hi: np.ndarray | None = None,
 ) -> list[Tuple[float, float]]:
     if not selected_bounds or not bounds or len(selected_bounds) != len(bounds):
         return selected_bounds
@@ -405,6 +500,20 @@ def apply_bounds_margin(
         return selected_bounds
     if raw_v >= min_v:
         return selected_bounds
+
+    # [지지가중 확장] 변별 지지 가중치가 오면 margin/booster 대신 이 경로만 쓴다.
+    # margin 사전 확장이 예산을 균등하게 소모해 지지 방향 몫이 줄어드는 것을 막는다.
+    if side_support_lo is not None and side_support_hi is not None:
+        try:
+            return _expand_bounds_by_side_support(
+                selected_bounds=selected_bounds,
+                bounds=bounds,
+                min_volume_ratio=min_v,
+                support_lo=side_support_lo,
+                support_hi=side_support_hi,
+            )
+        except Exception:
+            pass  # 실패 시 기존 경로로 폴백
 
     expanded = list(selected_bounds)
     base_margin = float(margin_ratio)

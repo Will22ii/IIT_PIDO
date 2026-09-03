@@ -175,6 +175,8 @@ BATCH_OPTIMIZER_GOAL_MODE = "off"
 BATCH_FAST_OPTIMIZER_MODE = False
 BATCH_FAST_REPEATS: int | None = None
 BATCH_FAST_OPTIMIZER_N_SAMPLES_BY_PROBLEM: dict[str, int] = {}
+# Explorer system 설정 override. BATCH_OPTIMIZER_SYSTEM_OVERRIDES와 같은 규약.
+BATCH_EXPLORER_SYSTEM_OVERRIDES: dict[str, Any] = {}
 BATCH_OPTIMIZER_SYSTEM_OVERRIDES: dict[str, Any] = {
     # 점수 실험에서는 optimizer 기본값을 보존한다. runtime tradeoff를 명시적으로
     # 테스트할 때만 임시 profiling override를 여기에 넣는다.
@@ -456,9 +458,14 @@ def _build_pipeline_config(
         doe_metadata_path=None,
     )
 
+    _explorer_system_cfg = ExplorerSystemConfig(debug_level=str(debug_level))
+    for _ov_key, _ov_val in BATCH_EXPLORER_SYSTEM_OVERRIDES.items():
+        if not hasattr(_explorer_system_cfg, _ov_key):
+            raise RuntimeError(f"Unknown explorer system override in run_pipelines.py: {_ov_key}")
+        setattr(_explorer_system_cfg, _ov_key, _ov_val)
     explorer_cfg = ExplorerConfig(
         user=ExplorerUserConfig(known_optimum=case.known_optimum),
-        system=ExplorerSystemConfig(debug_level=str(debug_level)),
+        system=_explorer_system_cfg,
         cae=cae_cfg,
         doe_csv_path=None,
         model_pkl_path=None,

@@ -113,6 +113,31 @@ class Focus3HighDimRestartPolicyTest(unittest.TestCase):
         self.assertEqual(str(info["reason"]), "not_stalled")
         self.assertEqual(int(info["threshold"]), 400)
 
+    def test_threshold_is_absolute_cap_at_large_budget(self) -> None:
+        # 예산 1050이면 비율(0.40*1050=420)보다 상한 400이 이른다 -> 기존 검증 동작 유지.
+        info = self._resolve(budget=1050, no_improve=400)
+        self.assertEqual(int(info["threshold"]), 400)
+        self.assertTrue(bool(info["active"]))
+
+    def test_threshold_scales_down_for_small_budget(self) -> None:
+        # 예산 300이면 임계 = min(400, ceil(0.40*300)) = 120.
+        # 고정 400이면 정체가 도달 불가능해 장치가 조용히 죽던 구간이다.
+        info = self._resolve(budget=300, no_improve=120)
+        self.assertEqual(int(info["threshold"]), 120)
+        self.assertTrue(bool(info["active"]))
+        info2 = self._resolve(budget=300, no_improve=119)
+        self.assertFalse(bool(info2["active"]))
+        self.assertEqual(str(info2["reason"]), "not_stalled")
+
+    def test_ratio_disabled_falls_back_to_absolute(self) -> None:
+        system = OptimizerSystemConfig(
+            focus_planner_profile="aion",
+            focus3_aion_high_dim_restart_min_no_improve_budget_ratio=0.0,
+        )
+        info = self._resolve(budget=300, no_improve=299, system=system)
+        self.assertFalse(bool(info["active"]))
+        self.assertEqual(int(info["threshold"]), 400)
+
     def test_archive_too_small(self) -> None:
         info = self._resolve(archive=31)
         self.assertFalse(bool(info["active"]))

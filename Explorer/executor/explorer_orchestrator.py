@@ -3480,6 +3480,49 @@ class ExplorerOrchestrator:
                     f"(boundary-pin-aware cap 적용 예정)"
                 )
 
+            # [지지가중 확장] 최소부피 확장에 쓸 변별 지지 가중치.
+            # GP 상위 후보(pred_score) 중 현재 박스 밖에 있는 것의 수를 변별로 센다.
+            _sup_lo = None
+            _sup_hi = None
+            if (
+                bool(getattr(self.config.system, "bounds_expand_pred_support_enabled", False))
+                and has_model_layer
+                and selected_bounds is not None
+                and len(selected_bounds) == len(bounds)
+                and "pred_score" in df.columns
+                and len(df) > 0
+            ):
+                try:
+                    _k = int(max(int(getattr(self.config.system, "bounds_expand_pred_support_top_k", 100)), 1))
+                    _k = min(_k, len(df))
+                    _sc = df["pred_score"].to_numpy(dtype=float)
+                    _ord = np.argsort(_sc) if str(objective_sense).strip().lower() == "min" else np.argsort(-_sc)
+                    _Xtop = df[selected_features].to_numpy(dtype=float)[_ord[:_k]]
+                    _base_w = float(max(
+                        float(getattr(self.config.system, "bounds_expand_pred_support_base_weight", 1.0)),
+                        1e-6,
+                    ))
+                    _lo_list = []
+                    _hi_list = []
+                    for _j, (_s_lb, _s_ub) in enumerate(selected_bounds):
+                        _blo = float(min(_s_lb, _s_ub))
+                        _bhi = float(max(_s_lb, _s_ub))
+                        _lo_list.append(_base_w + float((_Xtop[:, _j] < _blo).sum()))
+                        _hi_list.append(_base_w + float((_Xtop[:, _j] > _bhi).sum()))
+                    _sup_lo = np.asarray(_lo_list, dtype=float)
+                    _sup_hi = np.asarray(_hi_list, dtype=float)
+                    print(
+                        "[Explorer] pred-support expansion weights: "
+                        + ", ".join(
+                            f"{selected_features[_j]}(lo={_sup_lo[_j]:.0f},hi={_sup_hi[_j]:.0f})"
+                            for _j in range(len(selected_features))
+                        )
+                    )
+                except Exception as _sup_exc:
+                    print(f"[Explorer] pred-support weight 계산 실패, 기존 확장 사용: {_sup_exc}")
+                    _sup_lo = None
+                    _sup_hi = None
+
             selected_bounds = apply_bounds_margin(
                 selected_bounds=selected_bounds,
                 bounds=bounds,
@@ -3487,6 +3530,8 @@ class ExplorerOrchestrator:
                 min_volume_ratio=float(self.config.system.bounds_min_volume_ratio),
                 dim_weights=dim_weights,
                 center_hint=_center_hint_arr,
+                side_support_lo=_sup_lo,
+                side_support_hi=_sup_hi,
             )
 
             # G 진단: cap 진입 직전 selected_bounds volume ratio (전 전략 공통)

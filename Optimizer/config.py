@@ -514,7 +514,12 @@ class OptimizerSystemConfig:
     focus3_final_polish_step_shrink: float = 0.5
     focus3_final_polish_min_step_ratio: float = 1e-5
     focus3_aion_high_dim_restart_enabled: bool = True
+    # min_no_improve는 상한(절대 증거 기준)이고, 실제 임계는 예산 비율과의 min이다:
+    #   threshold = min(min_no_improve, ceil(ratio * focus3_budget))
+    # 고정값만 쓰면 예산이 작은 문제(200~400회)에서 임계에 도달할 수 없어
+    # 장치가 조용히 죽는다. ratio<=0이면 비율을 끄고 절대값만 쓴다.
     focus3_aion_high_dim_restart_min_no_improve: int = 400
+    focus3_aion_high_dim_restart_min_no_improve_budget_ratio: float = 0.40
     focus3_aion_high_dim_restart_min_distance: float = 0.25
     focus3_aion_high_dim_restart_min_archive: int = 32
     focus3_aion_high_dim_sigma_budget_scaled_enabled: bool = True

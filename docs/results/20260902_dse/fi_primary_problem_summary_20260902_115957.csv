@@ -1,0 +1,5 @@
+﻿problem,tries,fi_all_real_included_pct,fi_real_only_success_pct,modeler_real_coverage_pct_mean,modeler_real_coverage_pct_std,selected_feature_count_mean,selected_feature_count_std,modeler_selected_dummy_count_mean
+cantilever_beam,25,100.0,100.0,100.0,0.0,4.0,0.0,0.0
+goldstein_price,50,100.0,100.0,100.0,0.0,2.0,0.0,0.0
+rosenbrock,10,100.0,100.0,100.0,0.0,5.0,0.0,0.0
+six_hump_camel,25,100.0,100.0,100.0,0.0,2.0,0.0,0.0

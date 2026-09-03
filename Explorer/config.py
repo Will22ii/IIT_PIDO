@@ -24,6 +24,14 @@ class ExplorerSystemConfig:
     # 3) bounds 확장/클리핑
     bounds_margin_ratio: float = 0.03
     bounds_min_volume_ratio: float = 0.2499
+    # [지지가중 확장] 최소부피 확장 시, 각 변(차원x방향) 너머에 있는 GP 상위 후보
+    # 수에 비례해 확장 폭을 배분한다. obj 클러스터(데이터)가 못 본 방향이라도
+    # 모델이 유망하다고 보면 헤지 폭이 그쪽으로 간다. 정답 좌표는 쓰지 않는다.
+    # off면 기존 균등(+floor booster) 확장 그대로.
+    # 20260902 110런 검증: DSE 105->108/110, RB/GP 무손상, KPI 6/6 유지·개선.
+    bounds_expand_pred_support_enabled: bool = True
+    bounds_expand_pred_support_top_k: int = 100
+    bounds_expand_pred_support_base_weight: float = 1.0
     bounds_expansion_mode: str = "uniform"
     bounds_weight_clip_min: float = 0.7
     bounds_weight_clip_max: float = 1.5

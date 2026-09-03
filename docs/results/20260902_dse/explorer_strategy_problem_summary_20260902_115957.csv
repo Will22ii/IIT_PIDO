@@ -1,0 +1,5 @@
+﻿strategy,problem,tries,joint_pass_pct,explorer_bounds_pass_pct,survivor_optimum_included_pct,modeler_all_real_included_pct,modeler_all_real_only_pct,modeler_real_coverage_pct_mean,volume_ratio_pct_mean,volume_cap_pass_pct,feature_fail_pct,over_shrink_fail_pct,over_wide_fail_pct,both_fail_pct
+S4_dual,cantilever_beam,25,92.0,92.0,92.0,100.0,100.0,100.0,24.989999999999995,100.0,0.0,8.0,0.0,0.0
+S4_dual,goldstein_price,50,100.0,100.0,100.0,100.0,100.0,100.0,24.989999999999988,100.0,0.0,0.0,0.0,0.0
+S4_dual,rosenbrock,10,100.0,100.0,100.0,100.0,100.0,100.0,24.98999999999998,100.0,0.0,0.0,0.0,0.0
+S4_dual,six_hump_camel,25,100.0,100.0,100.0,100.0,100.0,100.0,24.989999999999995,100.0,0.0,0.0,0.0,0.0
